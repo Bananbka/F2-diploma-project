@@ -61,6 +61,17 @@
         }
     }
 
+    <!-- Attribution, not attestation. The copy is sealed and signed by whoever forwarded it, so this
+         names the original author without ever earning the verified marker. -->
+    @if (message().forwardedFrom) {
+        <p class="forwarded">
+            <lucide-icon [img]="forwardIcon" />
+            <span
+                >Forwarded from <strong>{{ forwardedAuthor() }}</strong></span
+            >
+        </p>
+    }
+
     <div class="bubble">
         @if (view().icon; as statusIcon) {
             <lucide-icon

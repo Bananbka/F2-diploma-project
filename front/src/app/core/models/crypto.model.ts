@@ -133,6 +133,17 @@ export interface MessageAttachment {
     content_type: string;
 }
 
+/**
+ * Who wrote a forwarded message originally.
+ *
+ * The server stores this verbatim and cannot verify it: a forward under E2E is a re-send, sealed and
+ * signed by the forwarder. It is attribution, not attestation.
+ */
+export interface ForwardOrigin {
+    user_id: string;
+    created_at: string;
+}
+
 export interface MessageResponse {
     _id: string;
     chat_id: string;
@@ -142,6 +153,7 @@ export interface MessageResponse {
     channel_post: ChannelPostPayload | null;
     content_format: ContentFormat;
     reply_to_message_id: string | null;
+    forwarded_from: ForwardOrigin | null;
     created_at: string;
     attachments: MessageAttachment[] | null;
     is_read: boolean;

@@ -84,6 +84,22 @@ class ChannelPost(BaseModel):
     sig: str = Field(..., max_length=128)
 
 
+class ForwardOrigin(BaseModel):
+    """Who wrote a forwarded message originally, and when.
+
+    Structured rather than prefixed into the plaintext: a prefix cannot be styled apart from the
+    message, cannot be resolved to a current display name, and accumulates on every re-forward.
+
+    The server **cannot verify any of this**. A forward under E2E is a re-send — the copy is sealed
+    and signed by the forwarder, so this is the forwarder's claim about provenance, not an
+    attestation. Clients must present it as attribution and must never let it produce a verified
+    marker. Carrying the original author's signature would require re-sealing their envelope, which
+    only they could do.
+    """
+    user_id: uuid.UUID
+    created_at: datetime.datetime
+
+
 class MessageDocument(BaseModel):
     chat_id: uuid.UUID
     sender_id: uuid.UUID
@@ -95,6 +111,7 @@ class MessageDocument(BaseModel):
     content_format: ContentFormat = ContentFormat.LEGACY_PLAINTEXT
 
     reply_to_message_id: str | None = None
+    forwarded_from: ForwardOrigin | None = None
 
     attachments: list[dict] | None = None
 
@@ -116,6 +133,7 @@ class MessageResponse(BaseModel):
     content_format: ContentFormat = ContentFormat.LEGACY_PLAINTEXT
 
     reply_to_message_id: str | None = None
+    forwarded_from: ForwardOrigin | None = None
     created_at: datetime.datetime
 
     attachments: list[dict] | None = None
@@ -147,6 +165,9 @@ class MessageCreateRequest(BaseModel):
     channel_post: ChannelPost | None = None
 
     reply_to_message_id: str | None = None
+    # Client-supplied and unverifiable — see ForwardOrigin. Stored as given so the receiving client
+    # can attribute the copy; the server has no way to confirm it and does not pretend to.
+    forwarded_from: ForwardOrigin | None = None
     attachments: list[Attachment] | None = None
 
     @model_validator(mode="after")

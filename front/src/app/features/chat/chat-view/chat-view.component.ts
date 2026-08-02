@@ -46,6 +46,13 @@ import {
 import { ComposedMessage, ComposerComponent } from '../composer/composer.component';
 import { MessageBubbleComponent } from '../message-bubble/message-bubble.component';
 
+/**
+ * How far the pointer must travel before a press becomes a message sweep rather than a click.
+ *
+ * Small enough to feel immediate, large enough that an unsteady click is not mistaken for a drag.
+ */
+const DRAG_SELECT_THRESHOLD_PX = 8;
+
 @Component({
     selector: 'app-chat-view',
     imports: [
@@ -252,6 +259,7 @@ export class ChatViewComponent {
             status: 'ok',
             isEdited: false,
             replyToId: null,
+            forwardedFrom: null,
             attachments: [],
             senderVerified: true,
         };
@@ -345,6 +353,84 @@ export class ChatViewComponent {
 
     toggleSelected(messageId: string): void {
         this.store.toggleSelected(messageId);
+    }
+
+    /**
+     * Press and drag across messages to select a range.
+     *
+     * The threshold is what keeps this from stealing text selection: nothing happens until the
+     * pointer has travelled past it *and* reached a different message. Below that it is an ordinary
+     * click, and a small drag inside one message still highlights words as usual. Only a deliberate
+     * sweep across messages is read as picking them.
+     */
+    onListPointerDown(event: MouseEvent): void {
+        if (event.button !== 0) {
+            return;
+        }
+
+        const anchor = this.messageIdAt(event.clientX, event.clientY);
+        if (!anchor) {
+            return;
+        }
+
+        const startY = event.clientY;
+        const before = new Set(this.store.selectedIds());
+        let dragging = false;
+
+        const onMove = (move: MouseEvent) => {
+            const over = this.messageIdAt(move.clientX, move.clientY);
+            if (!over) {
+                return;
+            }
+
+            if (!dragging) {
+                if (Math.abs(move.clientY - startY) < DRAG_SELECT_THRESHOLD_PX || over === anchor) {
+                    return;
+                }
+                dragging = true;
+                // The browser has already begun highlighting text by now; drop it so the sweep does
+                // not leave a selection behind the picked messages.
+                window.getSelection()?.removeAllRanges();
+            }
+
+            move.preventDefault();
+            this.selectRange(before, anchor, over);
+        };
+
+        const onUp = () => {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+        };
+
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    }
+
+    /** Which message the pointer is over, if any. */
+    private messageIdAt(x: number, y: number): string | null {
+        const element = document.elementFromPoint(x, y)?.closest<HTMLElement>('app-message-bubble');
+        return element?.id?.startsWith('msg-') ? element.id.slice(4) : null;
+    }
+
+    /**
+     * Replace the drag's contribution on every move.
+     *
+     * Recomputed from the selection as it stood when the drag began, so sweeping back up unselects
+     * what overshooting had picked instead of leaving it stuck on.
+     */
+    private selectRange(before: ReadonlySet<string>, anchorId: string, currentId: string): void {
+        const ids = this.conversation()
+            .filter((item) => item.kind === 'message')
+            .map((item) => (item as { message: DecryptedMessage }).message.id);
+
+        const from = ids.indexOf(anchorId);
+        const to = ids.indexOf(currentId);
+        if (from < 0 || to < 0) {
+            return;
+        }
+
+        const span = ids.slice(Math.min(from, to), Math.max(from, to) + 1);
+        this.store.selectedIds.set(new Set([...before, ...span]));
     }
 
     cancelSelection(): void {

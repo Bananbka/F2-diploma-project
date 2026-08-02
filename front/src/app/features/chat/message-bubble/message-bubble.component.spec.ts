@@ -17,6 +17,7 @@ function message(overrides: Partial<DecryptedMessage> = {}): DecryptedMessage {
         status: 'ok',
         isEdited: false,
         replyToId: null,
+        forwardedFrom: null,
         attachments: [],
         senderVerified: false,
         ...overrides,

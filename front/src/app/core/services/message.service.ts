@@ -6,7 +6,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { signChannelPost, verifyChannelPost } from '../crypto/channel';
 import { openMessage, sealMessage } from '../crypto/envelope';
 import { b64uDecode, fromUtf8, utf8 } from '../crypto/primitives';
-import { ChatKeys, MessageAttachment, MessageResponse } from '../models/crypto.model';
+import { ChatKeys, ForwardOrigin, MessageAttachment, MessageResponse } from '../models/crypto.model';
 import { ChatApiService } from './chat-api.service';
 import { CryptoApiService } from './crypto-api.service';
 import { isCryptoNotEnabled } from './crypto-errors';
@@ -31,6 +31,8 @@ export interface DecryptedMessage {
     isEdited: boolean;
     /** The message this one answers, if any. Server-persisted all along; only the UI was missing. */
     replyToId: string | null;
+    /** Present when this is a forwarded copy. Unverifiable — see ForwardOrigin. */
+    forwardedFrom: ForwardOrigin | null;
     attachments: MessageAttachment[];
     /** True only when a signature was checked and passed. */
     senderVerified: boolean;
@@ -68,12 +70,13 @@ export class MessageService {
         chatId: string,
         text: string,
         replyTo?: string,
-        attachments?: MessageAttachment[]
+        attachments?: MessageAttachment[],
+        forwardedFrom?: ForwardOrigin
     ): Promise<MessageResponse> {
         const keys = await firstValueFrom(this.cryptoApi.getChatKeys(chatId));
 
         try {
-            return await this.sealAndSend(chatId, keys.current_epoch, text, replyTo, attachments);
+            return await this.sealAndSend(chatId, keys.current_epoch, text, replyTo, attachments, forwardedFrom);
         } catch (error) {
             if (!this.isEpochStale(error)) {
                 throw error;
@@ -83,7 +86,7 @@ export class MessageService {
                 this.epochFromError(error) ?? (await firstValueFrom(this.cryptoApi.getChatKeys(chatId))).current_epoch;
 
             this.keyStore.invalidateSenderChain(chatId, keys.current_epoch);
-            return this.sealAndSend(chatId, currentEpoch, text, replyTo, attachments);
+            return this.sealAndSend(chatId, currentEpoch, text, replyTo, attachments, forwardedFrom);
         }
     }
 
@@ -92,7 +95,8 @@ export class MessageService {
         epoch: number,
         text: string,
         replyTo?: string,
-        attachments?: MessageAttachment[]
+        attachments?: MessageAttachment[],
+        forwardedFrom?: ForwardOrigin
     ): Promise<MessageResponse> {
         const identity = this.keyStore.currentIdentity;
         if (!identity) {
@@ -114,7 +118,7 @@ export class MessageService {
             plaintext: utf8(text),
         });
 
-        return firstValueFrom(this.chatApi.sendEnvelope(chatId, envelope, replyTo, attachments));
+        return firstValueFrom(this.chatApi.sendEnvelope(chatId, envelope, replyTo, attachments, forwardedFrom));
     }
 
     /**
@@ -301,6 +305,7 @@ export class MessageService {
             createdAt: sent.created_at,
             isEdited: sent.is_edited,
             replyToId: sent.reply_to_message_id,
+            forwardedFrom: sent.forwarded_from,
             attachments: sent.attachments ?? [],
             text: plaintext,
             status: sent.content_format === 'channel_signed_v1' ? 'plaintext' : 'ok',
@@ -320,6 +325,7 @@ export class MessageService {
             createdAt: message.created_at,
             isEdited: message.is_edited,
             replyToId: message.reply_to_message_id,
+            forwardedFrom: message.forwarded_from,
             attachments: message.attachments ?? [],
         };
 

@@ -23,6 +23,7 @@ function decrypted(id: string, status: DecryptStatus): DecryptedMessage {
         status,
         isEdited: false,
         replyToId: null,
+        forwardedFrom: null,
         attachments: [],
         senderVerified: false,
     };

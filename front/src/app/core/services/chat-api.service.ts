@@ -5,7 +5,7 @@ import { map, Observable } from 'rxjs';
 import { MessageEnvelope } from '../crypto/envelope';
 import { SuccessResponse } from '../models/api.model';
 import { Chat, ChatParticipant, ParticipantRole, UserSearchResult } from '../models/chat.model';
-import { ChannelPostPayload, MessageAttachment, MessageResponse } from '../models/crypto.model';
+import { ChannelPostPayload, ForwardOrigin, MessageAttachment, MessageResponse } from '../models/crypto.model';
 import { ConfigService } from './config.service';
 
 @Injectable({ providedIn: 'root' })
@@ -87,7 +87,8 @@ export class ChatApiService {
         chatId: string,
         envelope: MessageEnvelope,
         replyTo?: string,
-        attachments?: MessageAttachment[]
+        attachments?: MessageAttachment[],
+        forwardedFrom?: ForwardOrigin
     ): Observable<MessageResponse> {
         return this.http
             .post<SuccessResponse<MessageResponse>>(this.messagesUrl, {
@@ -95,6 +96,7 @@ export class ChatApiService {
                 envelope,
                 reply_to_message_id: replyTo ?? null,
                 attachments: attachments?.length ? attachments : null,
+                forwarded_from: forwardedFrom ?? null,
             })
             .pipe(map((r) => r.data));
     }

@@ -16,6 +16,7 @@ import {
     Check,
     CheckCheck,
     Clock,
+    Forward,
     Lock,
     LucideAngularModule,
     LucideIconData,
@@ -240,6 +241,16 @@ export class MessageBubbleComponent {
     readonly editIcon = Pencil;
     readonly paperclipIcon = Paperclip;
     readonly moreIcon = MoreVertical;
+    readonly forwardIcon = Forward;
+
+    /** The original author of a forwarded copy, resolved like any other sender. */
+    readonly forwardedAuthor = computed(() => {
+        const origin = this.message().forwardedFrom;
+        if (!origin) {
+            return '';
+        }
+        return this.directory.isMe(origin.user_id) ? 'you' : this.directory.lookup(origin.user_id).name;
+    });
 
     /**
      * Open the actions menu at the pointer.

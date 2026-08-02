@@ -386,3 +386,26 @@
         opacity: 1;
     }
 }
+
+/* Its own line above the bubble, like the reply quote — a property of the message rather than part
+   of its text, which is what the old inline prefix got wrong. */
+.forwarded {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    margin: 0 0 0.25rem 0.25rem;
+    color: var(--muted-foreground);
+    font-size: 0.6875rem;
+    font-style: italic;
+
+    lucide-icon {
+        width: 0.75rem;
+        height: 0.75rem;
+    }
+
+    strong {
+        color: var(--primary);
+        font-style: normal;
+        font-weight: 500;
+    }
+}

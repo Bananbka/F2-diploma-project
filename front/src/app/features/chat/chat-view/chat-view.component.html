@@ -126,6 +126,7 @@
         class="scroll"
         #scroller
         (scroll)="onScroll()"
+        (mousedown)="onListPointerDown($event)"
     >
         @if (loading() && conversation().length === 0) {
             <p class="status">Decrypting conversation…</p>

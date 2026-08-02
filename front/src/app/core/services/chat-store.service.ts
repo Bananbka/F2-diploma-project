@@ -578,14 +578,19 @@ export class ChatStoreService {
 
         let sent = 0;
         for (const message of readable) {
-            const author = this.directory.isMe(message.senderId) ? 'you' : this.directory.lookup(message.senderId).name;
-            const body = `Forwarded from ${author}:\n${message.text}`;
+            // Forwarding a forward keeps pointing at whoever wrote it first rather than chaining.
+            // The old text prefix stacked a line per hop, which was both noise and wrong: the second
+            // hop did not originate with the first forwarder.
+            const origin = message.forwardedFrom ?? { user_id: message.senderId, created_at: message.createdAt };
 
             try {
                 if (target?.chat_type === 'channel') {
-                    await this.messages_.sendChannelPost(targetChatId, body);
+                    // Channel posts carry no forward metadata, so attribution would be dropped
+                    // silently. Sending the text unchanged is honest: it is a post by us, and that is
+                    // what the recipient sees.
+                    await this.messages_.sendChannelPost(targetChatId, message.text!);
                 } else {
-                    await this.messages_.sendText(targetChatId, body);
+                    await this.messages_.sendText(targetChatId, message.text!, undefined, undefined, origin);
                 }
                 sent += 1;
             } catch {
