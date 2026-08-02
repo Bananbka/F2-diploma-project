@@ -94,7 +94,21 @@ export class ChatViewComponent {
 
     /** Open only while choosing where to forward to. */
     readonly forwardPickerOpen = signal(false);
-    readonly forwardTargets = computed(() => this.store.chats().filter((c) => c.id !== this.chatId()));
+
+    /**
+     * Every conversation, including this one.
+     *
+     * Forwarding back into the same chat is a normal thing to want — quoting something from further
+     * up so it lands at the bottom. The current chat is marked rather than removed.
+     */
+    readonly forwardTargets = computed(() => {
+        const current = this.chatId();
+        return [...this.store.chats()].sort((a, b) => Number(b.id === current) - Number(a.id === current));
+    });
+
+    isCurrentChat(chat: Chat): boolean {
+        return chat.id === this.chatId();
+    }
 
     readonly isChannel = computed(() => this.chat()?.chat_type === 'channel');
     readonly isGroupLike = computed(() => this.chat()?.chat_type !== 'private');

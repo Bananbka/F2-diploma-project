@@ -370,10 +370,13 @@
                             [seed]="target.id"
                             [imageUrl]="target.avatar_url"
                         />
-                        <span>{{ titleOfChat(target) }}</span>
+                        <span class="picker-name">{{ titleOfChat(target) }}</span>
+                        @if (isCurrentChat(target)) {
+                            <span class="picker-hint">This chat</span>
+                        }
                     </button>
                 } @empty {
-                    <p class="picker-empty">No other conversations to forward to.</p>
+                    <p class="picker-empty">No conversations to forward to.</p>
                 }
             </div>
         </div>
