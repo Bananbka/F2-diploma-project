@@ -8,6 +8,45 @@
     justify-content: flex-end;
 }
 
+/* ── Bulk selection ───────────────────────────────────────────────────────────────────────── */
+
+:host(.is-selectable) {
+    cursor: pointer;
+    /* A double-click picks messages here rather than replying, so let it select text as usual. */
+    user-select: none;
+
+    &:hover {
+        background: rgb(255 255 255 / 3%);
+    }
+}
+
+:host(.is-selected) {
+    background: rgb(163 88 249 / 10%);
+}
+
+.pick {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    align-self: center;
+    width: 1.125rem;
+    height: 1.125rem;
+    border: 2px solid rgb(139 139 154 / 40%);
+    border-radius: 50%;
+    color: #fff;
+
+    &.is-on {
+        background: var(--primary);
+        border-color: var(--primary);
+    }
+
+    lucide-icon {
+        width: 0.625rem;
+        height: 0.625rem;
+    }
+}
+
 .who {
     margin-top: 1.25rem;
 }

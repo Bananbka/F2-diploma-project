@@ -139,6 +139,52 @@ describe('MessageBubbleComponent', () => {
         expect(asked).toBeTrue();
     });
 
+    /** Telegram's gesture. Suppressing the default keeps a stray word-selection off the screen. */
+    it('replies on double-click and suppresses the word selection', () => {
+        fixture.componentRef.setInput('message', message());
+        fixture.detectChanges();
+
+        const replied: string[] = [];
+        fixture.componentInstance.replyRequested.subscribe((m) => replied.push(m.id));
+
+        const event = new MouseEvent('dblclick', { cancelable: true });
+        (fixture.nativeElement as HTMLElement).dispatchEvent(event);
+
+        expect(replied).toEqual(['m1']);
+        expect(event.defaultPrevented).toBeTrue();
+    });
+
+    /** While picking messages, a double-click must not fire a reply behind the selection. */
+    it('does not reply on double-click while selecting', () => {
+        fixture.componentRef.setInput('message', message());
+        fixture.componentRef.setInput('selecting', true);
+        fixture.detectChanges();
+
+        let replied = false;
+        fixture.componentInstance.replyRequested.subscribe(() => (replied = true));
+
+        (fixture.nativeElement as HTMLElement).dispatchEvent(new MouseEvent('dblclick', { cancelable: true }));
+
+        expect(replied).toBeFalse();
+    });
+
+    it('toggles selection on a plain click only while selecting', () => {
+        fixture.componentRef.setInput('message', message());
+        fixture.detectChanges();
+
+        const toggled: string[] = [];
+        fixture.componentInstance.selectionToggled.subscribe((id) => toggled.push(id));
+
+        (fixture.nativeElement as HTMLElement).click();
+        expect(toggled).toEqual([]);
+
+        fixture.componentRef.setInput('selecting', true);
+        fixture.detectChanges();
+        (fixture.nativeElement as HTMLElement).click();
+
+        expect(toggled).toEqual(['m1']);
+    });
+
     it('does not offer editing for a message it could not open', () => {
         fixture.componentRef.setInput('message', message({ status: 'failed', text: null }));
         fixture.detectChanges();

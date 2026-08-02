@@ -116,6 +116,10 @@ const STATUS_VIEWS: Record<DecryptStatus, StatusView> = {
     changeDetection: ChangeDetectionStrategy.OnPush,
     host: {
         '(contextmenu)': 'onContextMenu($event)',
+        '(dblclick)': 'onDoubleClick($event)',
+        '(click)': 'onClick()',
+        '[class.is-selectable]': 'selecting()',
+        '[class.is-selected]': 'selected()',
         // Addressable so a reply quote can scroll to the message it quotes.
         '[attr.id]': '"msg-" + message().id',
         '[class.is-outgoing]': 'isOwn()',
@@ -151,6 +155,11 @@ export class MessageBubbleComponent {
     readonly menuRequested = output<{ message: DecryptedMessage; x: number; y: number }>();
     /** Tapping a quote asks to be taken to the message it quotes. */
     readonly jumpRequested = output<string>();
+    readonly selectionToggled = output<string>();
+
+    /** True while a bulk selection is in progress anywhere in the conversation. */
+    readonly selecting = input(false);
+    readonly selected = input(false);
 
     /** The message this one answers, if it is on screen. */
     readonly replyTo = input<DecryptedMessage | null>(null);
@@ -242,6 +251,30 @@ export class MessageBubbleComponent {
     onContextMenu(event: MouseEvent): void {
         event.preventDefault();
         this.menuRequested.emit({ message: this.message(), x: event.clientX, y: event.clientY });
+    }
+
+    /**
+     * Double-click replies, the way Telegram does.
+     *
+     * The default action is suppressed because a double-click would otherwise select a word, leaving
+     * a stray highlight behind every reply. Suppressed only when it actually starts a reply, so
+     * double-clicking to select a word still works while picking messages for a bulk action.
+     */
+    onDoubleClick(event: MouseEvent): void {
+        if (this.selecting()) {
+            return;
+        }
+
+        event.preventDefault();
+        window.getSelection()?.removeAllRanges();
+        this.replyRequested.emit(this.message());
+    }
+
+    /** While a selection is in progress a plain click picks messages rather than doing nothing. */
+    onClick(): void {
+        if (this.selecting()) {
+            this.selectionToggled.emit(this.message().id);
+        }
     }
 
     /** Touch and trackpad users who have no right button still need a way in. */

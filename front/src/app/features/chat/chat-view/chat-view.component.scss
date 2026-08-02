@@ -300,6 +300,142 @@
     }
 }
 
+/* ── Bulk selection ───────────────────────────────────────────────────────────────────────── */
+
+.selection-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-shrink: 0;
+    padding: 0.75rem 1rem;
+    background: var(--card);
+    border-top: 1px solid var(--border);
+}
+
+.selection-cancel {
+    @include ui.icon-button(2rem);
+
+    lucide-icon {
+        width: 1rem;
+        height: 1rem;
+    }
+}
+
+.selection-count {
+    flex: 1;
+    min-width: 0;
+    color: var(--foreground);
+    font-size: 0.8125rem;
+}
+
+.selection-note {
+    color: var(--warn);
+}
+
+.selection-action {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    flex-shrink: 0;
+    padding: 0.375rem 0.75rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    color: var(--foreground);
+    font-size: 0.75rem;
+
+    &:hover:not(:disabled) {
+        border-color: rgb(163 88 249 / 40%);
+    }
+
+    &:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+    }
+
+    &.is-danger {
+        color: var(--danger);
+
+        &:hover:not(:disabled) {
+            background: var(--danger-surface);
+            border-color: var(--danger-border);
+        }
+    }
+
+    lucide-icon {
+        width: 0.875rem;
+        height: 0.875rem;
+    }
+}
+
+/* ── Forward target picker ────────────────────────────────────────────────────────────────── */
+
+.picker-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 70;
+    background: rgb(0 0 0 / 55%);
+}
+
+.picker {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    z-index: 71;
+    width: min(24rem, calc(100vw - 2rem));
+    max-height: min(30rem, calc(100vh - 4rem));
+    padding: 1rem;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-2xl);
+    box-shadow: 0 24px 60px rgb(0 0 0 / 60%);
+    transform: translate(-50%, -50%);
+    overflow-y: auto;
+}
+
+.picker-title {
+    margin: 0;
+    color: var(--foreground);
+    font-size: 0.9375rem;
+    font-weight: 600;
+}
+
+.picker-note {
+    margin: 0.375rem 0 0.875rem;
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+    line-height: 1.55;
+}
+
+.picker-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+}
+
+.picker-item {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    padding: 0.5rem;
+    background: none;
+    border: none;
+    border-radius: var(--radius-lg);
+    color: var(--foreground);
+    font-size: 0.875rem;
+    text-align: left;
+
+    &:hover {
+        background: rgb(163 88 249 / 12%);
+    }
+}
+
+.picker-empty {
+    margin: 0;
+    color: var(--muted-foreground);
+    font-size: 0.8125rem;
+}
+
 /* ── Reply / edit context above the composer ──────────────────────────────────────────────── */
 
 .compose-context {

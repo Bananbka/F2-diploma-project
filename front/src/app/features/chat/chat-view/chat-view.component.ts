@@ -14,7 +14,9 @@ import { Router, RouterLink } from '@angular/router';
 import {
     AlertTriangle,
     ArrowLeft,
+    CheckCheck,
     Copy,
+    Forward,
     Info,
     LucideAngularModule,
     MessageSquare,
@@ -30,6 +32,7 @@ import {
     X,
 } from 'lucide-angular';
 
+import { Chat } from '../../../core/models/chat.model';
 import { ChatStoreService, ConversationItem, PendingMessage } from '../../../core/services/chat-store.service';
 import { DirectoryService } from '../../../core/services/directory.service';
 import { DecryptedMessage } from '../../../core/services/message.service';
@@ -82,6 +85,16 @@ export class ChatViewComponent {
 
     readonly menuItems = signal<ContextMenuItem[]>([]);
     readonly menuAnchor = signal<MenuAnchor | null>(null);
+
+    readonly isSelecting = this.store.isSelecting;
+    readonly selectedIds = this.store.selectedIds;
+    readonly selectionCount = this.store.selectionCount;
+    readonly forwardableCount = this.store.forwardableCount;
+    readonly deletableCount = this.store.deletableCount;
+
+    /** Open only while choosing where to forward to. */
+    readonly forwardPickerOpen = signal(false);
+    readonly forwardTargets = computed(() => this.store.chats().filter((c) => c.id !== this.chatId()));
 
     readonly isChannel = computed(() => this.chat()?.chat_type === 'channel');
     readonly isGroupLike = computed(() => this.chat()?.chat_type !== 'private');
@@ -150,6 +163,8 @@ export class ChatViewComponent {
     readonly closeIcon = X;
     readonly replyIcon = Reply;
     readonly editIcon = Pencil;
+    readonly forwardIcon = Forward;
+    readonly trashIcon = Trash2;
 
     quotedName(message: DecryptedMessage): string {
         return this.directory.isMe(message.senderId) ? 'yourself' : this.directory.lookup(message.senderId).name;
@@ -295,6 +310,8 @@ export class ChatViewComponent {
             items.push({ icon: Pencil, label: 'Edit', action: () => this.startEdit(message) });
         }
 
+        items.push({ icon: CheckCheck, label: 'Select', action: () => this.store.toggleSelected(message.id) });
+
         if (this.canDelete(message.senderId)) {
             items.push({
                 icon: Trash2,
@@ -310,6 +327,32 @@ export class ChatViewComponent {
 
     closeMenu(): void {
         this.menuAnchor.set(null);
+    }
+
+    toggleSelected(messageId: string): void {
+        this.store.toggleSelected(messageId);
+    }
+
+    cancelSelection(): void {
+        this.forwardPickerOpen.set(false);
+        this.store.clearSelection();
+    }
+
+    async deleteSelected(): Promise<void> {
+        await this.store.deleteSelected();
+    }
+
+    async forwardTo(targetChatId: string): Promise<void> {
+        const sent = await this.store.forwardSelected(targetChatId);
+        this.forwardPickerOpen.set(false);
+
+        if (sent === 0) {
+            this.store.realtimeError.set('Nothing could be forwarded.');
+        }
+    }
+
+    titleOfChat(chat: Chat): string {
+        return chat.title ?? (chat.chat_type === 'channel' ? 'Channel' : 'Untitled chat');
     }
 
     private async copyText(message: DecryptedMessage): Promise<void> {

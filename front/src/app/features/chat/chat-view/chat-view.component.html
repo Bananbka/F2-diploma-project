@@ -173,6 +173,9 @@
                         [showSender]="isGroupLike()"
                         [canDelete]="canDelete(item.message.senderId)"
                         [replyTo]="quotedFor(item.message)"
+                        [selecting]="isSelecting()"
+                        [selected]="selectedIds().has(item.message.id)"
+                        (selectionToggled)="toggleSelected($event)"
                         (deleteRequested)="deleteMessage($event)"
                         (replyRequested)="startReply($event)"
                         (editRequested)="startEdit($event)"
@@ -255,12 +258,55 @@
         }
     </div>
 
-    @if (replyingTo(); as quoted) {
+    @if (isSelecting()) {
+        <!-- Replaces the composer rather than sitting beside it: while picking messages the only
+             actions that make sense are the bulk ones. -->
+        <div class="selection-bar">
+            <button
+                type="button"
+                class="selection-cancel"
+                aria-label="Cancel selection"
+                (click)="cancelSelection()"
+            >
+                <lucide-icon [img]="closeIcon" />
+            </button>
+
+            <span class="selection-count">
+                {{ selectionCount() }} selected
+                @if (forwardableCount() < selectionCount()) {
+                    <!-- Forwarding re-encrypts the plaintext, so anything we could not read cannot go. -->
+                    <span class="selection-note">
+                        · {{ selectionCount() - forwardableCount() }} cannot be forwarded (not readable)
+                    </span>
+                }
+            </span>
+
+            <button
+                type="button"
+                class="selection-action"
+                [disabled]="forwardableCount() === 0"
+                (click)="forwardPickerOpen.set(true)"
+            >
+                <lucide-icon [img]="forwardIcon" />
+                Forward
+            </button>
+
+            <button
+                type="button"
+                class="selection-action is-danger"
+                [disabled]="deletableCount() === 0"
+                (click)="deleteSelected()"
+            >
+                <lucide-icon [img]="trashIcon" />
+                Delete{{ deletableCount() < selectionCount() ? ' (' + deletableCount() + ' of yours)' : '' }}
+            </button>
+        </div>
+    } @else if (replyingTo()) {
         <div class="compose-context">
             <lucide-icon [img]="replyIcon" />
             <span class="compose-context-text">
-                <span class="compose-context-label">Replying to {{ quotedName(quoted) }}</span>
-                <span class="compose-context-body">{{ quoted.text ?? 'Unreadable message' }}</span>
+                <span class="compose-context-label">Replying to {{ quotedName(replyingTo()!) }}</span>
+                <span class="compose-context-body">{{ replyingTo()!.text ?? 'Unreadable message' }}</span>
             </span>
             <button
                 type="button"
@@ -289,15 +335,61 @@
         </div>
     }
 
-    <app-composer
-        [initialText]="editing()?.text ?? ''"
-        [canSend]="canSend()"
-        [blockedReason]="sendBlockedReason()"
-        [rekeying]="isRekeying()"
-        [placeholder]="isChannel() ? 'Post to channel…' : 'Message…'"
-        (submitted)="send($event)"
-        (typing)="onTyping($event)"
-    />
+    @if (forwardPickerOpen()) {
+        <div
+            class="picker-backdrop"
+            (click)="forwardPickerOpen.set(false)"
+        ></div>
+        <div
+            class="picker"
+            role="dialog"
+            aria-label="Forward to"
+        >
+            <p class="picker-title">
+                Forward {{ forwardableCount() }} message{{ forwardableCount() === 1 ? '' : 's' }}
+            </p>
+
+            <!-- Said plainly because it is not what forwarding usually means. The originals are sealed
+                 to this chat's keys, so a copy has to be re-encrypted — and it is signed by you, not
+                 by whoever wrote it. -->
+            <p class="picker-note">
+                A copy is encrypted afresh for the chat you pick and sent under your name. The original author's
+                signature does not travel with it.
+            </p>
+
+            <div class="picker-list">
+                @for (target of forwardTargets(); track target.id) {
+                    <button
+                        type="button"
+                        class="picker-item"
+                        (click)="forwardTo(target.id)"
+                    >
+                        <app-avatar
+                            size="sm"
+                            [name]="titleOfChat(target)"
+                            [seed]="target.id"
+                            [imageUrl]="target.avatar_url"
+                        />
+                        <span>{{ titleOfChat(target) }}</span>
+                    </button>
+                } @empty {
+                    <p class="picker-empty">No other conversations to forward to.</p>
+                }
+            </div>
+        </div>
+    }
+
+    @if (!isSelecting()) {
+        <app-composer
+            [initialText]="editing()?.text ?? ''"
+            [canSend]="canSend()"
+            [blockedReason]="sendBlockedReason()"
+            [rekeying]="isRekeying()"
+            [placeholder]="isChannel() ? 'Post to channel…' : 'Message…'"
+            (submitted)="send($event)"
+            (typing)="onTyping($event)"
+        />
+    }
 }
 
 @if (menuAnchor(); as anchor) {

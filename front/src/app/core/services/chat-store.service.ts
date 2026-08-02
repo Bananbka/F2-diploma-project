@@ -294,6 +294,7 @@ export class ChatStoreService {
         this.messages.set([]);
         this.pending.set([]);
         this.realtimeError.set(null);
+        this.clearSelection();
         this.chatKeys.set(null);
         this.encryptionUnavailable.set(null);
         this.memberVerificationError.set(null);
@@ -505,6 +506,95 @@ export class ChatStoreService {
 
     discardPending(localId: string): void {
         this.pending.update((p) => p.filter((entry) => entry.localId !== localId));
+    }
+
+    /** Ids picked for a bulk action. Empty means selection mode is off. */
+    readonly selectedIds = signal(new Set<string>());
+
+    readonly selectionCount = computed(() => this.selectedIds().size);
+    readonly isSelecting = computed(() => this.selectedIds().size > 0);
+
+    /** Only messages we could open can be forwarded — forwarding re-encrypts the plaintext. */
+    readonly forwardableCount = computed(() => {
+        const picked = this.selectedIds();
+        return this.messages().filter((m) => picked.has(m.id) && m.text !== null).length;
+    });
+
+    /** Only our own messages can be deleted; the server rejects the rest. */
+    readonly deletableCount = computed(() => {
+        const picked = this.selectedIds();
+        return this.messages().filter((m) => picked.has(m.id) && this.directory.isMe(m.senderId)).length;
+    });
+
+    toggleSelected(messageId: string): void {
+        this.selectedIds.update((current) => {
+            const next = new Set(current);
+            if (!next.delete(messageId)) {
+                next.add(messageId);
+            }
+            return next;
+        });
+    }
+
+    clearSelection(): void {
+        this.selectedIds.set(new Set());
+    }
+
+    /** Delete every selected message of ours, skipping any that are not. */
+    async deleteSelected(): Promise<void> {
+        const picked = this.selectedIds();
+        const mine = this.messages().filter((m) => picked.has(m.id) && this.directory.isMe(m.senderId));
+
+        for (const message of mine) {
+            try {
+                await this.deleteMessage(message.id);
+            } catch {
+                this.realtimeError.set('Some messages could not be deleted.');
+            }
+        }
+
+        this.clearSelection();
+    }
+
+    /**
+     * Forward the selected messages into another chat.
+     *
+     * Under E2E this can only be a re-send: the originals are sealed to this chat's keys, so relaying
+     * the ciphertext would produce something the recipient cannot open. Each message is decrypted
+     * here and encrypted afresh for the target.
+     *
+     * Two consequences the UI has to be honest about. Only messages we could read can go — there is
+     * no plaintext to re-seal otherwise. And the copy is signed by **us**, not the original author,
+     * so the attribution is a line of text rather than anything a recipient can verify. That is a
+     * property of forwarding under E2E, not a shortcut taken here.
+     */
+    async forwardSelected(targetChatId: string): Promise<number> {
+        const picked = this.selectedIds();
+        const target = this.chats().find((c) => c.id === targetChatId);
+
+        const readable = this.messages()
+            .filter((m) => picked.has(m.id) && m.text !== null)
+            .sort((a, b) => a.id.localeCompare(b.id));
+
+        let sent = 0;
+        for (const message of readable) {
+            const author = this.directory.isMe(message.senderId) ? 'you' : this.directory.lookup(message.senderId).name;
+            const body = `Forwarded from ${author}:\n${message.text}`;
+
+            try {
+                if (target?.chat_type === 'channel') {
+                    await this.messages_.sendChannelPost(targetChatId, body);
+                } else {
+                    await this.messages_.sendText(targetChatId, body);
+                }
+                sent += 1;
+            } catch {
+                this.realtimeError.set('Some messages could not be forwarded.');
+            }
+        }
+
+        this.clearSelection();
+        return sent;
     }
 
     /** Edit one of our own messages. Only the sender may, and only in an encrypted chat. */

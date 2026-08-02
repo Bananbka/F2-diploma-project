@@ -151,6 +151,43 @@ describe('ChatStoreService', () => {
         });
     });
 
+    describe('selection', () => {
+        beforeEach(() => {
+            store.chats.set([chat()]);
+            store.activeChatId.set(CHAT);
+            store.messages.set([decrypted('a', 'ok'), decrypted('b', 'no_key'), decrypted('c', 'ok')]);
+        });
+
+        it('is off until something is picked', () => {
+            expect(store.isSelecting()).toBeFalse();
+
+            store.toggleSelected('a');
+
+            expect(store.isSelecting()).toBeTrue();
+            expect(store.selectionCount()).toBe(1);
+        });
+
+        it('toggles the same message back off', () => {
+            store.toggleSelected('a');
+            store.toggleSelected('a');
+
+            expect(store.isSelecting()).toBeFalse();
+        });
+
+        /**
+         * Forwarding re-encrypts plaintext for the target chat, so a message we could not open has
+         * nothing to forward. Counting them separately is what lets the UI say so instead of
+         * silently dropping them.
+         */
+        it('counts only readable messages as forwardable', () => {
+            store.toggleSelected('a');
+            store.toggleSelected('b');
+
+            expect(store.selectionCount()).toBe(2);
+            expect(store.forwardableCount()).toBe(1);
+        });
+    });
+
     describe('previews', () => {
         it('reports an unopened encrypted chat as sealed rather than blank', () => {
             const preview = store.preview(

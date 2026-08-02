@@ -1,3 +1,15 @@
+@if (selecting()) {
+    <span
+        class="pick"
+        [class.is-on]="selected()"
+        aria-hidden="true"
+    >
+        @if (selected()) {
+            <lucide-icon [img]="checkIcon" />
+        }
+    </span>
+}
+
 @if (!isOwn()) {
     <app-avatar
         class="who"
