@@ -181,6 +181,42 @@ async def rotate_if_encrypted(
     )
 
 
+async def rotate_chats_for_member_change(
+        db: AsyncSession,
+        user_id: uuid.UUID,
+        reason: EpochReason,
+        mongo_db=None,
+) -> list[tuple[uuid.UUID, ChatKeyEpoch]]:
+    """Rotate every encrypted chat this user belongs to, for any change to their device set.
+
+    Adding a device and revoking one both change the member set, and the member set is what an
+    epoch commits to. Leaving a chat un-rotated after either leaves its stored commitment
+    describing a roster that no longer exists — which, now that clients actually check the
+    commitment, correctly stops every member from sending.
+
+    Does not commit: the caller commits so the rotation lands atomically with the change that
+    triggered it.
+    """
+    chat_ids = (await db.execute(
+        select(ChatParticipant.chat_id)
+        .join(ChatCryptoSettings, ChatCryptoSettings.chat_id == ChatParticipant.chat_id)
+        .where(
+            ChatParticipant.user_id == user_id,
+            ChatCryptoSettings.crypto_mode == CryptoMode.SENDER_KEYS_V1,
+        )
+    )).scalars().all()
+
+    rotated = []
+    for chat_id in chat_ids:
+        epoch = await allocate_epoch(
+            db, chat_id, reason, created_by_user_id=user_id, mongo_db=mongo_db,
+        )
+        if epoch is not None:
+            rotated.append((chat_id, epoch))
+
+    return rotated
+
+
 async def rotate_chats_for_new_device(
         db: AsyncSession,
         user_id: uuid.UUID,
@@ -198,26 +234,9 @@ async def rotate_chats_for_new_device(
     their next send. Does not commit — the caller commits so the rotation lands atomically with the
     identity that triggered it.
     """
-    chat_ids = (await db.execute(
-        select(ChatParticipant.chat_id)
-        .join(ChatCryptoSettings, ChatCryptoSettings.chat_id == ChatParticipant.chat_id)
-        .where(
-            ChatParticipant.user_id == user_id,
-            ChatCryptoSettings.crypto_mode == CryptoMode.SENDER_KEYS_V1,
-        )
-    )).scalars().all()
-
-    rotated = []
-    for chat_id in chat_ids:
-        epoch = await allocate_epoch(
-            db, chat_id, EpochReason.MEMBER_ADDED,
-            created_by_user_id=user_id,
-            mongo_db=mongo_db,
-        )
-        if epoch is not None:
-            rotated.append((chat_id, epoch))
-
-    return rotated
+    return await rotate_chats_for_member_change(
+        db, user_id, EpochReason.MEMBER_ADDED, mongo_db=mongo_db
+    )
 
 
 async def enable_encryption(

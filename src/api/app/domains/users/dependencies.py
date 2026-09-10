@@ -44,9 +44,21 @@ async def get_current_unverified_user(
     except jwt.PyJWTError:
         raise AppException(401, "INVALID_TOKEN", "Invalid token.")
 
-    user = await get_user_by_id(db, uuid.UUID(user_id))
+    # A malformed `sub` used to raise ValueError straight out of here and render as a 500. A
+    # token we cannot parse is an invalid token, which is a 401.
+    try:
+        subject = uuid.UUID(user_id)
+    except (TypeError, ValueError):
+        raise AppException(401, "INVALID_TOKEN", "Invalid token data.")
+
+    user = await get_user_by_id(db, subject)
     if user is None:
-        raise AppException(404, "USER_NOT_FOUNR", "User is not found.")
+        raise AppException(401, "INVALID_TOKEN", "Invalid token.")
+
+    # `is_active` existed on the model and was read nowhere, so disabling an account did nothing:
+    # existing sessions kept working and the holder could sign in again.
+    if not user.is_active:
+        raise AppException(403, "ACCOUNT_DISABLED", "This account has been disabled.")
 
     iat = payload.get("iat")
     if iat:
@@ -100,7 +112,7 @@ async def get_ws_current_user(
     if user is None:
         raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION)
 
-    if not user.is_verified:
+    if not user.is_verified or not user.is_active:
         raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION)
 
     iat = payload.get("iat")

@@ -53,7 +53,9 @@ class UserResponse(BaseModel):
     phone_number: str
     public_key: str
     bio: str | None = None
-    avatar: str | None = None
+    # The model field is `avatar_url`; this was declared as `avatar`, which matches nothing, so
+    # the owner's own avatar always serialised as null.
+    avatar_url: str | None = None
     is_active: bool
 
     model_config = ConfigDict(from_attributes=True)

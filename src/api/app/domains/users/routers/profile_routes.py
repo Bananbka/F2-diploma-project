@@ -27,8 +27,16 @@ async def change_me(data_in: ProfileRequestSchema, user: User = Depends(get_curr
 
     if "username" in update_data:
         new_username = update_data["username"]
-        if new_username and await is_username_taken(db, new_username, user.id):
+        # A null username would clear a NOT NULL column. Omitting the key is how you leave it
+        # alone; sending null is a mistake, not an instruction.
+        if new_username is None:
+            raise AppException(400, "INVALID_USERNAME", "Username cannot be cleared; omit the field instead.")
+
+        if await is_username_taken(db, new_username, user.id):
             raise AppException(400, "USERNAME_TAKEN", "Username is already taken.")
+
+    if update_data.get("full_name", "") is None:
+        raise AppException(400, "INVALID_NAME", "Display name cannot be cleared; omit the field instead.")
 
     for key, value in update_data.items():
         setattr(user, key, value)

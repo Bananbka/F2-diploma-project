@@ -37,12 +37,21 @@ async def get_user_by_email(db: AsyncSession, email: str) -> User | None:
 
 async def find_users_by_username(db: AsyncSession, username: str,
                                  current_user_id: uuid.UUID, limit: int) -> (list[User] | None):
+    """Substring search over usernames.
+
+    LIKE wildcards in the query are escaped. Unescaped, a search for `%` matched every account in
+    the system, turning the search box into a bulk directory export one page at a time.
+    """
+    pattern = username.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
     stmt = (
         select(User)
         .where(
-            User.username.ilike(f"%{username}%"),
-            User.id != current_user_id
+            User.username.ilike(f"%{pattern}%", escape="\\"),
+            User.id != current_user_id,
+            User.is_active.is_(True),
         )
+        .order_by(User.username)
         .limit(limit)
     )
     results = await db.execute(stmt)
