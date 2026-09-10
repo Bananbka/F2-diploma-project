@@ -233,15 +233,38 @@ export async function unwrapPrivateBundle(
  * malicious server substituting a public key, so it must be surfaced in the UI and must visibly
  * change when a peer's key changes.
  */
-export function safetyNumber(signingPublicA: Uint8Array, signingPublicB: Uint8Array): string {
-    const [first, second] = [signingPublicA, signingPublicB].sort((a, b) => {
-        for (let i = 0; i < Math.min(a.length, b.length); i++) {
-            if (a[i] !== b[i]) {
-                return a[i] - b[i];
-            }
+/**
+ * Collapse all of a user's active device signing keys into one 32-byte value.
+ *
+ * A safety number is a property of a person, but keys belong to devices. Built from a single
+ * arbitrarily-chosen device key, the number depended on row order and — worse — did not change
+ * when the peer gained a device, so a device the server planted would not have shown up as a key
+ * change. Every active key contributes, sorted so ordering cannot alter the result.
+ */
+export function userFingerprintMaterial(signingPublics: readonly Uint8Array[]): Uint8Array {
+    const sorted = [...signingPublics].sort(compareBytes);
+
+    const parts: Uint8Array[] = [DS_FINGERPRINT];
+    for (const key of sorted) {
+        const length = new Uint8Array(2);
+        new DataView(length.buffer).setUint16(0, key.length, false);
+        parts.push(length, key);
+    }
+
+    return sha512(concatBytes(...parts)).slice(0, 32);
+}
+
+function compareBytes(a: Uint8Array, b: Uint8Array): number {
+    for (let i = 0; i < Math.min(a.length, b.length); i++) {
+        if (a[i] !== b[i]) {
+            return a[i] - b[i];
         }
-        return a.length - b.length;
-    });
+    }
+    return a.length - b.length;
+}
+
+export function safetyNumber(signingPublicA: Uint8Array, signingPublicB: Uint8Array): string {
+    const [first, second] = [signingPublicA, signingPublicB].sort(compareBytes);
 
     // SHA-512, not SHA-256: 12 groups consume 48 bytes and a 32-byte digest cannot fill them.
     const raw = sha512(concatBytes(DS_FINGERPRINT, first, second));

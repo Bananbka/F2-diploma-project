@@ -55,17 +55,43 @@ class MinioClient:
                     else:
                         raise e
 
+    async def get_object_owner(self, object_key: str, bucket_name: str) -> str | None:
+        """The user id recorded on an object at upload time, or None if the object is unknown.
+
+        Ownership has to be recorded somewhere, because the attachment url on a message is
+        entirely client-supplied: without this, naming someone else's object key in your own
+        message was enough to make it downloadable through your own chat.
+        """
+        try:
+            async with self.get_client() as client:
+                response = await client.head_object(Bucket=bucket_name, Key=object_key)
+        except botocore.exceptions.ClientError:
+            return None
+
+        return (response.get("Metadata") or {}).get("owner-id")
+
     async def upload_file(self, file_bytes: bytes, original_filename: str, content_type: str,
-                          bucket_name: str) -> str:
-        file_extension = original_filename.split(".")[-1] if "." in original_filename else "enc"
-        unique_filename = f"{uuid.uuid4()}.{file_extension}"
+                          bucket_name: str, force_octet_stream: bool = False,
+                          owner_id: str | None = None) -> str:
+        """Store one object under a server-generated key.
+
+        The extension is derived from the client's filename, so it is sanitised: taking the last
+        dot-segment verbatim let a name like `a.b/../x` produce a key containing `/`, which the
+        attachment-url validator then rejects — leaving an object nothing could ever reference,
+        download or delete.
+        """
+        extension = original_filename.rsplit(".", 1)[-1] if "." in original_filename else "enc"
+        extension = "".join(c for c in extension if c.isalnum())[:10].lower() or "enc"
+
+        unique_filename = f"{uuid.uuid4()}.{extension}"
 
         async with self.get_client() as client:
             await client.put_object(
                 Bucket=bucket_name,
                 Key=unique_filename,
                 Body=file_bytes,
-                ContentType=content_type
+                ContentType="application/octet-stream" if force_octet_stream else content_type,
+                Metadata={"owner-id": owner_id} if owner_id else {},
             )
 
             file_url = f"{self.endpoint_url}/{bucket_name}/{unique_filename}"

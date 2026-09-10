@@ -13,7 +13,9 @@ import {
 } from '../crypto/grants';
 import {
     generateIdentity,
+    safetyNumber,
     unwrapPrivateBundle,
+    userFingerprintMaterial,
     verifyIdentityBinding,
     verifySignedPrekey,
     WrappedBundle,
@@ -222,6 +224,43 @@ export class KeyStoreService {
         }
 
         return rewrapped;
+    }
+
+    /**
+     * Derive the safety number for a peer **locally**, from key material this client verifies.
+     *
+     * `GET /crypto/safety-number/{peer}` exists and its own docstring concedes that a malicious
+     * server could simply lie about the answer — yet the UI displayed that answer verbatim, which
+     * makes the whole out-of-band comparison theatre. The number has to be computed from the keys
+     * the client will actually encrypt to, and each of those keys has to be checked against its
+     * own binding signature first, or "the key changed" is again just something the server says.
+     */
+    async computeSafetyNumber(peerUserId: string): Promise<string> {
+        const identity = this.requireIdentity();
+
+        const keys = await firstValueFrom(this.cryptoApi.getKeysBatch([identity.userId, peerUserId]));
+
+        const verified = keys.filter((key) =>
+            verifyIdentityBinding(
+                key.user_id,
+                key.device_id,
+                b64uDecode(key.identity_public_key),
+                b64uDecode(key.signing_public_key),
+                b64uDecode(key.identity_key_signature)
+            )
+        );
+
+        const mine = verified.filter((k) => k.user_id === identity.userId).map((k) => b64uDecode(k.signing_public_key));
+        const theirs = verified.filter((k) => k.user_id === peerUserId).map((k) => b64uDecode(k.signing_public_key));
+
+        if (mine.length === 0) {
+            throw new Error('You have not published an identity key.');
+        }
+        if (theirs.length === 0) {
+            throw new Error('This contact has not published a verifiable identity key.');
+        }
+
+        return safetyNumber(userFingerprintMaterial(mine), userFingerprintMaterial(theirs));
     }
 
     lock(): void {

@@ -5,9 +5,11 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AppException
+from app.core.rate_limit import enforce_rate_limit
 from app.core.responses import SuccessResponse
 from app.domains.chats.models import ChatType, ParticipantRole
 from app.domains.chats.services import chat_services
+from app.domains.crypto.models import EpochReason
 from app.domains.crypto.schemas.crypto_schemas import (
     IdentityPublishRequest,
     OwnIdentityResponse,
@@ -35,6 +37,11 @@ from app.infrastructure.services import redis_service
 
 router = APIRouter(prefix="/crypto", tags=["Crypto"])
 
+# Publishing an identity re-keys every encrypted chat the caller is in, so the cost of a request
+# is borne by every other member. Honest clients publish once at registration and rarely after.
+IDENTITY_PUBLISH_WINDOW = 3600
+IDENTITY_PUBLISH_LIMIT = 5
+
 
 @router.post("/identity", response_model=SuccessResponse[PublicKeyResponse])
 async def publish_identity(
@@ -51,6 +58,16 @@ async def publish_identity(
     wrapped per device, chains already published in the open epoch have none for it, and
     `uq_skd_epoch_sender_device` prevents senders from adding one later.
     """
+    # That rotation is exactly why this needs a limit. One request re-keys every encrypted chat
+    # the caller belongs to and obliges every other member to re-wrap a grant per device on their
+    # next send — so an unlimited publish endpoint is a cheap amplification lever against the
+    # whole group, not just against the caller.
+    await enforce_rate_limit(
+        redis, scope="publish-identity", identifier=str(user.id),
+        limit=IDENTITY_PUBLISH_LIMIT, window_seconds=IDENTITY_PUBLISH_WINDOW,
+        message="Identity keys were published very recently. Please wait before rotating again.",
+    )
+
     key = await identity_service.publish_identity(db, user.id, data)
 
     epochs = await epoch_service.rotate_chats_for_new_device(db, user.id, mongo_db=mongo_db)
@@ -81,15 +98,75 @@ async def get_my_identities(
     return SuccessResponse(data=keys)
 
 
-@router.put("/identity/prekey", response_model=SuccessResponse[PublicKeyResponse])
+@router.put("/identity/prekey", response_model=SuccessResponse[PublicKeyResponse], deprecated=True)
 async def rotate_prekey(
         data: PrekeyRotateRequest,
         user: User = Depends(get_current_user),
         db: AsyncSession = Depends(get_db),
 ):
-    """Rotate the medium-term signed prekey. Does not invalidate existing key grants."""
-    key = await identity_service.rotate_prekey(db, user.id, data)
-    return SuccessResponse(data=key)
+    """Disabled: rotating a prekey currently makes a device permanently unreadable.
+
+    Senders wrap grants to `signed_prekey_public ?? identity_public_key`, but the private half of
+    a rotated prekey has nowhere to live — the bundle is sealed under an Argon2id key derived from
+    the password, and the password is not kept after unlock. So the moment a device publishes a
+    prekey, every grant addressed to it becomes unopenable and every message reports `no_key`.
+    This shipped once, was reverted, and the columns were cleared in the database.
+
+    The endpoint stays mounted and returns 410 rather than being deleted, because a client built
+    against the old contract must get a clear refusal instead of a 404 it might read as a routing
+    mistake — and because silently accepting the rotation is how the original outage happened.
+
+    The signature machinery around it (`DS_PREKEY_BIND`, `verify_signed_prekey`, the interop
+    vector, the spec section) is correct and deliberately kept. Re-enable this only once the
+    private bundle carries `prekey_private` from registration onward.
+    """
+    raise AppException(
+        410, "PREKEY_ROTATION_DISABLED",
+        "Signed-prekey rotation is disabled: the private half cannot yet be stored, so rotating "
+        "would make every key grant addressed to this device permanently unopenable.",
+    )
+
+
+@router.post("/identity/{device_id}/revoke", response_model=SuccessResponse[dict])
+async def revoke_device(
+        device_id: uuid.UUID = Path(..., description="Device to revoke"),
+        user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_db),
+        redis: Redis = Depends(get_redis),
+        mongo_db=Depends(get_mongo_db),
+):
+    """Revoke one of your own devices — a lost phone, a borrowed laptop.
+
+    Previously the only way to disown a device was `POST /auth/reset-password`, which destroys the
+    identity entirely and makes all history unreadable. That is a wildly disproportionate response
+    to losing one of two devices, so in practice nobody would do it and the device stayed trusted.
+
+    Revoking removes the device from every chat roster, then re-keys each of the caller's
+    encrypted chats so the revoked device receives no grant for anything sent afterwards. It keeps
+    everything it already held — that is unavoidable — which is precisely why the re-key has to be
+    part of the same transaction.
+    """
+    await identity_service.revoke_device(db, user.id, device_id)
+
+    epochs = await epoch_service.rotate_chats_for_member_change(
+        db, user.id, EpochReason.MEMBER_REMOVED, mongo_db=mongo_db,
+    )
+    await db.commit()
+
+    for chat_id, epoch in epochs:
+        participant_ids = await chat_services.get_chat_participants_ids(db, chat_id)
+        await redis_service.send_key_epoch_started(
+            redis,
+            chat_id=chat_id,
+            epoch=epoch.epoch,
+            member_set_hash=epoch.member_set_hash,
+            reason=epoch.reason.value if hasattr(epoch.reason, "value") else str(epoch.reason),
+            recipient_ids=list(participant_ids),
+        )
+
+    return SuccessResponse(
+        data={"message": "Device revoked."}, meta={"rotated_chats": len(epochs)},
+    )
 
 
 @router.post("/keys/batch", response_model=SuccessResponse[list[PublicKeyResponse]])

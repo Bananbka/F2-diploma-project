@@ -217,6 +217,27 @@ def unwrap_private_bundle(wrapped: str, kdf_params: dict, password: str) -> dict
     }
 
 
+def user_fingerprint_material(signing_publics) -> bytes:
+    """Collapse all of a user's active device signing keys into one 32-byte value.
+
+    A safety number is a property of a *person*, but keys belong to devices. Feeding it one
+    arbitrarily chosen device key — which is what a bare `.limit(1)` produced — meant the two
+    peers could compute different numbers depending on row order, and that adding a device
+    silently left the old number valid. Both are wrong: the number must cover everything the peer
+    would accept, and it must change when that set changes.
+
+    Sorted, so ordering of the input cannot change the result.
+    """
+    digest = Hash(SHA512())
+    digest.update(DS_FINGERPRINT)
+
+    for key in sorted(signing_publics):
+        digest.update(len(key).to_bytes(2, "big"))
+        digest.update(key)
+
+    return digest.finalize()[:32]
+
+
 def safety_number(signing_public_a: bytes, signing_public_b: bytes) -> str:
     """A stable 60-digit fingerprint two users compare out-of-band.
 

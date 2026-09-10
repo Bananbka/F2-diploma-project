@@ -185,25 +185,85 @@ async def _validate_channel_post(db, chat, user_id, post) -> None:
             "Channel messages must be sent as a signed channel_post.",
         )
 
-    identity = await identity_service.get_active_signing_key(db, user_id)
-    if identity is None:
+    identities = await identity_service.get_active_signing_keys(db, user_id)
+    if not identities:
         raise AppException(
             400, "NO_IDENTITY_KEY",
             "Publish an identity key before posting; channel posts must be signed.",
         )
 
-    if not verify_channel_post(
+    # Any active device of this user may have signed it. Checking against one arbitrarily chosen
+    # key rejected genuine posts from a user's second device.
+    signed_by_this_user = any(
+        verify_channel_post(
             signing_public=b64u_decode(identity.signing_public_key),
             signature=post.sig,
             chat_id=chat.id,
             sender_id=user_id,
             post_id=post.post_id,
             content=post.content,
-    ):
+        )
+        for identity in identities
+    )
+
+    if not signed_by_this_user:
         raise AppException(
             400, "INVALID_POST_SIGNATURE",
-            "The post signature does not verify against your identity key.",
+            "The post signature does not verify against any of your identity keys.",
         )
+
+
+async def _authorize_attachments(
+        db: AsyncSession,
+        mongo_db: AsyncIOMotorDatabase,
+        user_id: uuid.UUID,
+        attachments,
+) -> None:
+    """Check the sender is entitled to reference each attachment url.
+
+    The url on a message is client-supplied, and `download_attachment` authorises a read by asking
+    whether the object is referenced by a message in a chat you belong to. Those two facts
+    combined were a hole: name an object key you happen to know — one from a group you were
+    removed from, say — in a message in your own chat, and you had just re-authorised yourself to
+    fetch it.
+
+    An attachment is acceptable on exactly two grounds:
+
+      * you uploaded it, or
+      * it is already referenced by a message in a chat you are currently in, which is what makes
+        forwarding a message with attachments work — a forward is a re-send of the same object.
+
+    A user removed from a chat satisfies neither, which is the case that mattered.
+    """
+    if not attachments:
+        return
+
+    prefix = f"{settings.MINIO_URL}/{settings.MINIO_MESSAGE_BUCKET}/"
+    collection = mongo_db["messages"]
+
+    for attachment in attachments:
+        url = attachment.url
+        object_key = url[len(prefix):]
+
+        owner = await minio_manager.get_object_owner(object_key, settings.MINIO_MESSAGE_BUCKET)
+        if owner is None:
+            raise AppException(400, "ATTACHMENT_UNKNOWN", "That attachment no longer exists.")
+
+        if owner == str(user_id):
+            continue
+
+        my_chat_ids = (await db.execute(
+            select(ChatParticipant.chat_id).where(ChatParticipant.user_id == user_id)
+        )).scalars().all()
+
+        visible = await collection.find_one(
+            {"chat_id": {"$in": list(my_chat_ids)}, "attachments.url": url}, {"_id": 1}
+        )
+        if visible is None:
+            raise AppException(
+                403, "ATTACHMENT_FORBIDDEN",
+                "You cannot attach a file you did not upload and cannot currently see.",
+            )
 
 
 async def send_message(
@@ -213,6 +273,8 @@ async def send_message(
         message_in: MessageCreateRequest
 ) -> MessageResponse:
     chat = await get_chat_or_403(db, message_in.chat_id, user_id)
+
+    await _authorize_attachments(db, mongo_db, user_id, message_in.attachments)
 
     settings = await epoch_service.get_settings(db, message_in.chat_id)
     is_encrypted_chat = (

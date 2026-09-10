@@ -1,18 +1,21 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AppException
 from app.domains.crypto.models import UserDevice, UserIdentityKey
 from app.domains.crypto.reference.identity import (
     safety_number,
+    user_fingerprint_material,
     verify_identity_binding,
     verify_signed_prekey,
 )
 from app.domains.crypto.reference.primitives import b64u_decode
 from app.domains.crypto.schemas.crypto_schemas import IdentityPublishRequest, PrekeyRotateRequest
+
+MAX_ACTIVE_DEVICES_PER_USER = 5
 
 
 async def publish_identity(
@@ -41,9 +44,48 @@ async def publish_identity(
             "identity_key_signature does not verify for this user and device."
         )
 
+    # A prekey published here was stored without its signature ever being checked — only the
+    # rotation endpoint verified one. Grants prefer the prekey over the identity key as the ECDH
+    # recipient, so an unverified prekey at registration is the same substitution that
+    # `rotate_prekey` refuses, just through a different door.
+    if data.signed_prekey_public is not None:
+        if data.signed_prekey_signature is None:
+            raise AppException(
+                400, "PREKEY_SIGNATURE_REQUIRED",
+                "A signed prekey must be accompanied by its binding signature.",
+            )
+
+        if not verify_signed_prekey(
+                user_id=user_id,
+                device_id=data.device_id,
+                signed_prekey_public=b64u_decode(data.signed_prekey_public),
+                signing_public=b64u_decode(data.signing_public_key),
+                signature=b64u_decode(data.signed_prekey_signature),
+        ):
+            raise AppException(
+                400, "INVALID_KEY_SIGNATURE",
+                "The prekey signature does not verify for this user and device.",
+            )
+
     device = await db.get(UserDevice, data.device_id)
 
     if device is None:
+        # Bounded so one account cannot mint devices without limit. Each new device forces a key
+        # rotation in every encrypted chat the user belongs to, and rotation makes every other
+        # member re-wrap grants — so an unbounded device count is an amplification lever, not
+        # just untidy bookkeeping.
+        active_devices = await db.scalar(
+            select(func.count())
+            .select_from(UserDevice)
+            .where(UserDevice.user_id == user_id, UserDevice.is_active.is_(True))
+        )
+        if active_devices >= MAX_ACTIVE_DEVICES_PER_USER:
+            raise AppException(
+                409, "TOO_MANY_DEVICES",
+                f"An account may have at most {MAX_ACTIVE_DEVICES_PER_USER} active devices. "
+                f"Revoke one before registering another.",
+            )
+
         device = UserDevice(
             id=data.device_id,
             user_id=user_id,
@@ -53,6 +95,11 @@ async def publish_identity(
         await db.flush()
     elif device.user_id != user_id:
         raise AppException(409, "DEVICE_CONFLICT", "This device id belongs to another user.")
+    elif not device.is_active:
+        # Re-activating rather than silently attaching a key to a revoked device, whose keys the
+        # roster query filters out — the account would look published and never receive a grant.
+        device.is_active = True
+        device.revoked_at = None
 
     prev_stmt = (
         select(UserIdentityKey)
@@ -163,11 +210,14 @@ async def get_active_keys_for_users(
     return list((await db.execute(stmt)).scalars().all())
 
 
-async def get_active_signing_key(db: AsyncSession, user_id: uuid.UUID) -> UserIdentityKey | None:
-    """The user's active identity key, for verifying something they signed.
+async def get_active_signing_keys(db: AsyncSession, user_id: uuid.UUID) -> list[UserIdentityKey]:
+    """**All** of the user's active identity keys, for verifying something they signed.
 
-    Returns one key. Under the current single-device model that is unambiguous; multi-device would
-    need the caller to say which device signed.
+    This used to return a single row with a bare `.limit(1)` and no ordering. The rest of the
+    crypto layer is fully per-device — grants, rosters and epochs all are — so as soon as a user
+    had two devices, a post signed on one was verified against whichever key Postgres happened to
+    return, and valid posts were rejected at random. A signature only needs to match *one* of the
+    keys the user has published.
     """
     stmt = (
         select(UserIdentityKey)
@@ -177,9 +227,54 @@ async def get_active_signing_key(db: AsyncSession, user_id: uuid.UUID) -> UserId
             UserIdentityKey.is_active.is_(True),
             UserDevice.is_active.is_(True),
         )
-        .limit(1)
+        .order_by(UserIdentityKey.device_id)
     )
-    return (await db.execute(stmt)).scalar_one_or_none()
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def revoke_device(db: AsyncSession, user_id: uuid.UUID, device_id: uuid.UUID) -> None:
+    """Revoke one of your own devices — a lost phone, a shared machine.
+
+    There was no way to do this short of a full password reset, which destroys the identity and
+    every message it can read. Revoking marks the device and its key inactive, which removes it
+    from every chat roster; the caller is responsible for re-keying those chats so the revoked
+    device receives no further grants.
+    """
+    device = await db.get(UserDevice, device_id)
+    if device is None or device.user_id != user_id:
+        raise AppException(404, "DEVICE_NOT_FOUND", "No such device on this account.")
+
+    if not device.is_active:
+        raise AppException(409, "ALREADY_REVOKED", "This device is already revoked.")
+
+    remaining = await db.scalar(
+        select(func.count())
+        .select_from(UserDevice)
+        .where(
+            UserDevice.user_id == user_id,
+            UserDevice.is_active.is_(True),
+            UserDevice.id != device_id,
+        )
+    )
+    if not remaining:
+        # Revoking the last device leaves an account that can decrypt nothing and cannot publish
+        # a replacement without a fresh identity, which is the password-reset path, not this one.
+        raise AppException(
+            409, "LAST_DEVICE",
+            "You cannot revoke your only device. Register another one first.",
+        )
+
+    now = datetime.now(timezone.utc)
+
+    await db.execute(
+        update(UserIdentityKey)
+        .where(UserIdentityKey.device_id == device_id, UserIdentityKey.is_active.is_(True))
+        .values(is_active=False, revoked_at=now)
+    )
+    device.is_active = False
+    device.revoked_at = now
+
+    await db.flush()
 
 
 async def get_own_identities(db: AsyncSession, user_id: uuid.UUID) -> list[UserIdentityKey]:
@@ -205,17 +300,21 @@ async def compute_safety_number(
         raise AppException(400, "INVALID_TARGET", "Cannot compute a safety number with yourself.")
 
     keys = await get_active_keys_for_users(db, [user_id, peer_user_id])
-    by_user = {k.user_id: k for k in keys}
 
-    mine, theirs = by_user.get(user_id), by_user.get(peer_user_id)
-    if mine is None:
+    mine = [b64u_decode(k.signing_public_key) for k in keys if k.user_id == user_id]
+    theirs = [b64u_decode(k.signing_public_key) for k in keys if k.user_id == peer_user_id]
+
+    if not mine:
         raise AppException(400, "NO_IDENTITY_KEY", "You have not published an identity key.")
-    if theirs is None:
+    if not theirs:
         raise AppException(404, "PEER_NO_IDENTITY_KEY", "This user has not published an identity key.")
 
+    # Every active device on each side contributes. Picking one key per user made the value
+    # depend on row ordering and left it unchanged when a peer added a device — so a new device
+    # (including one the server planted) would not have shown up as a key change.
     return safety_number(
-        b64u_decode(mine.signing_public_key),
-        b64u_decode(theirs.signing_public_key),
+        user_fingerprint_material(mine),
+        user_fingerprint_material(theirs),
     )
 
 

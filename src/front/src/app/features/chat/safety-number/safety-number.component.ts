@@ -2,10 +2,9 @@ import { ChangeDetectionStrategy, Component, computed, effect, inject, input, si
 import { Router } from '@angular/router';
 import { ArrowLeft, Check, Copy, Info, LucideAngularModule, ShieldAlert, ShieldCheck } from 'lucide-angular';
 import * as QRCode from 'qrcode';
-import { firstValueFrom } from 'rxjs';
 
-import { CryptoApiService } from '../../../core/services/crypto-api.service';
 import { DirectoryService } from '../../../core/services/directory.service';
+import { KeyStoreService } from '../../../core/services/key-store.service';
 import { TrustStoreService } from '../../../core/services/trust-store.service';
 import { safetyNumberGroups } from '../../../shared/utils/display';
 
@@ -17,7 +16,7 @@ import { safetyNumberGroups } from '../../../shared/utils/display';
     changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class SafetyNumberComponent {
-    private readonly cryptoApi = inject(CryptoApiService);
+    private readonly keyStore = inject(KeyStoreService);
     private readonly directory = inject(DirectoryService);
     private readonly trust = inject(TrustStoreService);
     private readonly router = inject(Router);
@@ -59,7 +58,9 @@ export class SafetyNumberComponent {
         this.qrDataUrl.set(null);
 
         try {
-            const number = await firstValueFrom(this.cryptoApi.getSafetyNumber(userId));
+            // Derived here, not fetched. The server endpoint still exists as a convenience, but
+            // a fingerprint the server hands you cannot detect a key the server substituted.
+            const number = await this.keyStore.computeSafetyNumber(userId);
             this.safetyNumber.set(number);
             await this.renderQr(number);
         } catch {

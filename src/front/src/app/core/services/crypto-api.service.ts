@@ -32,14 +32,16 @@ export class CryptoApiService {
         return this.http.get<SuccessResponse<OwnIdentity[]>>(`${this.apiUrl}identity/me`).pipe(map((r) => r.data));
     }
 
-    /** Rotate the medium-term signed prekey. Does not touch the identity key or void grants. */
-    rotatePrekey(deviceId: string, signedPrekeyPublic: string, signedPrekeySignature: string): Observable<PublicKey> {
+    /**
+     * Revoke one of this account's own devices, and re-key its encrypted chats.
+     *
+     * Replaces the prekey-rotation call that used to live here. That endpoint now returns 410:
+     * publishing a prekey makes every grant addressed to the device unopenable, because the
+     * private half has nowhere to live until the sealed bundle carries it from registration.
+     */
+    revokeDevice(deviceId: string): Observable<{ message: string }> {
         return this.http
-            .put<SuccessResponse<PublicKey>>(`${this.apiUrl}identity/prekey`, {
-                device_id: deviceId,
-                signed_prekey_public: signedPrekeyPublic,
-                signed_prekey_signature: signedPrekeySignature,
-            })
+            .post<SuccessResponse<{ message: string }>>(`${this.apiUrl}identity/${deviceId}/revoke`, {})
             .pipe(map((r) => r.data));
     }
 
