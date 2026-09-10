@@ -6,6 +6,7 @@ import { ChatKeys, MessageResponse } from '../models/crypto.model';
 import { ChatApiService } from './chat-api.service';
 import { ChatStoreService } from './chat-store.service';
 import { CryptoApiService } from './crypto-api.service';
+import { RosterVerificationError } from './crypto-errors';
 import { DirectoryService } from './directory.service';
 import { DecryptedMessage, DecryptStatus, MessageService } from './message.service';
 import { SessionService } from './session.service';
@@ -58,7 +59,14 @@ describe('ChatStoreService', () => {
                 },
                 {
                     provide: MessageService,
-                    useValue: jasmine.createSpyObj('MessageService', ['loadMessages', 'decrypt', 'refreshGrants']),
+                    useValue: jasmine.createSpyObj('MessageService', [
+                        'loadMessages',
+                        'decrypt',
+                        'refreshGrants',
+                        'sendText',
+                        'sendChannelPost',
+                        'recordOutgoing',
+                    ]),
                 },
                 {
                     provide: DirectoryService,
@@ -149,6 +157,40 @@ describe('ChatStoreService', () => {
 
             expect(store.canSend()).toBeFalse();
             expect(store.sendBlockedReason()).toBe('Too many members.');
+        });
+
+        /**
+         * Every roster refusal must block, whatever it says.
+         *
+         * The classifier used to match on the message prefix "Member set verification failed". A
+         * binding-signature failure — stronger evidence of a substituted key than a hash mismatch —
+         * begins "Roster verification failed", so it silently stopped being recognised: sending
+         * carried on and no banner appeared. Asserting over both messages pins the behaviour to the
+         * error's type rather than to its wording.
+         */
+        it('blocks sending for every kind of roster verification failure', async () => {
+            const messages = TestBed.inject(MessageService) as jasmine.SpyObj<MessageService>;
+
+            for (const message of [
+                "Member set verification failed: the server's roster does not match the epoch commitment.",
+                'Roster verification failed: device abc presents an identity key that its own signing key does not vouch for.',
+                'Roster verification failed: device abc presents a signed prekey without a valid binding signature.',
+            ]) {
+                store.memberVerificationError.set(null);
+                messages.sendText.and.rejectWith(new RosterVerificationError(message));
+
+                // `activeChat` is derived from `chats`, so both have to be set or `send` returns
+                // early and the test passes for the wrong reason.
+                store.chats.set([chat()]);
+                store.activeChatId.set(CHAT);
+                await store.send('hello');
+
+                expect(store.canSend()).withContext(`must block on: ${message}`).toBeFalse();
+                expect(store.memberVerificationError()).toBe(message);
+                // A refusal is not a retryable send: nothing may be left sitting in the composer
+                // queue implying it will go out later.
+                expect(store.pending().length).withContext('no pending row may survive').toBe(0);
+            }
         });
     });
 

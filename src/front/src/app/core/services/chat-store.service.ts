@@ -7,7 +7,13 @@ import { Chat } from '../models/chat.model';
 import { ChatKeys, MessageAttachment, MessageResponse } from '../models/crypto.model';
 import { ChatApiService } from './chat-api.service';
 import { CryptoApiService } from './crypto-api.service';
-import { isAlreadyEnabled, isCryptoNotEnabled, isEnableForbidden, isEncryptionRefused } from './crypto-errors';
+import {
+    isAlreadyEnabled,
+    isCryptoNotEnabled,
+    isEnableForbidden,
+    isEncryptionRefused,
+    isRosterVerificationFailure,
+} from './crypto-errors';
 import { DirectoryService } from './directory.service';
 import { DecryptedMessage, MessageService } from './message.service';
 import { SessionService } from './session.service';
@@ -975,8 +981,17 @@ export class ChatStoreService {
         });
     }
 
+    /**
+     * Matched by type, not by message prefix.
+     *
+     * This tested `message.startsWith('Member set verification failed')`. When a second refusal
+     * was added — a binding signature that does not verify, which is the *stronger* evidence of
+     * a substituted key — its message started differently, so the match quietly stopped firing:
+     * sending was not blocked and the banner never appeared, for the one failure that matters
+     * most. A type cannot drift away from the thing that throws it.
+     */
     private isMemberVerificationFailure(error: unknown): boolean {
-        return error instanceof Error && error.message.startsWith('Member set verification failed');
+        return isRosterVerificationFailure(error);
     }
 
     private looksLikeRekey(error: unknown): boolean {

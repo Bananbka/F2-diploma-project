@@ -25,6 +25,7 @@ import { b64uDecode, b64uEncode } from '../crypto/primitives';
 import { generateChainKey, ReceiverChain, SenderChain } from '../crypto/ratchet';
 import { ChatRoster, Distribution, GrantUpload, OwnIdentity } from '../models/crypto.model';
 import { CryptoApiService } from './crypto-api.service';
+import { RosterVerificationError } from './crypto-errors';
 
 const DEVICE_ID_KEY = 'ns.device_id';
 
@@ -310,7 +311,7 @@ export class KeyStoreService {
                     b64uDecode(member.identity_key_signature)
                 )
             ) {
-                throw new Error(
+                throw new RosterVerificationError(
                     `Roster verification failed: device ${member.device_id} presents an identity key ` +
                         'that its own signing key does not vouch for. Refusing to distribute keys.'
                 );
@@ -331,7 +332,7 @@ export class KeyStoreService {
                         b64uDecode(member.signed_prekey_signature)
                     )
                 ) {
-                    throw new Error(
+                    throw new RosterVerificationError(
                         `Roster verification failed: device ${member.device_id} presents a signed prekey ` +
                             'without a valid binding signature. Refusing to distribute keys.'
                     );
@@ -341,7 +342,7 @@ export class KeyStoreService {
 
         const recomputed = computeMemberSetHash(roster.members);
         if (recomputed !== roster.member_set_hash) {
-            throw new Error(
+            throw new RosterVerificationError(
                 "Member set verification failed: the server's roster does not match the epoch commitment. " +
                     'Refusing to distribute keys.'
             );

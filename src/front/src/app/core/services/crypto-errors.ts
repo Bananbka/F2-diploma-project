@@ -1,5 +1,27 @@
 import { HttpErrorResponse } from '@angular/common/http';
 
+/**
+ * The roster could not be trusted, so no key was handed to it.
+ *
+ * A class rather than a message prefix. This was matched with
+ * `error.message.startsWith('Member set verification failed')`, and the moment a second kind of
+ * failure was added — a binding signature that does not verify, which is the *stronger* signal —
+ * its message began differently, the match silently stopped firing, and the single most
+ * important refusal in the app degraded into an ordinary "send failed". A type cannot drift out
+ * of sync with the thing that throws it.
+ */
+export class RosterVerificationError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'RosterVerificationError';
+    }
+}
+
+/** Sending must be blocked outright: we refused to distribute keys to an unverifiable roster. */
+export function isRosterVerificationFailure(error: unknown): error is RosterVerificationError {
+    return error instanceof RosterVerificationError;
+}
+
 function errorCode(error: unknown): string | null {
     if (!(error instanceof HttpErrorResponse)) {
         return null;
