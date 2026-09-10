@@ -88,6 +88,20 @@ This matters because §7 prefers the signed prekey over the identity key as the 
 unverified prekey would let anyone able to reach the rotation endpoint substitute a key they hold and
 receive every subsequent sender key — precisely the substitution the signature exists to prevent.
 
+The signature MUST be verified wherever a prekey enters the system, which includes the **publish**
+path and not only rotation. Verifying on rotation alone left the identical substitution reachable
+through registration.
+
+> **Rotation is currently disabled** (`PUT /crypto/identity/prekey` returns 410). Grants are wrapped
+> to the prekey when one is present, but the private half has nowhere to live: the bundle is sealed
+> under an Argon2id key derived from the password, and the password is not retained after unlock, so
+> re-sealing it to store a rotated private half would mean re-prompting on every rotation. A device
+> that publishes a prekey therefore makes every grant addressed to it unopenable.
+>
+> Everything in this section is implemented and verified and should be kept. Re-enable rotation only
+> once the private bundle carries `prekey_private` from registration onward. Until then the identity
+> key is the grant recipient, and forward secrecy across prekey rotations is not claimed.
+
 ### 2.2 Private key storage
 
 The private halves are serialised as JSON, encrypted with AES-256-GCM under an Argon2id-derived
@@ -107,15 +121,30 @@ MUST reject `m < 19456` or `t < 2`.
 
 ### 2.3 Safety numbers
 
+A safety number is a property of a *person*, but keys belong to devices, so each side's active
+device signing keys are first collapsed into one 32-byte value:
+
 ```
-digest = SHA-256("NS-v1-fingerprint" || sorted(signing_pub_A, signing_pub_B))
+material_X = SHA-512("NS-v1-fingerprint" || for each key in sorted(signing_pubs_X):
+                                               u16be(len(key)) || key)[0:32]
+
+digest = SHA-512("NS-v1-fingerprint" || sorted(material_A, material_B))
 number = 12 groups of 5 digits, each = u32be(digest[4i:4i+4]) mod 100000
 ```
 
-Inputs are sorted so both peers compute the same value. Clients MUST display this and MUST warn
-visibly when a peer's key changes. **This is the only defence against a malicious server
-substituting a public key.** A server-computed safety number is a convenience only — a malicious
-server can lie, so the client MUST be able to derive it independently.
+SHA-512, not SHA-256: 12 groups consume 48 bytes, and a 32-byte digest cannot fill them — the tail
+groups would silently be zeros, displaying 60 digits while carrying 40 digits of entropy.
+
+**Every active device contributes.** Deriving the number from a single arbitrarily chosen device
+key made it depend on row ordering, and — worse — left it unchanged when a peer gained a device, so
+a device the server planted did not show up as a key change.
+
+Inputs are sorted at both levels so both peers compute the same value. Clients MUST display this
+and MUST warn visibly when a peer's number changes. **This is the only defence against a malicious
+server substituting a public key**, so the client MUST derive it itself, from key material whose
+binding signatures it has verified (§5.0.2). A server-computed number is a convenience for
+debugging only: a server asked to fingerprint a key it substituted will simply fingerprint the
+original, and the client cannot tell.
 
 ---
 
@@ -223,8 +252,19 @@ A sender MUST publish grants covering **exactly** the epoch's member device set.
 is rejected: it is either a client bug or an attempt to silently exclude a member.
 
 ```
-member_set_hash = SHA-256("NS-v1-memberset" || "|".join(sorted(device_ids)))
+record          = device_id || ":" || identity_public_key || ":" || signing_public_key
+                            || ":" || signed_prekey_public      (empty string where absent)
+member_set_hash = SHA-256("NS-v1-memberset-v2" || "|".join(sorted(records)))
 ```
+
+Every field is unpadded base64url or a hyphenated uuid, and neither `:` nor `|` occurs in either
+alphabet — so no field value can forge a record boundary and no two distinct rosters collide.
+
+**The hash commits to the key material, not only to the device ids.** Hashing ids alone (the `v1`
+form, `"NS-v1-memberset"`) left the whole check defeatable without touching the device set: a
+server could return the same devices with one member's `identity_public_key` replaced by a key it
+held, or inject a `signed_prekey_public` of its own — which §5.1 *prefers* as the ECDH recipient —
+and the hash was unchanged. Every sender then wrapped the chain key for the server.
 
 ### 5.0 Distribution signature
 
@@ -245,10 +285,31 @@ Grants cost `S x (N-1)` per epoch, where `S` is the number of members who actual
 enforced, not merely documented: encrypted chats are capped at **256 members**. Signal caps groups
 at 1000 and WhatsApp at 1024; those limits exist for the same reason.
 
-Before wrapping keys for an epoch, a client **MUST** recompute `member_set_hash` from the roster and
-refuse to proceed on mismatch. Without this check a malicious server silently inserts a ghost member
-and every sender dutifully wraps grants for it — the cryptography behaving perfectly while
-confidentiality is lost. The backend **cannot** enforce this; it lives entirely in the client.
+### 5.0.2 Roster verification (client-enforced)
+
+Before wrapping keys for an epoch, a client **MUST** do both of the following and refuse to proceed
+on any failure. Neither alone is sufficient.
+
+**1. Verify every roster entry's binding signature.** Each entry carries `identity_key_signature`
+over §2's binding, and `signed_prekey_signature` over §2.1.1's where a prekey is present. A prekey
+without a valid signature MUST be rejected outright, not silently ignored in favour of the identity
+key — ignoring it hides the fact that a key was injected.
+
+This is the root of trust, because the signing key is what a peer pins out of band as a safety
+number (§8). To substitute a key a server would have to substitute the signing key too, which
+changes the safety number and becomes visible to anyone who has verified their peer.
+
+**2. Recompute `member_set_hash` from the roster** and compare it against the epoch's commitment.
+This catches a roster that disagrees with the set the server committed to when the epoch opened.
+
+The commitment MUST be the value stored on the epoch row when it was allocated. A server that
+recomputes it from the roster it is currently returning makes the comparison tautological — the
+client hashes the same list the server just hashed, so it matches for any list at all, ghost devices
+included. `GET /crypto/chats/{id}/roster` returns the stored value for exactly this reason.
+
+The backend **cannot** enforce either check; both live entirely in the client. The server writes the
+commitment as well as the roster, so on its own the hash only proves internal consistency — check 1
+is what makes check 2 mean anything.
 
 ### 5.1 Grant wrapping
 
