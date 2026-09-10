@@ -1,6 +1,6 @@
 ﻿import uuid
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -57,3 +57,20 @@ async def get_user_contacts(db: AsyncSession, owner_id: uuid.UUID) -> list[Conta
     )
     res = await db.execute(stmt)
     return res.scalars().all()
+
+
+async def remove_contact(db: AsyncSession, owner_id: uuid.UUID, contact_id: uuid.UUID) -> bool:
+    """Delete one contact row. Returns whether anything was removed.
+
+    Scoped to the owner in the statement itself rather than fetched-then-checked, so there is no
+    window in which another request could change the row between the two.
+    """
+    res = await db.execute(
+        delete(Contact).where(
+            Contact.owner_id == owner_id,
+            Contact.contact_id == contact_id,
+        )
+    )
+    await db.commit()
+
+    return res.rowcount > 0

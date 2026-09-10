@@ -20,9 +20,13 @@ async def create_folder(
         user: User = Depends(get_current_user),
         db: AsyncSession = Depends(get_db)
 ):
-    cp = await folder_services.get_count_of_available_chats(db, user.id, data.chat_ids)
+    # Compared against the *distinct* ids. The count query cannot return more than one row per
+    # chat, so a request that repeated a chat id could never match and was rejected as a
+    # permission failure even when the user was in every chat named.
+    requested = set(data.chat_ids)
+    cp = await folder_services.get_count_of_available_chats(db, user.id, list(requested))
 
-    if cp != len(data.chat_ids):
+    if cp != len(requested):
         raise AppException(403, "FORBIDDEN", "You don't have permission to access some of chats")
 
     folder = await folder_services.create_folder(db, user.id, data)

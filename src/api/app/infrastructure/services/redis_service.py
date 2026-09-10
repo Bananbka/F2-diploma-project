@@ -31,6 +31,74 @@ async def send_key_epoch_started(
         await redis.publish(f"user:{recipient_id}", event_json)
 
 
+async def _publish(redis: Redis, envelope: WSMessageEnvelope, recipient_ids) -> None:
+    """Fan one envelope out to a set of users.
+
+    Fan-out is per-user, not per-chat: each connection subscribes to `user:{id}` only, so any API
+    instance can reach any connected client. That means the publisher always has to resolve
+    recipients itself.
+    """
+    event_json = envelope.model_dump_json()
+
+    for recipient_id in set(recipient_ids):
+        await redis.publish(f"user:{recipient_id}", event_json)
+
+
+async def send_participants_added(
+        redis: Redis, chat_id: uuid.UUID, added_ids: list[uuid.UUID], recipient_ids: list[uuid.UUID],
+):
+    await _publish(
+        redis,
+        WSMessageEnvelope(
+            event_type=WSEventType.PARTICIPANTS_ADDED,
+            chat_id=chat_id,
+            payload={"user_ids": [str(u) for u in added_ids]},
+        ),
+        recipient_ids,
+    )
+
+
+async def send_participants_removed(
+        redis: Redis, chat_id: uuid.UUID, removed_ids: list[uuid.UUID], recipient_ids: list[uuid.UUID],
+):
+    """Tell the remaining members who left or was removed.
+
+    The removed members themselves get CHAT_DELETED instead — from their side the chat is simply
+    gone, and they must not keep polling a conversation they can no longer read.
+    """
+    await _publish(
+        redis,
+        WSMessageEnvelope(
+            event_type=WSEventType.PARTICIPANTS_REMOVED,
+            chat_id=chat_id,
+            payload={"user_ids": [str(u) for u in removed_ids]},
+        ),
+        recipient_ids,
+    )
+
+
+async def send_chat_updated(
+        redis: Redis, chat_id: uuid.UUID, recipient_ids: list[uuid.UUID], payload: dict,
+):
+    await _publish(
+        redis,
+        WSMessageEnvelope(event_type=WSEventType.CHAT_UPDATED, chat_id=chat_id, payload=payload),
+        recipient_ids,
+    )
+
+
+async def send_chat_deleted(redis: Redis, chat_id: uuid.UUID, recipient_ids: list[uuid.UUID]):
+    await _publish(
+        redis,
+        WSMessageEnvelope(
+            event_type=WSEventType.CHAT_DELETED,
+            chat_id=chat_id,
+            payload={"chat_id": str(chat_id)},
+        ),
+        recipient_ids,
+    )
+
+
 async def send_chat_created_message(redis: Redis, chat: Chat, user_id: uuid.UUID, participant_ids: list[uuid.UUID]):
     chat_dict = ChatResponse.model_validate(chat).model_dump(mode='json')
 

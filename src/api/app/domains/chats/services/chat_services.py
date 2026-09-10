@@ -24,8 +24,14 @@ async def get_or_create_private_chat(
         raise AppException(400, "INVALID_TARGET", "You cannot create chat with yourself")
 
     target_user = await get_user_by_id(db, target_user_id)
-    if not target_user:
+    if not target_user or not target_user.is_active:
         raise AppException(400, "INVALID_TARGET", "User does not exist")
+
+    # Serialise on the unordered pair, so two people opening a chat with each other at the same
+    # moment cannot both miss the lookup below and each create their own. There is no unique
+    # constraint that could express "one private chat per pair" across two participant rows.
+    pair = "|".join(sorted([str(current_user_id), str(target_user_id)]))
+    await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(pair))))
 
     stmt = (
         select(Chat)
@@ -157,7 +163,18 @@ async def get_user_chats(
             Contact.alias_name.label("partner_alias")
         )
         .join(me, and_(Chat.id == me.chat_id, me.user_id == user_id))
-        .outerjoin(other, and_(Chat.id == other.chat_id, other.user_id != user_id))
+        # Restricted to PRIVATE. The counterpart join exists only to resolve the other party in a
+        # two-person chat, but it was unrestricted, so a group of N produced N-1 rows for the same
+        # chat: the list showed groups repeated once per member, and limit/offset paged over those
+        # duplicates instead of over chats.
+        .outerjoin(
+            other,
+            and_(
+                Chat.id == other.chat_id,
+                other.user_id != user_id,
+                Chat.chat_type == ChatType.PRIVATE,
+            ),
+        )
         .outerjoin(
             Contact,
             and_(
@@ -167,7 +184,9 @@ async def get_user_chats(
         )
         .options(
             selectinload(Chat.participants).selectinload(ChatParticipant.user))
-        .order_by(Chat.updated_at.desc())
+        # `updated_at` is null until something updates the row, and NULLs sort first under DESC in
+        # Postgres — so brand-new chats outranked active ones. coalesce falls back to creation.
+        .order_by(func.coalesce(Chat.updated_at, Chat.created_at).desc(), Chat.id)
         .limit(limit)
         .offset(offset)
     )
@@ -184,14 +203,20 @@ async def get_user_chats(
     return chats, total_count
 
 
-async def update_chat_updated_at(
-        db: AsyncSession,
-        chat_id: uuid.UUID
-):
-    stmt = (update(Chat).where(Chat.id == chat_id).values(updated_at=func.now()))
-    res = await db.execute(stmt)
-    await db.commit()
+async def touch_chat(db: AsyncSession, chat_id: uuid.UUID) -> int:
+    """Bump a chat's `updated_at` so it sorts to the top of the chat list.
 
+    This existed as `update_chat_updated_at` and had no callers anywhere, while `get_user_chats`
+    ordered by the column it was supposed to maintain. The column is `onupdate` only and starts
+    null, so in practice the chat list was ordered by nothing at all and new messages never moved
+    a conversation.
+
+    Does not commit: the caller owns the transaction, and this must not be able to half-apply
+    alongside the write that triggered it.
+    """
+    res = await db.execute(
+        update(Chat).where(Chat.id == chat_id).values(updated_at=func.now())
+    )
     return res.rowcount
 
 
@@ -402,6 +427,71 @@ async def leave_chat(
 
     await db.commit()
     return epoch
+
+
+async def transfer_ownership(
+        db: AsyncSession,
+        chat_id: uuid.UUID,
+        current_owner_id: uuid.UUID,
+        new_owner_id: uuid.UUID,
+) -> ChatParticipant:
+    """Hand OWNER to another member, demoting yourself to ADMIN.
+
+    There was no way to do this: `change_role` refuses to grant OWNER, and `leave_chat` tells the
+    owner to "transfer ownership before leaving, or delete the chat" — neither of which existed.
+    An owner was therefore permanently stuck in every group they created.
+
+    One statement per row inside one transaction, so the chat can never be observed with two
+    owners or none.
+    """
+    target = (await db.execute(
+        select(ChatParticipant).where(
+            ChatParticipant.chat_id == chat_id,
+            ChatParticipant.user_id == new_owner_id,
+        )
+    )).scalar_one_or_none()
+
+    if target is None:
+        raise AppException(400, "USER_NOT_IN_CHAT", "That user is not in this chat.")
+
+    await db.execute(
+        update(ChatParticipant)
+        .where(ChatParticipant.chat_id == chat_id, ChatParticipant.user_id == current_owner_id)
+        .values(role=ParticipantRole.ADMIN)
+    )
+    await db.execute(
+        update(ChatParticipant)
+        .where(ChatParticipant.chat_id == chat_id, ChatParticipant.user_id == new_owner_id)
+        .values(role=ParticipantRole.OWNER)
+    )
+
+    await db.commit()
+    await db.refresh(target)
+    return target
+
+
+async def delete_chat(
+        db: AsyncSession,
+        mongo_db,
+        chat_id: uuid.UUID,
+) -> list[uuid.UUID]:
+    """Delete a chat, its participants and every message in it. Returns who to notify.
+
+    Also missing entirely, which is why groups accumulated forever. Participants are read before
+    the delete, because after it there is nobody left to send the notification to.
+
+    Messages live in Mongo and the chat row lives in Postgres, so this cannot be one transaction.
+    Mongo goes first: an orphaned Postgres row is a chat that still lists and can be retried,
+    whereas orphaned Mongo documents are invisible and unreachable forever.
+    """
+    participant_ids = list(await get_chat_participants_ids(db, chat_id))
+
+    await mongo_db["messages"].delete_many({"chat_id": chat_id})
+
+    await db.execute(delete(Chat).where(Chat.id == chat_id))
+    await db.commit()
+
+    return participant_ids
 
 
 async def change_role(db: AsyncSession, chat_id: uuid.UUID, user_id: uuid.UUID,

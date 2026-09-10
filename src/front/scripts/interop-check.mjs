@@ -14,7 +14,12 @@ import { webcrypto } from 'node:crypto';
 
 import { sha256 } from '@noble/hashes/sha2.js';
 
-import { safetyNumber, identityBindingMessage, prekeyBindingMessage } from '../src/app/core/crypto/identity.ts';
+import {
+    safetyNumber,
+    identityBindingMessage,
+    prekeyBindingMessage,
+    userFingerprintMaterial,
+} from '../src/app/core/crypto/identity.ts';
 import { buildMessageAad } from '../src/app/core/crypto/envelope.ts';
 import { buildGrantAad, computeMemberSetHash, distributionSigningPayload } from '../src/app/core/crypto/grants.ts';
 import { b64uEncode, concatBytes, DS_CHANNEL_POST, utf8, uuidBytes } from '../src/app/core/crypto/primitives.ts';
@@ -52,6 +57,23 @@ const actual = {
     msg_aad: b64uEncode(buildMessageAad(CHAT, 5, USER, SKID, 42)),
     binding: b64uEncode(identityBindingMessage(USER, DEV, k32)),
     member_set_hash: computeMemberSetHash([DEV, RDEV, CHAT]),
+    // Full roster records, not bare ids. The hash binds the key material now, so the two
+    // implementations must agree on the record encoding as well as on the digest.
+    member_set_hash_records: computeMemberSetHash([
+        {
+            device_id: DEV,
+            identity_public_key: 'aWRlbnRpdHktb25l',
+            signing_public_key: 'c2lnbi1vbmU',
+            signed_prekey_public: null,
+        },
+        {
+            device_id: RDEV,
+            identity_public_key: 'aWRlbnRpdHktdHdv',
+            signing_public_key: 'c2lnbi10d28',
+            signed_prekey_public: 'cHJla2V5LXR3bw',
+        },
+    ]),
+    user_fingerprint: b64uEncode(userFingerprintMaterial([k32, k32b])),
     dist_payload: b64uEncode(distributionSigningPayload(CHAT, 7, SKID, k32, 3)),
     grant_aad: b64uEncode(
         buildGrantAad({

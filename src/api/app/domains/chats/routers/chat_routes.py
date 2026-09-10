@@ -9,10 +9,11 @@ from app.core.exceptions import AppException
 from app.core.responses import SuccessResponse
 from app.domains.chats.models import ParticipantRole, ChatType
 from app.domains.chats.schemas.chat_schemas import ChatResponse, PrivateChatCreateRequest, GroupChatCreateRequest, \
-    UserListRequest, ChatParticipantResponse, ChangeRoleRequest, ChannelCreateRequest
+    UserListRequest, ChatParticipantResponse, ChangeRoleRequest, ChannelCreateRequest, TransferOwnershipRequest
 from app.domains.chats.services import chat_services
 from app.domains.messages.schemas.messages_schemas import MessageResponse
 from app.domains.messages.services import messages_service
+from app.domains.users.services import user_service
 from app.domains.users.dependencies import get_current_user
 from app.domains.users.models import User
 from app.infrastructure.mongo import get_mongo_db
@@ -176,10 +177,23 @@ async def delete_participants(
             raise AppException(403, "ACCESS_DENIED",
                                'You cannot remove a participant with an equal or higher role.')
 
+    removed_ids = [target.user_id for target in targets]
+
     _, epoch = await chat_services.delete_chat_participants(
         db, chat_id, data.user_ids, mongo_db=mongo_db
     )
     await _announce_epoch(db, redis, chat_id, epoch)
+
+    # The removed members have to be told separately, and this has to happen *after* the delete
+    # while their ids are still in hand. `_announce_epoch` resolves recipients from the current
+    # participant list, so they are no longer in it — which is why nothing reached them at all
+    # and their clients went on showing a chat they had been thrown out of.
+    remaining_ids = list(await chat_services.get_chat_participants_ids(db, chat_id))
+
+    await redis_service.send_participants_removed(
+        redis, chat_id=chat_id, removed_ids=removed_ids, recipient_ids=remaining_ids,
+    )
+    await redis_service.send_chat_deleted(redis, chat_id=chat_id, recipient_ids=removed_ids)
 
     chat = await chat_services.get_chat_by_id(db, chat_id)
 
@@ -219,6 +233,11 @@ async def leave_chat(
     epoch = await chat_services.leave_chat(db, chat_id, user.id, mongo_db=mongo_db)
     await _announce_epoch(db, redis, chat_id, epoch)
 
+    await redis_service.send_participants_removed(
+        redis, chat_id=chat_id, removed_ids=[user.id],
+        recipient_ids=list(await chat_services.get_chat_participants_ids(db, chat_id)),
+    )
+
     return SuccessResponse(data={"message": "You have left the chat."})
 
 
@@ -245,14 +264,100 @@ async def add_participants(
     if chat_p.role == ParticipantRole.MEMBER:
         raise AppException(403, "ACCESS_DENIED", 'You dont have permission to add participants to this chat.')
 
+    # Adding an id that does not exist used to hit the foreign key and surface as a 500.
+    known = await user_service.get_users_by_ids(db, data.user_ids)
+    if len(known) != len(set(data.user_ids)):
+        raise AppException(400, "UNKNOWN_USER", "One or more of those users do not exist.")
+
     _, epoch = await chat_services.add_chat_participants(
         db, chat_id, data.user_ids, mongo_db=mongo_db
     )
     await _announce_epoch(db, redis, chat_id, epoch)
 
+    participant_ids = list(await chat_services.get_chat_participants_ids(db, chat_id))
+    await redis_service.send_participants_added(
+        redis, chat_id=chat_id, added_ids=list(set(data.user_ids)), recipient_ids=participant_ids,
+    )
+
     chat = await chat_services.get_chat_by_id(db, chat_id)
 
     return SuccessResponse(data=chat)
+
+
+@router.post('/{chat_id}/transfer-ownership', response_model=SuccessResponse[ChatParticipantResponse])
+async def transfer_ownership(
+        data: TransferOwnershipRequest,
+        user: User = Depends(get_current_user),
+        chat_id: uuid.UUID = Path(..., description="Chat ID"),
+        db: AsyncSession = Depends(get_db),
+        redis: Redis = Depends(get_redis),
+):
+    """Hand ownership of a group or channel to another member.
+
+    `leave_chat` refuses to let an owner leave and tells them to transfer ownership or delete the
+    chat — but `change_role` explicitly forbids granting OWNER and no delete endpoint existed, so
+    neither instruction could be followed. An owner was stuck in every group they ever created.
+    """
+    participant = await messages_service.is_user_in_chat(db, user.id, chat_id)
+    if participant is None:
+        raise AppException(403, "ACCESS_DENIED", 'You are not a participant of this chat.')
+
+    if participant.role is not ParticipantRole.OWNER:
+        raise AppException(403, "ACCESS_DENIED", 'Only the owner can transfer ownership.')
+
+    chat = await chat_services.get_chat_by_id(db, chat_id)
+    if chat is None:
+        raise AppException(404, "NOT_FOUND", "Chat doesn't exist.")
+
+    if chat.chat_type == ChatType.PRIVATE:
+        raise AppException(400, "INVALID_CHAT_TYPE", 'A private chat has no owner.')
+
+    if data.user_id == user.id:
+        raise AppException(400, "INVALID_TARGET", 'You already own this chat.')
+
+    new_owner = await chat_services.transfer_ownership(db, chat_id, user.id, data.user_id)
+
+    await redis_service.send_chat_updated(
+        redis, chat_id=chat_id,
+        recipient_ids=list(await chat_services.get_chat_participants_ids(db, chat_id)),
+        payload={"owner_id": str(data.user_id)},
+    )
+
+    return SuccessResponse(data=new_owner)
+
+
+@router.delete('/{chat_id}', response_model=SuccessResponse[dict])
+async def delete_chat(
+        user: User = Depends(get_current_user),
+        chat_id: uuid.UUID = Path(..., description="Chat ID"),
+        db: AsyncSession = Depends(get_db),
+        redis: Redis = Depends(get_redis),
+        mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
+):
+    """Delete a group or channel, and every message in it. Owner only, and irreversible.
+
+    Private chats are excluded: deleting one would destroy the other person's copy of the
+    conversation on a decision they were never party to.
+    """
+    participant = await messages_service.is_user_in_chat(db, user.id, chat_id)
+    if participant is None:
+        raise AppException(403, "ACCESS_DENIED", 'You are not a participant of this chat.')
+
+    chat = await chat_services.get_chat_by_id(db, chat_id)
+    if chat is None:
+        raise AppException(404, "NOT_FOUND", "Chat doesn't exist.")
+
+    if chat.chat_type == ChatType.PRIVATE:
+        raise AppException(400, "INVALID_CHAT_TYPE", 'A private chat cannot be deleted.')
+
+    if participant.role is not ParticipantRole.OWNER:
+        raise AppException(403, "ACCESS_DENIED", 'Only the owner can delete this chat.')
+
+    participant_ids = await chat_services.delete_chat(db, mongo_db, chat_id)
+
+    await redis_service.send_chat_deleted(redis, chat_id=chat_id, recipient_ids=participant_ids)
+
+    return SuccessResponse(data={"message": "Chat deleted."})
 
 
 @router.post('/{chat_id}/change-role', response_model=SuccessResponse[ChatParticipantResponse])

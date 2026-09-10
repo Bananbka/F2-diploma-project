@@ -15,6 +15,13 @@ class WSEventType(str, Enum):
     USER_OFFLINE = "user_offline"
     USER_ONLINE = "user_online"
     CHAT_CREATED = "chat_created"
+    # Membership and lifecycle. None of these existed, so a member removed from a group was never
+    # told: their client kept the conversation on screen, and only a manual refresh revealed it
+    # was gone. CHAT_DELETED doubles as "this chat is no longer yours" for a removed member.
+    CHAT_UPDATED = "chat_updated"
+    CHAT_DELETED = "chat_deleted"
+    PARTICIPANTS_ADDED = "participants_added"
+    PARTICIPANTS_REMOVED = "participants_removed"
     # A new key epoch opened. Clients should publish a sender key before their next send, and
     # fetch grants so they can read what others send under it.
     KEY_EPOCH_STARTED = "key_epoch_started"

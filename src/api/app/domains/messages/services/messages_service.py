@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.exceptions import AppException
 from app.domains.chats.models import ChatParticipant, Chat, ChatType, ParticipantRole
+from app.domains.chats.services import chat_services
 from app.domains.crypto.models import CryptoMode
 from app.domains.crypto.reference.channel import verify_channel_post
 from app.domains.crypto.reference.envelope import verify_envelope_signature
@@ -309,6 +310,11 @@ async def send_message(
 
     collection = mongo_db["messages"]
     res = await collection.insert_one(dict(message_dict))
+
+    # Move the chat to the top of the sender's and every recipient's list. `get_user_chats` has
+    # always ordered by this column and nothing ever wrote to it.
+    await chat_services.touch_chat(db, message_in.chat_id)
+    await db.commit()
 
     message_dict["_id"] = str(res.inserted_id)
     return MessageResponse(**message_dict)

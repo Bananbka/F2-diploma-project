@@ -12,10 +12,12 @@ class PrivateChatCreateRequest(BaseModel):
 
 
 class GroupChatCreateRequest(BaseModel):
-    title: str
-    description: str
-    avatar_url: str | None = None
-    participant_ids: list[uuid.UUID] = []
+    # Bounded like the channel request below. Unbounded, one request could store as much text as
+    # the body allowed in a `Text` column, and add an unlimited number of participants.
+    title: str = Field(..., min_length=1, max_length=255)
+    description: str | None = Field(None, max_length=2000)
+    avatar_url: str | None = Field(None, max_length=1024)
+    participant_ids: list[uuid.UUID] = Field(default_factory=list, max_length=256)
 
 
 class ChatParticipantResponse(BaseModel):
@@ -55,13 +57,20 @@ class ChannelCreateRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=255)
     description: str | None = None
     avatar_url: str | None = None
-    subscriber_ids: list[uuid.UUID] = []
+    subscriber_ids: list[uuid.UUID] = Field(default_factory=list, max_length=1024)
 
 
 class UserListRequest(BaseModel):
-    user_ids: list[uuid.UUID]
+    # Bounded at both ends. An empty list reached `insert().values([])`, which is a SQL syntax
+    # error and surfaced as a 500 rather than a validation message.
+    user_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=256)
 
 
 class ChangeRoleRequest(BaseModel):
     user_id: uuid.UUID
     role: ParticipantRole
+
+
+class TransferOwnershipRequest(BaseModel):
+    """Hand OWNER to another member. The current owner is demoted to ADMIN."""
+    user_id: uuid.UUID

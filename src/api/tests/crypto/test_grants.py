@@ -1,4 +1,5 @@
 """Grant wrapping, distribution signatures, and the member set hash."""
+import os
 import uuid
 
 import pytest
@@ -223,3 +224,68 @@ def test_member_set_hash_detects_a_removed_device():
     devices = [uuid.uuid4() for _ in range(4)]
 
     assert compute_member_set_hash(devices) != compute_member_set_hash(devices[:-1])
+
+
+def _roster_entry(device_id=None, **overrides):
+    entry = {
+        "device_id": str(device_id or uuid.uuid4()),
+        "identity_public_key": b64u_encode(os.urandom(32)),
+        "signing_public_key": b64u_encode(os.urandom(32)),
+        "signed_prekey_public": None,
+    }
+    entry.update(overrides)
+    return entry
+
+
+def test_member_set_hash_detects_a_substituted_identity_key():
+    """The attack the device-id-only hash could not see.
+
+    A malicious server returns the same device set with one member's X25519 key replaced by one
+    it holds. Every sender then wraps the chain key for the server, and the epoch commitment
+    matched because it only ever covered the ids.
+    """
+    roster = [_roster_entry() for _ in range(3)]
+
+    tampered = [dict(entry) for entry in roster]
+    tampered[1]["identity_public_key"] = b64u_encode(os.urandom(32))
+
+    assert compute_member_set_hash(roster) != compute_member_set_hash(tampered)
+
+
+def test_member_set_hash_detects_a_substituted_signing_key():
+    roster = [_roster_entry() for _ in range(3)]
+
+    tampered = [dict(entry) for entry in roster]
+    tampered[0]["signing_public_key"] = b64u_encode(os.urandom(32))
+
+    assert compute_member_set_hash(roster) != compute_member_set_hash(tampered)
+
+
+def test_member_set_hash_detects_an_injected_prekey():
+    """Grants prefer a prekey over the identity key, so injecting one redirects the wrap."""
+    roster = [_roster_entry() for _ in range(2)]
+
+    tampered = [dict(entry) for entry in roster]
+    tampered[0]["signed_prekey_public"] = b64u_encode(os.urandom(32))
+
+    assert compute_member_set_hash(roster) != compute_member_set_hash(tampered)
+
+
+def test_member_set_hash_over_records_is_order_independent():
+    roster = [_roster_entry() for _ in range(4)]
+
+    assert compute_member_set_hash(roster) == compute_member_set_hash(list(reversed(roster)))
+
+
+def test_member_set_hash_fields_cannot_be_shifted_between_records():
+    """A separator that a field value could contain would let two rosters collide.
+
+    Both separators are outside the base64url and uuid alphabets, so this must hold.
+    """
+    device = uuid.uuid4()
+    key = b64u_encode(os.urandom(32))
+
+    a = [_roster_entry(device, identity_public_key=key, signing_public_key="")]
+    b = [_roster_entry(device, identity_public_key="", signing_public_key=key)]
+
+    assert compute_member_set_hash(a) != compute_member_set_hash(b)

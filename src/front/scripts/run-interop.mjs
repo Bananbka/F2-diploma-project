@@ -20,6 +20,7 @@ from app.domains.crypto.reference.identity import (
     identity_binding_message,
     prekey_binding_message,
     safety_number,
+    user_fingerprint_material,
 )
 from app.domains.crypto.reference.ratchet import derive_message_key, advance_chain
 from app.domains.crypto.reference.envelope import build_message_aad
@@ -45,6 +46,15 @@ print(json.dumps({
     'msg_aad': b64u_encode(build_message_aad(uuid.UUID(CHAT), 5, uuid.UUID(USER), uuid.UUID(SKID), 42)),
     'binding': b64u_encode(identity_binding_message(uuid.UUID(USER), uuid.UUID(DEV), k32)),
     'member_set_hash': compute_member_set_hash([DEV, RDEV, CHAT]),
+    # Full roster records, not bare ids. The hash binds the key material now, so the two
+    # implementations must agree on the record encoding as well as on the digest.
+    'member_set_hash_records': compute_member_set_hash([
+        {'device_id': DEV, 'identity_public_key': 'aWRlbnRpdHktb25l',
+         'signing_public_key': 'c2lnbi1vbmU', 'signed_prekey_public': None},
+        {'device_id': RDEV, 'identity_public_key': 'aWRlbnRpdHktdHdv',
+         'signing_public_key': 'c2lnbi10d28', 'signed_prekey_public': 'cHJla2V5LXR3bw'},
+    ]),
+    'user_fingerprint': b64u_encode(user_fingerprint_material([k32, bytes(range(200, 232))])),
     'dist_payload': b64u_encode(distribution_signing_payload(uuid.UUID(CHAT), 7, uuid.UUID(SKID), k32, 3)),
     'grant_aad': b64u_encode(build_grant_aad(chat_id=uuid.UUID(CHAT), epoch=3, sender_key_id=uuid.UUID(SKID),
                                              sender_device_id=uuid.UUID(DEV), recipient_device_id=uuid.UUID(RDEV),
