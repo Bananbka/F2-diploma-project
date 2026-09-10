@@ -4,6 +4,7 @@ Every multi-byte value that goes into a signature or AEAD associated-data blob i
 in one place, so the backend and any client cannot drift. Getting these encodings wrong is the
 classic source of "it verifies locally but not against the other implementation" bugs.
 """
+
 import base64
 import uuid
 
@@ -11,13 +12,17 @@ import uuid
 # for one purpose can never be replayed as a value for another (cross-protocol confusion).
 DS_IDENTITY_BIND = b"NS-v1-idbind"
 DS_PREKEY_BIND = b"NS-v1-prekeybind"  # signed prekey bound to its user and device
-DS_MESSAGE = b"NS-v1-msg"          # AAD prefix for a sealed message
-DS_MESSAGE_KEY = b"NS-v1-msgkey"   # HKDF info when deriving a message key from a chain key
-DS_CHAIN = b"NS-v1-chain"          # HKDF info when advancing the chain
-DS_GRANT = b"NS-v1-grant"          # AAD for a wrapped sender key
-DS_SENDER_KEY = b"NS-v1-skdm"      # sender key distribution signature
-DS_MEMBER_SET = b"NS-v1-memberset-v2"  # epoch membership: binds key material, not just device ids
-DS_CHANNEL_POST = b"NS-v1-post"    # signed (but not encrypted) channel post
+DS_MESSAGE = b"NS-v1-msg"  # AAD prefix for a sealed message
+DS_MESSAGE_KEY = (
+    b"NS-v1-msgkey"  # HKDF info when deriving a message key from a chain key
+)
+DS_CHAIN = b"NS-v1-chain"  # HKDF info when advancing the chain
+DS_GRANT = b"NS-v1-grant"  # AAD for a wrapped sender key
+DS_SENDER_KEY = b"NS-v1-skdm"  # sender key distribution signature
+DS_MEMBER_SET = (
+    b"NS-v1-memberset-v2"  # epoch membership: binds key material, not just device ids
+)
+DS_CHANNEL_POST = b"NS-v1-post"  # signed (but not encrypted) channel post
 DS_FINGERPRINT = b"NS-v1-fingerprint"
 
 VERSION = 1

@@ -1,15 +1,15 @@
-﻿import uuid
+import uuid
 from datetime import datetime, timezone
 
 from bson import ObjectId
 from bson.errors import InvalidId
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from sqlalchemy import select, func
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.exceptions import AppException
-from app.domains.chats.models import ChatParticipant, Chat, ChatType, ParticipantRole
+from app.domains.chats.models import Chat, ChatParticipant, ChatType, ParticipantRole
 from app.domains.chats.services import chat_services
 from app.domains.crypto.models import CryptoMode
 from app.domains.crypto.reference.channel import verify_channel_post
@@ -27,22 +27,27 @@ from app.infrastructure.minio import minio_manager
 
 
 async def is_user_in_chat(
-        db: AsyncSession,
-        user_id: uuid.UUID,
-        chat_id: uuid.UUID,
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    chat_id: uuid.UUID,
 ) -> ChatParticipant | None:
-    stmt = select(ChatParticipant).where(ChatParticipant.user_id == user_id, ChatParticipant.chat_id == chat_id)
+    stmt = select(ChatParticipant).where(
+        ChatParticipant.user_id == user_id, ChatParticipant.chat_id == chat_id
+    )
     res = await db.execute(stmt)
     return res.scalar_one_or_none()
 
 
 async def is_user_in_all_chats(
-        db: AsyncSession,
-        user_id: uuid.UUID,
-        chat_ids: list[uuid.UUID]
+    db: AsyncSession, user_id: uuid.UUID, chat_ids: list[uuid.UUID]
 ):
-    stmt = select(func.count()).select_from(ChatParticipant).where(ChatParticipant.user_id == user_id,
-                                                                   ChatParticipant.chat_id.in_(chat_ids))
+    stmt = (
+        select(func.count())
+        .select_from(ChatParticipant)
+        .where(
+            ChatParticipant.user_id == user_id, ChatParticipant.chat_id.in_(chat_ids)
+        )
+    )
 
     res = await db.execute(stmt)
     cp = res.scalar_one()
@@ -50,14 +55,13 @@ async def is_user_in_all_chats(
     return cp == len(chat_ids)
 
 
-async def get_chat_or_403(db: AsyncSession, chat_id: uuid.UUID, user_id: uuid.UUID) -> Chat:
+async def get_chat_or_403(
+    db: AsyncSession, chat_id: uuid.UUID, user_id: uuid.UUID
+) -> Chat:
     stmt = (
         select(ChatParticipant, Chat)
         .join(Chat, Chat.id == ChatParticipant.chat_id)
-        .where(
-            ChatParticipant.user_id == user_id,
-            ChatParticipant.chat_id == chat_id
-        )
+        .where(ChatParticipant.user_id == user_id, ChatParticipant.chat_id == chat_id)
     )
     result = await db.execute(stmt)
     row = result.first()
@@ -83,7 +87,9 @@ async def get_message_by_id(collection, id_: ObjectId) -> dict:
     return msg
 
 
-async def get_and_validate_message(db: AsyncSession, collection, msg_id: str, user_id: uuid.UUID):
+async def get_and_validate_message(
+    db: AsyncSession, collection, msg_id: str, user_id: uuid.UUID
+):
     obj_id = objectify_id(msg_id)
 
     msg = await get_message_by_id(collection, obj_id)
@@ -123,7 +129,8 @@ async def _validate_envelope(db, chat, user_id, settings, envelope) -> None:
     """
     if envelope is None:
         raise AppException(
-            400, "ENVELOPE_REQUIRED",
+            400,
+            "ENVELOPE_REQUIRED",
             "This chat is end-to-end encrypted; send an envelope rather than plaintext.",
         )
 
@@ -131,9 +138,13 @@ async def _validate_envelope(db, chat, user_id, settings, envelope) -> None:
     # message from before a removal land after it.
     if envelope.epoch != settings.current_epoch:
         raise AppException(
-            409, "EPOCH_STALE",
+            409,
+            "EPOCH_STALE",
             "This chat has re-keyed. Fetch the current epoch, re-encrypt and retry.",
-            details={"current_epoch": settings.current_epoch, "sent_epoch": envelope.epoch},
+            details={
+                "current_epoch": settings.current_epoch,
+                "sent_epoch": envelope.epoch,
+            },
         )
 
     distribution = await epoch_service.get_distribution(
@@ -141,27 +152,30 @@ async def _validate_envelope(db, chat, user_id, settings, envelope) -> None:
     )
     if distribution is None:
         raise AppException(
-            409, "SENDER_KEY_MISSING",
+            409,
+            "SENDER_KEY_MISSING",
             "Publish a sender key for the current epoch before sending.",
             details={"current_epoch": settings.current_epoch},
         )
 
     if distribution.sender_user_id != user_id:
         raise AppException(
-            403, "SENDER_KEY_NOT_YOURS",
+            403,
+            "SENDER_KEY_NOT_YOURS",
             "That sender key belongs to another member.",
         )
 
     # The only integrity check available to a server that cannot read the message: prove the
     # sender is who the envelope claims. Blocks forged-attribution injection at the source.
     if not verify_envelope_signature(
-            envelope=envelope.model_dump(mode="json"),
-            signing_public=b64u_decode(distribution.signing_public_key),
-            chat_id=chat.id,
-            sender_id=user_id,
+        envelope=envelope.model_dump(mode="json"),
+        signing_public=b64u_decode(distribution.signing_public_key),
+        chat_id=chat.id,
+        sender_id=user_id,
     ):
         raise AppException(
-            400, "INVALID_MESSAGE_SIGNATURE",
+            400,
+            "INVALID_MESSAGE_SIGNATURE",
             "The message signature does not verify against your published sender key.",
         )
 
@@ -176,20 +190,23 @@ async def _validate_channel_post(db, chat, user_id, post) -> None:
     participant = await is_user_in_chat(db, user_id, chat.id)
     if participant is None or participant.role == ParticipantRole.MEMBER:
         raise AppException(
-            403, "CHANNEL_POST_FORBIDDEN",
+            403,
+            "CHANNEL_POST_FORBIDDEN",
             "Only the channel owner and admins can post.",
         )
 
     if post is None:
         raise AppException(
-            400, "CHANNEL_POST_REQUIRED",
+            400,
+            "CHANNEL_POST_REQUIRED",
             "Channel messages must be sent as a signed channel_post.",
         )
 
     identities = await identity_service.get_active_signing_keys(db, user_id)
     if not identities:
         raise AppException(
-            400, "NO_IDENTITY_KEY",
+            400,
+            "NO_IDENTITY_KEY",
             "Publish an identity key before posting; channel posts must be signed.",
         )
 
@@ -209,16 +226,17 @@ async def _validate_channel_post(db, chat, user_id, post) -> None:
 
     if not signed_by_this_user:
         raise AppException(
-            400, "INVALID_POST_SIGNATURE",
+            400,
+            "INVALID_POST_SIGNATURE",
             "The post signature does not verify against any of your identity keys.",
         )
 
 
 async def _authorize_attachments(
-        db: AsyncSession,
-        mongo_db: AsyncIOMotorDatabase,
-        user_id: uuid.UUID,
-        attachments,
+    db: AsyncSession,
+    mongo_db: AsyncIOMotorDatabase,
+    user_id: uuid.UUID,
+    attachments,
 ) -> None:
     """Check the sender is entitled to reference each attachment url.
 
@@ -244,34 +262,47 @@ async def _authorize_attachments(
 
     for attachment in attachments:
         url = attachment.url
-        object_key = url[len(prefix):]
+        object_key = url[len(prefix) :]
 
-        owner = await minio_manager.get_object_owner(object_key, settings.MINIO_MESSAGE_BUCKET)
+        owner = await minio_manager.get_object_owner(
+            object_key, settings.MINIO_MESSAGE_BUCKET
+        )
         if owner is None:
-            raise AppException(400, "ATTACHMENT_UNKNOWN", "That attachment no longer exists.")
+            raise AppException(
+                400, "ATTACHMENT_UNKNOWN", "That attachment no longer exists."
+            )
 
         if owner == str(user_id):
             continue
 
-        my_chat_ids = (await db.execute(
-            select(ChatParticipant.chat_id).where(ChatParticipant.user_id == user_id)
-        )).scalars().all()
+        my_chat_ids = (
+            (
+                await db.execute(
+                    select(ChatParticipant.chat_id).where(
+                        ChatParticipant.user_id == user_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
 
         visible = await collection.find_one(
             {"chat_id": {"$in": list(my_chat_ids)}, "attachments.url": url}, {"_id": 1}
         )
         if visible is None:
             raise AppException(
-                403, "ATTACHMENT_FORBIDDEN",
+                403,
+                "ATTACHMENT_FORBIDDEN",
                 "You cannot attach a file you did not upload and cannot currently see.",
             )
 
 
 async def send_message(
-        db: AsyncSession,
-        mongo_db: AsyncIOMotorDatabase,
-        user_id: uuid.UUID,
-        message_in: MessageCreateRequest
+    db: AsyncSession,
+    mongo_db: AsyncIOMotorDatabase,
+    user_id: uuid.UUID,
+    message_in: MessageCreateRequest,
 ) -> MessageResponse:
     chat = await get_chat_or_403(db, message_in.chat_id, user_id)
 
@@ -321,12 +352,12 @@ async def send_message(
 
 
 async def get_chat_messages(
-        db: AsyncSession,
-        mongo_db: AsyncIOMotorDatabase,
-        user_id: uuid.UUID,
-        chat_id: uuid.UUID,
-        limit: int = 50,
-        before_id: str | None = None
+    db: AsyncSession,
+    mongo_db: AsyncIOMotorDatabase,
+    user_id: uuid.UUID,
+    chat_id: uuid.UUID,
+    limit: int = 50,
+    before_id: str | None = None,
 ) -> list[MessageResponse]:
     chat = await get_chat_or_403(db, chat_id, user_id)
 
@@ -345,12 +376,7 @@ async def get_chat_messages(
         floor = objectify_id(participant.history_start_message_id)
         query["_id"] = {**query.get("_id", {}), "$gt": floor}
 
-    crs = (
-        collection
-        .find(query)
-        .sort("_id", -1)
-        .limit(limit)
-    )
+    crs = collection.find(query).sort("_id", -1).limit(limit)
     messages = await crs.to_list(length=limit)
 
     res = []
@@ -363,11 +389,11 @@ async def get_chat_messages(
 
 
 async def update_message(
-        db: AsyncSession,
-        mongo_db: AsyncIOMotorDatabase,
-        user_id: uuid.UUID,
-        msg_id: str,
-        message_in: MessageUpdateRequest,
+    db: AsyncSession,
+    mongo_db: AsyncIOMotorDatabase,
+    user_id: uuid.UUID,
+    msg_id: str,
+    message_in: MessageUpdateRequest,
 ) -> MessageResponse:
     collection = mongo_db["messages"]
 
@@ -379,7 +405,8 @@ async def update_message(
 
     chat_settings = await epoch_service.get_settings(db, chat_id)
     is_encrypted_chat = (
-        chat_settings is not None and chat_settings.crypto_mode is CryptoMode.SENDER_KEYS_V1
+        chat_settings is not None
+        and chat_settings.crypto_mode is CryptoMode.SENDER_KEYS_V1
     )
 
     # A channel post is signed over its own content, so replacing that content through the edit
@@ -387,7 +414,8 @@ async def update_message(
     # "authenticated" post nobody actually authored. Editing a broadcast post is not supported.
     if chat.chat_type == ChatType.CHANNEL:
         raise AppException(
-            400, "CHANNEL_POST_NOT_EDITABLE",
+            400,
+            "CHANNEL_POST_NOT_EDITABLE",
             "Channel posts cannot be edited; delete the post and publish a new one.",
         )
 
@@ -399,7 +427,8 @@ async def update_message(
         await _validate_envelope(db, chat, user_id, chat_settings, message_in.envelope)
     elif message_in.envelope is not None and chat_settings is not None:
         raise AppException(
-            400, "ENVELOPE_NOT_ALLOWED",
+            400,
+            "ENVELOPE_NOT_ALLOWED",
             "This chat is not end-to-end encrypted; an envelope cannot be verified here.",
         )
 
@@ -422,7 +451,8 @@ async def update_message(
 
         if same_chain and message_in.envelope.idx <= existing.get("idx", -1):
             raise AppException(
-                400, "CHAIN_INDEX_REUSED",
+                400,
+                "CHAIN_INDEX_REUSED",
                 "An edit must use a fresh chain index; reusing one would repeat a message key.",
             )
 
@@ -445,10 +475,10 @@ async def update_message(
 
 
 async def delete_message(
-        db: AsyncSession,
-        mongo_db: AsyncIOMotorDatabase,
-        user_id: uuid.UUID,
-        msg_id: str,
+    db: AsyncSession,
+    mongo_db: AsyncIOMotorDatabase,
+    user_id: uuid.UUID,
+    msg_id: str,
 ) -> uuid.UUID:
     collection = mongo_db["messages"]
     msg = await get_and_validate_message(db, collection, msg_id, user_id)
@@ -463,7 +493,9 @@ async def delete_message(
         if not file_url:
             continue
 
-        still_referenced = await collection.find_one({"attachments.url": file_url}, {"_id": 1})
+        still_referenced = await collection.find_one(
+            {"attachments.url": file_url}, {"_id": 1}
+        )
         if still_referenced:
             continue
 
@@ -473,11 +505,11 @@ async def delete_message(
 
 
 async def mark_messages_as_read(
-        db: AsyncSession,
-        mongo_db: AsyncIOMotorDatabase,
-        chat_id: uuid.UUID,
-        user_id: uuid.UUID,
-        last_read_message_id: str
+    db: AsyncSession,
+    mongo_db: AsyncIOMotorDatabase,
+    chat_id: uuid.UUID,
+    user_id: uuid.UUID,
+    last_read_message_id: str,
 ) -> int:
     """Mark everything up to `last_read_message_id` as read for this chat.
 
@@ -497,9 +529,9 @@ async def mark_messages_as_read(
             "chat_id": chat_id,
             "sender_id": {"$ne": user_id},
             "is_read": False,
-            "_id": {"$lte": message_id}
+            "_id": {"$lte": message_id},
         },
-        {"$set": {"is_read": True}}
+        {"$set": {"is_read": True}},
     )
 
     return result.modified_count

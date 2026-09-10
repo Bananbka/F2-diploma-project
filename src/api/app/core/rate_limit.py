@@ -12,6 +12,7 @@ irrelevant at these magnitudes.
 Redis is a hard dependency of the app already, so a failure here is not "fall through and allow" —
 it is a broken deployment. Limits therefore fail closed.
 """
+
 import time
 
 from redis.asyncio import Redis
@@ -21,13 +22,13 @@ from app.core.exceptions import AppException
 
 
 async def enforce_rate_limit(
-        redis: Redis,
-        *,
-        scope: str,
-        identifier: str,
-        limit: int,
-        window_seconds: int,
-        message: str = "Too many attempts. Please wait and try again.",
+    redis: Redis,
+    *,
+    scope: str,
+    identifier: str,
+    limit: int,
+    window_seconds: int,
+    message: str = "Too many attempts. Please wait and try again.",
 ) -> None:
     """Allow `limit` calls per `window_seconds` for one (scope, identifier). Raise 429 beyond it.
 
@@ -49,11 +50,16 @@ async def enforce_rate_limit(
     if used > limit:
         retry_after = window_seconds - (int(time.time()) % window_seconds)
         raise AppException(
-            429, "RATE_LIMITED", message, details={"retry_after_seconds": retry_after},
+            429,
+            "RATE_LIMITED",
+            message,
+            details={"retry_after_seconds": retry_after},
         )
 
 
-async def reset_rate_limit(redis: Redis, *, scope: str, identifier: str, window_seconds: int) -> None:
+async def reset_rate_limit(
+    redis: Redis, *, scope: str, identifier: str, window_seconds: int
+) -> None:
     """Clear the current window after a success, so honest users are never penalised for a typo."""
     if not settings.RATE_LIMIT_ENABLED:
         return

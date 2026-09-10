@@ -1,9 +1,8 @@
-﻿import time
+import time
 import uuid
 
 import jwt
-from fastapi import APIRouter, Depends
-from fastapi import Response, Request
+from fastapi import APIRouter, Depends, Request, Response
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,19 +10,36 @@ from app.core.config import settings
 from app.core.exceptions import AppException
 from app.core.rate_limit import client_identifier, enforce_rate_limit, reset_rate_limit
 from app.core.responses import SuccessResponse
-from app.core.security import create_access_token, verify_password, create_refresh_token, set_token_cookie, \
-    delete_token_cookies, get_password_hash
+from app.core.security import (
+    create_access_token,
+    create_refresh_token,
+    delete_token_cookies,
+    get_password_hash,
+    revocation_cutoff,
+    set_token_cookie,
+    verify_password,
+)
 from app.domains.crypto.models import EpochReason
 from app.domains.crypto.services import epoch_service, identity_service
-from app.domains.users.dependencies import get_current_user, get_current_unverified_user
+from app.domains.users.dependencies import get_current_unverified_user, get_current_user
 from app.domains.users.models.user import User
-from app.domains.users.schemas.user_schemas import UserCreate, UserLogin, UserResponse, PasswordForgot, PasswordReset, \
-    PasswordChange, EmailVerification
+from app.domains.users.schemas.user_schemas import (
+    EmailVerification,
+    PasswordChange,
+    PasswordForgot,
+    PasswordReset,
+    UserCreate,
+    UserLogin,
+    UserResponse,
+)
 from app.domains.users.services import user_service
-from app.domains.users.services.auth_service import generate_otp, check_otp
-from app.domains.users.services.user_service import get_user_by_email_and_username, get_user_by_username, \
-    get_user_by_email
-from app.domains.users.tasks import send_email, EmailTasks
+from app.domains.users.services.auth_service import check_otp, generate_otp
+from app.domains.users.services.user_service import (
+    get_user_by_email,
+    get_user_by_email_and_username,
+    get_user_by_username,
+)
+from app.domains.users.tasks import EmailTasks, send_email
 from app.infrastructure.postgres import get_db
 from app.infrastructure.redis import get_redis
 
@@ -48,11 +64,19 @@ REGISTER_PER_IP = 5
 
 ### AUTHENTICATION
 @router.post("/register", response_model=SuccessResponse[UserResponse])
-async def register(user_in: UserCreate, response: Response, request: Request,
-                   db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis)):
+async def register(
+    user_in: UserCreate,
+    response: Response,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+):
     await enforce_rate_limit(
-        redis, scope="register", identifier=client_identifier(request),
-        limit=REGISTER_PER_IP, window_seconds=REGISTER_WINDOW,
+        redis,
+        scope="register",
+        identifier=client_identifier(request),
+        limit=REGISTER_PER_IP,
+        window_seconds=REGISTER_WINDOW,
         message="Too many accounts created from here. Please try again later.",
     )
 
@@ -80,11 +104,18 @@ async def register(user_in: UserCreate, response: Response, request: Request,
 
 
 @router.post("/verify-email", response_model=SuccessResponse[UserResponse])
-async def verify_email(data: EmailVerification, request: Request,
-                       db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis)):
+async def verify_email(
+    data: EmailVerification,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+):
     await enforce_rate_limit(
-        redis, scope="verify-email", identifier=client_identifier(request),
-        limit=VERIFY_PER_IP, window_seconds=VERIFY_WINDOW,
+        redis,
+        scope="verify-email",
+        identifier=client_identifier(request),
+        limit=VERIFY_PER_IP,
+        window_seconds=VERIFY_WINDOW,
     )
 
     is_valid = await check_otp(redis, "email-verification", data.email, data.otp)
@@ -92,7 +123,8 @@ async def verify_email(data: EmailVerification, request: Request,
         raise AppException(400, "INVALID_OTP", "Invalid or expired code.")
 
     user = await get_user_by_email(db, email=data.email)
-    if not user: raise AppException(404, "USER_DOESNT_EXIST", "User does not exist.")
+    if not user:
+        raise AppException(404, "USER_DOESNT_EXIST", "User does not exist.")
 
     user.is_verified = True
     await db.commit()
@@ -101,16 +133,20 @@ async def verify_email(data: EmailVerification, request: Request,
 
 
 @router.post("/get-verification-email", response_model=SuccessResponse[dict])
-async def get_verification_email(user: User = Depends(get_current_unverified_user),
-                                 redis: Redis = Depends(get_redis)):
+async def get_verification_email(
+    user: User = Depends(get_current_unverified_user), redis: Redis = Depends(get_redis)
+):
     if user.is_verified:
         raise AppException(400, "ALREADY_VERIFIED", "User is already verified.")
 
     # Also an outbound-email limit: without it this endpoint is a free mail cannon aimed at any
     # address, which gets the sending domain blacklisted.
     await enforce_rate_limit(
-        redis, scope="otp-request", identifier=str(user.id),
-        limit=OTP_REQUEST_PER_ACCOUNT, window_seconds=OTP_REQUEST_WINDOW,
+        redis,
+        scope="otp-request",
+        identifier=str(user.id),
+        limit=OTP_REQUEST_PER_ACCOUNT,
+        window_seconds=OTP_REQUEST_WINDOW,
         message="A code was just sent. Please wait before requesting another.",
     )
 
@@ -121,17 +157,28 @@ async def get_verification_email(user: User = Depends(get_current_unverified_use
 
 
 @router.post("/login", response_model=SuccessResponse[UserResponse])
-async def login(user_in: UserLogin, response: Response, request: Request,
-                db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis)):
+async def login(
+    user_in: UserLogin,
+    response: Response,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+):
     caller = client_identifier(request)
 
     await enforce_rate_limit(
-        redis, scope="login-ip", identifier=caller,
-        limit=LOGIN_PER_IP, window_seconds=LOGIN_WINDOW,
+        redis,
+        scope="login-ip",
+        identifier=caller,
+        limit=LOGIN_PER_IP,
+        window_seconds=LOGIN_WINDOW,
     )
     await enforce_rate_limit(
-        redis, scope="login-account", identifier=user_in.username.lower(),
-        limit=LOGIN_PER_ACCOUNT, window_seconds=LOGIN_WINDOW,
+        redis,
+        scope="login-account",
+        identifier=user_in.username.lower(),
+        limit=LOGIN_PER_ACCOUNT,
+        window_seconds=LOGIN_WINDOW,
         message="Too many failed sign-ins for this account. Please wait and try again.",
     )
 
@@ -147,9 +194,14 @@ async def login(user_in: UserLogin, response: Response, request: Request,
 
     # Clear the counters on success so a user who mistyped twice is not locked out of their own
     # account for the rest of the window.
-    await reset_rate_limit(redis, scope="login-ip", identifier=caller, window_seconds=LOGIN_WINDOW)
     await reset_rate_limit(
-        redis, scope="login-account", identifier=user_in.username.lower(), window_seconds=LOGIN_WINDOW
+        redis, scope="login-ip", identifier=caller, window_seconds=LOGIN_WINDOW
+    )
+    await reset_rate_limit(
+        redis,
+        scope="login-account",
+        identifier=user_in.username.lower(),
+        window_seconds=LOGIN_WINDOW,
     )
 
     access_token = create_access_token(data={"sub": str(user.id)})
@@ -163,9 +215,7 @@ async def login(user_in: UserLogin, response: Response, request: Request,
 
 @router.post("/logout", response_model=SuccessResponse[dict])
 async def logout(
-        request: Request,
-        response: Response,
-        redis: Redis = Depends(get_redis)
+    request: Request, response: Response, redis: Redis = Depends(get_redis)
 ):
     # Both cookies are revoked. Blacklisting only the access token left the refresh token live,
     # so "log out" ended nothing a holder of that cookie could not immediately undo.
@@ -179,7 +229,9 @@ async def logout(
             continue
 
         try:
-            payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+            payload = jwt.decode(
+                token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
+            )
         except jwt.PyJWTError:
             continue
 
@@ -197,10 +249,10 @@ async def logout(
 
 @router.post("/refresh", response_model=SuccessResponse[dict])
 async def refresh(
-        request: Request,
-        response: Response,
-        db: AsyncSession = Depends(get_db),
-        redis: Redis = Depends(get_redis),
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ):
     """Mint a new access token from the refresh cookie.
 
@@ -213,13 +265,17 @@ async def refresh(
     """
     refresh_token = request.cookies.get("refresh_token")
     if not refresh_token:
-        raise AppException(401, "NO_REFRESH_TOKEN", "There is no refresh token in cookies.")
+        raise AppException(
+            401, "NO_REFRESH_TOKEN", "There is no refresh token in cookies."
+        )
 
     if await redis.get(f"blacklist:{refresh_token}"):
         raise AppException(401, "TOKEN_REVOKED", "Session ended. Please log in again.")
 
     try:
-        payload = jwt.decode(refresh_token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        payload = jwt.decode(
+            refresh_token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
+        )
     except jwt.PyJWTError:
         raise AppException(401, "INVALID_REFRESH", "Session error.")
 
@@ -236,8 +292,12 @@ async def refresh(
     # would be checking a value we just generated.
     issued_at = payload.get("iat")
     logout_timestamp = await redis.get(f"force_logout:{user_id}")
-    if logout_timestamp and (issued_at is None or int(issued_at) < int(logout_timestamp)):
-        raise AppException(401, "SESSION_EXPIRED", "Your session was terminated. Please log in again.")
+    if logout_timestamp and (
+        issued_at is None or float(issued_at) < float(logout_timestamp)
+    ):
+        raise AppException(
+            401, "SESSION_EXPIRED", "Your session was terminated. Please log in again."
+        )
 
     user = await user_service.get_user_by_id(db, user_id)
     if user is None or not user.is_active:
@@ -252,10 +312,10 @@ async def refresh(
 ### RESTORE
 @router.post("/forgot-password", response_model=SuccessResponse[dict])
 async def forgot_password(
-        user_data: PasswordForgot,
-        request: Request,
-        db: AsyncSession = Depends(get_db),
-        redis: Redis = Depends(get_redis)
+    user_data: PasswordForgot,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ):
     """Send a reset code, without revealing whether the account exists.
 
@@ -264,12 +324,18 @@ async def forgot_password(
     that differs (sending mail) is invisible to the caller.
     """
     await enforce_rate_limit(
-        redis, scope="forgot-ip", identifier=client_identifier(request),
-        limit=VERIFY_PER_IP, window_seconds=VERIFY_WINDOW,
+        redis,
+        scope="forgot-ip",
+        identifier=client_identifier(request),
+        limit=VERIFY_PER_IP,
+        window_seconds=VERIFY_WINDOW,
     )
     await enforce_rate_limit(
-        redis, scope="forgot-account", identifier=user_data.username.lower(),
-        limit=OTP_REQUEST_PER_ACCOUNT, window_seconds=OTP_REQUEST_WINDOW,
+        redis,
+        scope="forgot-account",
+        identifier=user_data.username.lower(),
+        limit=OTP_REQUEST_PER_ACCOUNT,
+        window_seconds=OTP_REQUEST_WINDOW,
         message="A reset code was recently sent. Please check your email before requesting another.",
     )
 
@@ -280,20 +346,25 @@ async def forgot_password(
         send_email.delay(EmailTasks.PASSWORD_RESET.value, user.email, otp=otp)
 
     return SuccessResponse(
-        data={"message": "If those details match an account, a reset code has been sent."}
+        data={
+            "message": "If those details match an account, a reset code has been sent."
+        }
     )
 
 
 @router.post("/reset-password", response_model=SuccessResponse[dict])
 async def reset_password(
-        user_data: PasswordReset,
-        request: Request,
-        db: AsyncSession = Depends(get_db),
-        redis: Redis = Depends(get_redis)
+    user_data: PasswordReset,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ):
     await enforce_rate_limit(
-        redis, scope="reset-ip", identifier=client_identifier(request),
-        limit=VERIFY_PER_IP, window_seconds=VERIFY_WINDOW,
+        redis,
+        scope="reset-ip",
+        identifier=client_identifier(request),
+        limit=VERIFY_PER_IP,
+        window_seconds=VERIFY_WINDOW,
     )
 
     user = await get_user_by_username(db, user_data.username)
@@ -320,22 +391,28 @@ async def reset_password(
     # Revoking devices shrinks the member set of every encrypted chat this user is in, so those
     # chats must re-key in the same transaction. Without it the roster no longer matches the
     # epoch's stored commitment and every remaining member's client correctly refuses to send.
-    await epoch_service.rotate_chats_for_member_change(db, user.id, EpochReason.MEMBER_REMOVED)
+    await epoch_service.rotate_chats_for_member_change(
+        db, user.id, EpochReason.MEMBER_REMOVED
+    )
 
     await db.commit()
 
-    await redis.setex(f"force_logout:{user.id}", 604800, int(time.time()))
+    # Every device is revoked, and no replacement session is issued here — the user must log in
+    # again with the new password.
+    await redis.setex(f"force_logout:{user.id}", 604800, revocation_cutoff())
 
-    return SuccessResponse(data={"message": "Password and keys was successfully updated."})
+    return SuccessResponse(
+        data={"message": "Password and keys was successfully updated."}
+    )
 
 
 @router.post("/change-password", response_model=SuccessResponse[dict])
 async def change_password(
-        user_data: PasswordChange,
-        response: Response,
-        current_user: User = Depends(get_current_user),
-        db: AsyncSession = Depends(get_db),
-        redis: Redis = Depends(get_redis)
+    user_data: PasswordChange,
+    response: Response,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ):
     if not verify_password(user_data.old_password, current_user.hashed_password):
         raise AppException(401, "INVALID_PASSWORD", "Invalid password.")
@@ -355,8 +432,11 @@ async def change_password(
 
     await db.commit()
 
-    logout_time = int(time.time())
-    await redis.setex(f"force_logout:{current_user.id}", 604800, logout_time)
+    # The cutoff is taken *before* the replacement tokens are minted, so their `iat` is strictly
+    # greater and the caller's own new session survives the revocation it just triggered — while
+    # every token issued before it, down to the fraction of a second, does not.
+    cutoff = revocation_cutoff()
+    await redis.setex(f"force_logout:{current_user.id}", 604800, cutoff)
 
     new_access_token = create_access_token(data={"sub": str(current_user.id)})
     new_refresh_token = create_refresh_token(data={"sub": str(current_user.id)})

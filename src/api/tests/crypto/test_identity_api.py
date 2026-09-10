@@ -1,4 +1,5 @@
 """End-to-end tests for the /crypto identity endpoints against the running app."""
+
 import uuid
 
 import httpx
@@ -20,15 +21,18 @@ async def _register_user() -> tuple[httpx.AsyncClient, uuid.UUID]:
 
     client = httpx.AsyncClient(base_url=BASE, timeout=30.0)
 
-    r = await client.post("/auth/register", json={
-        "full_name": "Crypto Test",
-        "username": f"crypto{suffix}",
-        "password": password,
-        "email": email,
-        "phone_number": f"+38050{uuid.uuid4().int % 10_000_000:07d}",
-        "public_key": "legacy",
-        "encrypted_private_key": "legacy",
-    })
+    r = await client.post(
+        "/auth/register",
+        json={
+            "full_name": "Crypto Test",
+            "username": f"crypto{suffix}",
+            "password": password,
+            "email": email,
+            "phone_number": f"+38050{uuid.uuid4().int % 10_000_000:07d}",
+            "public_key": "legacy",
+            "encrypted_private_key": "legacy",
+        },
+    )
     assert r.status_code == 200, r.text
     user_id = uuid.UUID(r.json()["data"]["id"])
 
@@ -39,7 +43,9 @@ async def _register_user() -> tuple[httpx.AsyncClient, uuid.UUID]:
     r = await client.post("/auth/verify-email", json={"email": email, "otp": otp})
     assert r.status_code == 200, r.text
 
-    r = await client.post("/auth/login", json={"username": f"crypto{suffix}", "password": password})
+    r = await client.post(
+        "/auth/login", json={"username": f"crypto{suffix}", "password": password}
+    )
     assert r.status_code == 200, r.text
 
     return client, user_id
@@ -64,7 +70,9 @@ async def test_publish_and_fetch_own_identity():
     client, user_id = await _register_user()
     try:
         device_id = uuid.uuid4()
-        r = await client.post("/crypto/identity", json=_publish_payload(user_id, device_id))
+        r = await client.post(
+            "/crypto/identity", json=_publish_payload(user_id, device_id)
+        )
         assert r.status_code == 200, r.text
 
         data = r.json()["data"]
@@ -107,8 +115,14 @@ async def test_weak_kdf_params_are_rejected():
     client, user_id = await _register_user()
     try:
         payload = _publish_payload(user_id, uuid.uuid4())
-        payload["kdf_params"] = {"kdf": "argon2id", "m": 8, "t": 1, "p": 1,
-                                 "salt": "AAAA", "nonce": "AAAA"}
+        payload["kdf_params"] = {
+            "kdf": "argon2id",
+            "m": 8,
+            "t": 1,
+            "p": 1,
+            "salt": "AAAA",
+            "nonce": "AAAA",
+        }
 
         r = await client.post("/crypto/identity", json=payload)
         assert r.status_code == 422, r.text
@@ -121,10 +135,14 @@ async def test_rotation_supersedes_previous_key():
     client, user_id = await _register_user()
     try:
         device_id = uuid.uuid4()
-        r = await client.post("/crypto/identity", json=_publish_payload(user_id, device_id))
+        r = await client.post(
+            "/crypto/identity", json=_publish_payload(user_id, device_id)
+        )
         assert r.json()["data"]["version"] == 1
 
-        r = await client.post("/crypto/identity", json=_publish_payload(user_id, device_id))
+        r = await client.post(
+            "/crypto/identity", json=_publish_payload(user_id, device_id)
+        )
         assert r.status_code == 200, r.text
         assert r.json()["data"]["version"] == 2
 
@@ -139,14 +157,20 @@ async def test_batch_key_fetch_and_safety_number():
     alice, alice_id = await _register_user()
     bob, bob_id = await _register_user()
     try:
-        await alice.post("/crypto/identity", json=_publish_payload(alice_id, uuid.uuid4()))
+        await alice.post(
+            "/crypto/identity", json=_publish_payload(alice_id, uuid.uuid4())
+        )
         await bob.post("/crypto/identity", json=_publish_payload(bob_id, uuid.uuid4()))
 
-        r = await alice.post("/crypto/keys/batch", json={"user_ids": [str(alice_id), str(bob_id)]})
+        r = await alice.post(
+            "/crypto/keys/batch", json={"user_ids": [str(alice_id), str(bob_id)]}
+        )
         assert r.status_code == 200, r.text
         keys = r.json()["data"]
         assert len(keys) == 2
-        assert all("encrypted_private_bundle" not in k for k in keys), "batch must not leak private bundles"
+        assert all("encrypted_private_bundle" not in k for k in keys), (
+            "batch must not leak private bundles"
+        )
 
         # Both sides must derive the identical fingerprint, or verification is meaningless.
         ra = await alice.get(f"/crypto/safety-number/{bob_id}")
@@ -164,7 +188,9 @@ async def test_device_cannot_be_hijacked_by_another_user():
     bob, bob_id = await _register_user()
     try:
         device_id = uuid.uuid4()
-        r = await alice.post("/crypto/identity", json=_publish_payload(alice_id, device_id))
+        r = await alice.post(
+            "/crypto/identity", json=_publish_payload(alice_id, device_id)
+        )
         assert r.status_code == 200
 
         # Bob signs correctly for himself but reuses Alice's device id.
@@ -205,10 +231,14 @@ async def test_prekey_rotation_requires_a_valid_signature():
     wrapped, kdf_params = wrap_private_bundle(bundle, "pw")
 
     prekey_private = X25519PrivateKey.generate()
-    prekey_public = prekey_private.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    prekey_public = prekey_private.public_key().public_bytes(
+        Encoding.Raw, PublicFormat.Raw
+    )
 
     signing_private = Ed25519PrivateKey.from_private_bytes(bundle.signing_private)
-    good_sig = signing_private.sign(prekey_binding_message(user_id, device_id, prekey_public))
+    good_sig = signing_private.sign(
+        prekey_binding_message(user_id, device_id, prekey_public)
+    )
 
     def publish(**overrides):
         body = {
@@ -242,7 +272,9 @@ async def test_prekey_rotation_requires_a_valid_signature():
 
     # Signing the identity-binding message instead must also fail: the two share a shape but not a
     # domain separator, and that is exactly what the separator is for.
-    crossed_sig = signing_private.sign(identity_binding_message(user_id, device_id, prekey_public))
+    crossed_sig = signing_private.sign(
+        identity_binding_message(user_id, device_id, prekey_public)
+    )
     r = await publish(
         signed_prekey_public=b64u_encode(prekey_public),
         signed_prekey_signature=b64u_encode(crossed_sig),
@@ -257,16 +289,21 @@ async def test_prekey_rotation_requires_a_valid_signature():
     )
     assert r.status_code == 200, r.text
     assert r.json()["data"]["signed_prekey_public"] == b64u_encode(prekey_public)
-    assert r.json()["data"]["identity_public_key"] == b64u_encode(bundle.identity_public)
+    assert r.json()["data"]["identity_public_key"] == b64u_encode(
+        bundle.identity_public
+    )
 
     # Rotation stays disabled until the sealed bundle can carry `prekey_private`. Until then a
     # rotated prekey has no private half anywhere, so every grant wrapped to it is unopenable.
     # A 410 rather than a 404 so a client built against the old contract gets a real answer.
-    r = await client.put("/crypto/identity/prekey", json={
-        "device_id": str(device_id),
-        "signed_prekey_public": b64u_encode(prekey_public),
-        "signed_prekey_signature": b64u_encode(good_sig),
-    })
+    r = await client.put(
+        "/crypto/identity/prekey",
+        json={
+            "device_id": str(device_id),
+            "signed_prekey_public": b64u_encode(prekey_public),
+            "signed_prekey_signature": b64u_encode(good_sig),
+        },
+    )
     assert r.status_code == 410, r.text
     assert r.json()["error_code"] == "PREKEY_ROTATION_DISABLED"
 

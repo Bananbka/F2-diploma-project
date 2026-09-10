@@ -1,4 +1,4 @@
-﻿import uuid
+import uuid
 
 import jwt
 from fastapi import Depends, Request, WebSocketException
@@ -19,9 +19,9 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 
 async def get_current_unverified_user(
-        request: Request,
-        db: AsyncSession = Depends(get_db),
-        redis: Redis = Depends(get_redis)
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ) -> User:
     token = request.cookies.get("access_token")
 
@@ -31,11 +31,15 @@ async def get_current_unverified_user(
     is_blacklisted = await redis.get(f"blacklist:{token}")
     if is_blacklisted:
         raise AppException(
-            status.HTTP_401_UNAUTHORIZED, "TOKEN_REVOKED", "Token blacklisted. Please log in again.",
+            status.HTTP_401_UNAUTHORIZED,
+            "TOKEN_REVOKED",
+            "Token blacklisted. Please log in again.",
         )
 
     try:
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        payload = jwt.decode(
+            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
+        )
         user_id: str = payload.get("sub")
         if user_id is None or payload.get("refresh"):
             raise AppException(401, "INVALID_TOKEN", "Invalid token data.")
@@ -64,7 +68,10 @@ async def get_current_unverified_user(
     if iat:
         logout_timestamp = await redis.get(f"force_logout:{user.id}")
 
-        if logout_timestamp and iat < int(logout_timestamp):
+        # Fractional seconds on both sides, compared strictly. Whole seconds could not separate
+        # a token minted in the same second as the cutoff from one minted before it, so a
+        # refresh token issued moments before a password change used to survive it.
+        if logout_timestamp and float(iat) < float(logout_timestamp):
             raise AppException(
                 status.HTTP_401_UNAUTHORIZED,
                 "SESSION_EXPIRED",
@@ -75,7 +82,7 @@ async def get_current_unverified_user(
 
 
 async def get_current_user(
-        current_unverified_user: User = Depends(get_current_unverified_user),
+    current_unverified_user: User = Depends(get_current_unverified_user),
 ) -> User:
     if not current_unverified_user.is_verified:
         raise AppException(403, "NOT_VERIFIED", "You are not verified.")
@@ -83,9 +90,9 @@ async def get_current_user(
 
 
 async def get_ws_current_user(
-        websocket: WebSocket,
-        db: AsyncSession = Depends(get_db),
-        redis: Redis = Depends(get_redis)
+    websocket: WebSocket,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ) -> User:
     token = websocket.cookies.get("access_token")
 
@@ -97,7 +104,9 @@ async def get_ws_current_user(
         raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION)
 
     try:
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        payload = jwt.decode(
+            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
+        )
         user_id: str = payload.get("sub")
         if user_id is None or payload.get("refresh"):
             raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION)
@@ -119,7 +128,10 @@ async def get_ws_current_user(
     if iat:
         logout_timestamp = await redis.get(f"force_logout:{user.id}")
 
-        if logout_timestamp and iat < int(logout_timestamp):
+        # Fractional seconds on both sides, compared strictly. Whole seconds could not separate
+        # a token minted in the same second as the cutoff from one minted before it, so a
+        # refresh token issued moments before a password change used to survive it.
+        if logout_timestamp and float(iat) < float(logout_timestamp):
             raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION)
 
     return user

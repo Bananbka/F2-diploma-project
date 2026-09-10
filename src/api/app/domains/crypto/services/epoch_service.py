@@ -5,6 +5,7 @@ its own. Rotation is therefore never blocked on a client being online, and there
 which a group cannot send. Clients supply key material lazily and independently, each for their own
 chain.
 """
+
 import uuid
 from datetime import datetime, timezone
 
@@ -25,7 +26,10 @@ from app.domains.crypto.models import (
     UserDevice,
     UserIdentityKey,
 )
-from app.domains.crypto.reference.grants import compute_member_set_hash, verify_distribution
+from app.domains.crypto.reference.grants import (
+    compute_member_set_hash,
+    verify_distribution,
+)
 from app.domains.crypto.reference.primitives import b64u_decode
 
 # Sender keys cost S x (N-1) grants per epoch, all wrapped on clients. Beyond a few hundred members
@@ -34,15 +38,21 @@ from app.domains.crypto.reference.primitives import b64u_decode
 MAX_E2E_GROUP_MEMBERS = 256
 
 
-async def get_settings(db: AsyncSession, chat_id: uuid.UUID) -> ChatCryptoSettings | None:
+async def get_settings(
+    db: AsyncSession, chat_id: uuid.UUID
+) -> ChatCryptoSettings | None:
     stmt = select(ChatCryptoSettings).where(ChatCryptoSettings.chat_id == chat_id)
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
-async def get_settings_or_404(db: AsyncSession, chat_id: uuid.UUID) -> ChatCryptoSettings:
+async def get_settings_or_404(
+    db: AsyncSession, chat_id: uuid.UUID
+) -> ChatCryptoSettings:
     settings = await get_settings(db, chat_id)
     if settings is None:
-        raise AppException(404, "CRYPTO_NOT_ENABLED", "Encryption is not enabled for this chat.")
+        raise AppException(
+            404, "CRYPTO_NOT_ENABLED", "Encryption is not enabled for this chat."
+        )
     return settings
 
 
@@ -89,12 +99,12 @@ async def _newest_message_id(mongo_db, chat_id: uuid.UUID) -> str | None:
 
 
 async def allocate_epoch(
-        db: AsyncSession,
-        chat_id: uuid.UUID,
-        reason: EpochReason,
-        created_by_user_id: uuid.UUID | None = None,
-        joining_user_ids: list[uuid.UUID] | None = None,
-        mongo_db=None,
+    db: AsyncSession,
+    chat_id: uuid.UUID,
+    reason: EpochReason,
+    created_by_user_id: uuid.UUID | None = None,
+    joining_user_ids: list[uuid.UUID] | None = None,
+    mongo_db=None,
 ) -> ChatKeyEpoch:
     """Close the open epoch and open the next one. Server-side only; no key material involved.
 
@@ -132,7 +142,11 @@ async def allocate_epoch(
     settings.last_rotated_at = datetime.now(timezone.utc)
 
     if joining_user_ids and settings.history_visibility is HistoryVisibility.JOINED:
-        floor = await _newest_message_id(mongo_db, chat_id) if mongo_db is not None else None
+        floor = (
+            await _newest_message_id(mongo_db, chat_id)
+            if mongo_db is not None
+            else None
+        )
         await db.execute(
             update(ChatParticipant)
             .where(
@@ -148,12 +162,12 @@ async def allocate_epoch(
 
 
 async def rotate_if_encrypted(
-        db: AsyncSession,
-        chat_id: uuid.UUID,
-        reason: EpochReason,
-        created_by_user_id: uuid.UUID | None = None,
-        joining_user_ids: list[uuid.UUID] | None = None,
-        mongo_db=None,
+    db: AsyncSession,
+    chat_id: uuid.UUID,
+    reason: EpochReason,
+    created_by_user_id: uuid.UUID | None = None,
+    joining_user_ids: list[uuid.UUID] | None = None,
+    mongo_db=None,
 ) -> ChatKeyEpoch | None:
     """Rotate a chat's epoch if it is encrypted, otherwise do nothing.
 
@@ -174,7 +188,9 @@ async def rotate_if_encrypted(
         return None
 
     return await allocate_epoch(
-        db, chat_id, reason,
+        db,
+        chat_id,
+        reason,
         created_by_user_id=created_by_user_id,
         joining_user_ids=joining_user_ids,
         mongo_db=mongo_db,
@@ -182,10 +198,10 @@ async def rotate_if_encrypted(
 
 
 async def rotate_chats_for_member_change(
-        db: AsyncSession,
-        user_id: uuid.UUID,
-        reason: EpochReason,
-        mongo_db=None,
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    reason: EpochReason,
+    mongo_db=None,
 ) -> list[tuple[uuid.UUID, ChatKeyEpoch]]:
     """Rotate every encrypted chat this user belongs to, for any change to their device set.
 
@@ -197,19 +213,32 @@ async def rotate_chats_for_member_change(
     Does not commit: the caller commits so the rotation lands atomically with the change that
     triggered it.
     """
-    chat_ids = (await db.execute(
-        select(ChatParticipant.chat_id)
-        .join(ChatCryptoSettings, ChatCryptoSettings.chat_id == ChatParticipant.chat_id)
-        .where(
-            ChatParticipant.user_id == user_id,
-            ChatCryptoSettings.crypto_mode == CryptoMode.SENDER_KEYS_V1,
+    chat_ids = (
+        (
+            await db.execute(
+                select(ChatParticipant.chat_id)
+                .join(
+                    ChatCryptoSettings,
+                    ChatCryptoSettings.chat_id == ChatParticipant.chat_id,
+                )
+                .where(
+                    ChatParticipant.user_id == user_id,
+                    ChatCryptoSettings.crypto_mode == CryptoMode.SENDER_KEYS_V1,
+                )
+            )
         )
-    )).scalars().all()
+        .scalars()
+        .all()
+    )
 
     rotated = []
     for chat_id in chat_ids:
         epoch = await allocate_epoch(
-            db, chat_id, reason, created_by_user_id=user_id, mongo_db=mongo_db,
+            db,
+            chat_id,
+            reason,
+            created_by_user_id=user_id,
+            mongo_db=mongo_db,
         )
         if epoch is not None:
             rotated.append((chat_id, epoch))
@@ -218,9 +247,9 @@ async def rotate_chats_for_member_change(
 
 
 async def rotate_chats_for_new_device(
-        db: AsyncSession,
-        user_id: uuid.UUID,
-        mongo_db=None,
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    mongo_db=None,
 ) -> list[tuple[uuid.UUID, ChatKeyEpoch]]:
     """Rotate every encrypted chat this user belongs to, because they gained a device.
 
@@ -240,26 +269,32 @@ async def rotate_chats_for_new_device(
 
 
 async def enable_encryption(
-        db: AsyncSession,
-        chat: Chat,
-        user_id: uuid.UUID,
+    db: AsyncSession,
+    chat: Chat,
+    user_id: uuid.UUID,
 ) -> ChatKeyEpoch:
     """Turn on end-to-end encryption for a chat and open its first epoch."""
     if await get_settings(db, chat.id) is not None:
-        raise AppException(409, "ALREADY_ENABLED", "Encryption is already enabled for this chat.")
+        raise AppException(
+            409, "ALREADY_ENABLED", "Encryption is already enabled for this chat."
+        )
 
     if chat.chat_type is ChatType.CHANNEL:
         raise AppException(
-            400, "CHANNEL_NOT_SUPPORTED",
+            400,
+            "CHANNEL_NOT_SUPPORTED",
             "Channels are broadcast and are authenticated by signature rather than encrypted.",
         )
 
     member_count = await db.scalar(
-        select(func.count()).select_from(ChatParticipant).where(ChatParticipant.chat_id == chat.id)
+        select(func.count())
+        .select_from(ChatParticipant)
+        .where(ChatParticipant.chat_id == chat.id)
     )
     if member_count > MAX_E2E_GROUP_MEMBERS:
         raise AppException(
-            400, "GROUP_TOO_LARGE",
+            400,
+            "GROUP_TOO_LARGE",
             f"Encrypted chats are limited to {MAX_E2E_GROUP_MEMBERS} members "
             f"because key distribution cost grows with the square of the membership.",
         )
@@ -267,14 +302,18 @@ async def enable_encryption(
     db.add(ChatCryptoSettings(chat_id=chat.id, crypto_mode=CryptoMode.SENDER_KEYS_V1))
     await db.flush()
 
-    epoch = await allocate_epoch(db, chat.id, EpochReason.INITIAL, created_by_user_id=user_id)
+    epoch = await allocate_epoch(
+        db, chat.id, EpochReason.INITIAL, created_by_user_id=user_id
+    )
 
     await db.commit()
     await db.refresh(epoch)
     return epoch
 
 
-async def get_epoch(db: AsyncSession, chat_id: uuid.UUID, epoch: int) -> ChatKeyEpoch | None:
+async def get_epoch(
+    db: AsyncSession, chat_id: uuid.UUID, epoch: int
+) -> ChatKeyEpoch | None:
     stmt = select(ChatKeyEpoch).where(
         ChatKeyEpoch.chat_id == chat_id, ChatKeyEpoch.epoch == epoch
     )
@@ -282,10 +321,10 @@ async def get_epoch(db: AsyncSession, chat_id: uuid.UUID, epoch: int) -> ChatKey
 
 
 async def get_distribution(
-        db: AsyncSession,
-        chat_id: uuid.UUID,
-        epoch_number: int,
-        sender_key_id: uuid.UUID,
+    db: AsyncSession,
+    chat_id: uuid.UUID,
+    epoch_number: int,
+    sender_key_id: uuid.UUID,
 ) -> SenderKeyDistribution | None:
     """Look up a published chain by its opaque handle, scoped to one epoch."""
     stmt = (
@@ -301,11 +340,11 @@ async def get_distribution(
 
 
 async def publish_sender_key(
-        db: AsyncSession,
-        chat_id: uuid.UUID,
-        user_id: uuid.UUID,
-        epoch_number: int,
-        data,
+    db: AsyncSession,
+    chat_id: uuid.UUID,
+    user_id: uuid.UUID,
+    epoch_number: int,
+    data,
 ) -> SenderKeyDistribution:
     """Store a sender's chain distribution plus its wrapped grants, in one transaction."""
     epoch = await get_epoch(db, chat_id, epoch_number)
@@ -314,7 +353,8 @@ async def publish_sender_key(
 
     if epoch.closed_at is not None:
         raise AppException(
-            409, "EPOCH_CLOSED",
+            409,
+            "EPOCH_CLOSED",
             "This epoch has been superseded; fetch the current one and publish there.",
         )
 
@@ -322,27 +362,33 @@ async def publish_sender_key(
     if device is None or device.user_id != user_id or not device.is_active:
         raise AppException(400, "UNKNOWN_DEVICE", "Unknown or inactive sender device.")
 
-    identity = (await db.execute(
-        select(UserIdentityKey).where(
-            UserIdentityKey.device_id == device.id, UserIdentityKey.is_active.is_(True)
+    identity = (
+        await db.execute(
+            select(UserIdentityKey).where(
+                UserIdentityKey.device_id == device.id,
+                UserIdentityKey.is_active.is_(True),
+            )
         )
-    )).scalar_one_or_none()
+    ).scalar_one_or_none()
     if identity is None:
-        raise AppException(400, "NO_IDENTITY_KEY", "This device has no active identity key.")
+        raise AppException(
+            400, "NO_IDENTITY_KEY", "This device has no active identity key."
+        )
 
     # Verify the sender's long-term key vouches for this chain's signing key. Without this the
     # server would happily store a distribution the claimed sender never made.
     if not verify_distribution(
-            identity_signing_public=b64u_decode(identity.signing_public_key),
-            signature=b64u_decode(data.signature),
-            chat_id=chat_id,
-            epoch=epoch_number,
-            sender_key_id=data.sender_key_id,
-            chain_signing_public=b64u_decode(data.signing_public_key),
-            chain_start_index=data.chain_start_index,
+        identity_signing_public=b64u_decode(identity.signing_public_key),
+        signature=b64u_decode(data.signature),
+        chat_id=chat_id,
+        epoch=epoch_number,
+        sender_key_id=data.sender_key_id,
+        chain_signing_public=b64u_decode(data.signing_public_key),
+        chain_start_index=data.chain_start_index,
     ):
         raise AppException(
-            400, "INVALID_DISTRIBUTION_SIGNATURE",
+            400,
+            "INVALID_DISTRIBUTION_SIGNATURE",
             "The distribution signature does not verify against your identity key.",
         )
 
@@ -356,9 +402,13 @@ async def publish_sender_key(
         missing = expected_devices - supplied_devices
         extra = supplied_devices - expected_devices
         raise AppException(
-            400, "GRANT_SET_MISMATCH",
+            400,
+            "GRANT_SET_MISMATCH",
             "Grants must cover exactly the epoch's member devices.",
-            details={"missing": [str(d) for d in missing], "unexpected": [str(d) for d in extra]},
+            details={
+                "missing": [str(d) for d in missing],
+                "unexpected": [str(d) for d in extra],
+            },
         )
 
     distribution = SenderKeyDistribution(
@@ -379,20 +429,24 @@ async def publish_sender_key(
     device_to_key = {r["device_id"]: r["identity_key_id"] for r in roster}
 
     await db.execute(
-        pg_insert(SenderKeyGrant).values([
-            {
-                "distribution_id": distribution.id,
-                "chat_id": chat_id,
-                "recipient_user_id": device_to_user[g.recipient_device_id],
-                "recipient_device_id": g.recipient_device_id,
-                "recipient_identity_key_id": device_to_key[g.recipient_device_id],
-                "granted_by_user_id": user_id,
-                "wrap_algorithm": g.wrap_algorithm,
-                "ephemeral_public_key": g.ephemeral_public_key,
-                "wrapped_chain_key": g.wrapped_chain_key,
-            }
-            for g in data.grants
-        ]).on_conflict_do_nothing(
+        pg_insert(SenderKeyGrant)
+        .values(
+            [
+                {
+                    "distribution_id": distribution.id,
+                    "chat_id": chat_id,
+                    "recipient_user_id": device_to_user[g.recipient_device_id],
+                    "recipient_device_id": g.recipient_device_id,
+                    "recipient_identity_key_id": device_to_key[g.recipient_device_id],
+                    "granted_by_user_id": user_id,
+                    "wrap_algorithm": g.wrap_algorithm,
+                    "ephemeral_public_key": g.ephemeral_public_key,
+                    "wrapped_chain_key": g.wrapped_chain_key,
+                }
+                for g in data.grants
+            ]
+        )
+        .on_conflict_do_nothing(
             index_elements=["distribution_id", "recipient_device_id"]
         )
     )
@@ -403,10 +457,10 @@ async def publish_sender_key(
 
 
 async def get_chat_keys(
-        db: AsyncSession,
-        chat_id: uuid.UUID,
-        user_id: uuid.UUID,
-        since_epoch: int = 0,
+    db: AsyncSession,
+    chat_id: uuid.UUID,
+    user_id: uuid.UUID,
+    since_epoch: int = 0,
 ) -> dict:
     """Everything a client needs to decrypt: epochs, plus the grants addressed to its devices.
 
@@ -415,38 +469,56 @@ async def get_chat_keys(
     """
     settings = await get_settings_or_404(db, chat_id)
 
-    participant = (await db.execute(
-        select(ChatParticipant).where(
-            ChatParticipant.chat_id == chat_id, ChatParticipant.user_id == user_id
+    participant = (
+        await db.execute(
+            select(ChatParticipant).where(
+                ChatParticipant.chat_id == chat_id, ChatParticipant.user_id == user_id
+            )
         )
-    )).scalar_one_or_none()
+    ).scalar_one_or_none()
 
-    epochs = (await db.execute(
-        select(ChatKeyEpoch)
-        .where(ChatKeyEpoch.chat_id == chat_id, ChatKeyEpoch.epoch > since_epoch)
-        .order_by(ChatKeyEpoch.epoch)
-    )).scalars().all()
+    epochs = (
+        (
+            await db.execute(
+                select(ChatKeyEpoch)
+                .where(
+                    ChatKeyEpoch.chat_id == chat_id, ChatKeyEpoch.epoch > since_epoch
+                )
+                .order_by(ChatKeyEpoch.epoch)
+            )
+        )
+        .scalars()
+        .all()
+    )
 
-    my_device_ids = (await db.execute(
-        select(UserDevice.id).where(
-            UserDevice.user_id == user_id, UserDevice.is_active.is_(True)
+    my_device_ids = (
+        (
+            await db.execute(
+                select(UserDevice.id).where(
+                    UserDevice.user_id == user_id, UserDevice.is_active.is_(True)
+                )
+            )
         )
-    )).scalars().all()
+        .scalars()
+        .all()
+    )
 
-    rows = (await db.execute(
-        select(SenderKeyDistribution, ChatKeyEpoch.epoch, SenderKeyGrant)
-        .join(ChatKeyEpoch, ChatKeyEpoch.id == SenderKeyDistribution.epoch_id)
-        .outerjoin(
-            SenderKeyGrant,
-            (SenderKeyGrant.distribution_id == SenderKeyDistribution.id)
-            & (SenderKeyGrant.recipient_device_id.in_(my_device_ids)),
+    rows = (
+        await db.execute(
+            select(SenderKeyDistribution, ChatKeyEpoch.epoch, SenderKeyGrant)
+            .join(ChatKeyEpoch, ChatKeyEpoch.id == SenderKeyDistribution.epoch_id)
+            .outerjoin(
+                SenderKeyGrant,
+                (SenderKeyGrant.distribution_id == SenderKeyDistribution.id)
+                & (SenderKeyGrant.recipient_device_id.in_(my_device_ids)),
+            )
+            .where(
+                SenderKeyDistribution.chat_id == chat_id,
+                ChatKeyEpoch.epoch > since_epoch,
+            )
+            .order_by(ChatKeyEpoch.epoch)
         )
-        .where(
-            SenderKeyDistribution.chat_id == chat_id,
-            ChatKeyEpoch.epoch > since_epoch,
-        )
-        .order_by(ChatKeyEpoch.epoch)
-    )).all()
+    ).all()
 
     distributions = []
     delivered_ids = []

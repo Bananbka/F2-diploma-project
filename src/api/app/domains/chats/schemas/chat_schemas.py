@@ -1,10 +1,10 @@
-﻿import uuid
+import uuid
 from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.domains.chats.models import ParticipantRole, ChatType
+from app.domains.chats.models import ChatType, ParticipantRole
 
 
 class PrivateChatCreateRequest(BaseModel):
@@ -54,6 +54,7 @@ class ChannelCreateRequest(BaseModel):
     unachievable for open-enrollment broadcast anyway, and sender-key distribution does not scale
     to channel-sized membership.
     """
+
     title: str = Field(..., min_length=1, max_length=255)
     description: str | None = None
     avatar_url: str | None = None
@@ -73,4 +74,5 @@ class ChangeRoleRequest(BaseModel):
 
 class TransferOwnershipRequest(BaseModel):
     """Hand OWNER to another member. The current owner is demoted to ADMIN."""
+
     user_id: uuid.UUID

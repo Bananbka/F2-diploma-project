@@ -5,6 +5,7 @@ one address, which is precisely the pattern the registration limit exists to sto
 is exercised directly here instead, against the real Redis, rather than being left untested
 because the suite that would have covered it has to disable it.
 """
+
 import uuid
 
 import pytest
@@ -61,31 +62,47 @@ async def test_allows_up_to_the_limit_then_refuses(redis):
 async def test_identifiers_are_counted_independently(redis):
     first, second = uuid.uuid4().hex, uuid.uuid4().hex
 
-    await enforce_rate_limit(redis, scope="test", identifier=first, limit=1, window_seconds=60)
+    await enforce_rate_limit(
+        redis, scope="test", identifier=first, limit=1, window_seconds=60
+    )
 
     with pytest.raises(AppException):
-        await enforce_rate_limit(redis, scope="test", identifier=first, limit=1, window_seconds=60)
+        await enforce_rate_limit(
+            redis, scope="test", identifier=first, limit=1, window_seconds=60
+        )
 
     # One account being attacked must not lock everyone else out.
-    await enforce_rate_limit(redis, scope="test", identifier=second, limit=1, window_seconds=60)
+    await enforce_rate_limit(
+        redis, scope="test", identifier=second, limit=1, window_seconds=60
+    )
 
 
 async def test_scopes_are_counted_independently(redis):
     identifier = uuid.uuid4().hex
 
-    await enforce_rate_limit(redis, scope="a", identifier=identifier, limit=1, window_seconds=60)
-    await enforce_rate_limit(redis, scope="b", identifier=identifier, limit=1, window_seconds=60)
+    await enforce_rate_limit(
+        redis, scope="a", identifier=identifier, limit=1, window_seconds=60
+    )
+    await enforce_rate_limit(
+        redis, scope="b", identifier=identifier, limit=1, window_seconds=60
+    )
 
 
 async def test_reset_clears_the_window(redis):
     identifier = uuid.uuid4().hex
 
-    await enforce_rate_limit(redis, scope="test", identifier=identifier, limit=1, window_seconds=60)
-    await reset_rate_limit(redis, scope="test", identifier=identifier, window_seconds=60)
+    await enforce_rate_limit(
+        redis, scope="test", identifier=identifier, limit=1, window_seconds=60
+    )
+    await reset_rate_limit(
+        redis, scope="test", identifier=identifier, window_seconds=60
+    )
 
     # This is what stops a user who mistyped their password twice being locked out of their own
     # account for the rest of the window after they finally get it right.
-    await enforce_rate_limit(redis, scope="test", identifier=identifier, limit=1, window_seconds=60)
+    await enforce_rate_limit(
+        redis, scope="test", identifier=identifier, limit=1, window_seconds=60
+    )
 
 
 async def test_disabled_limiter_never_refuses(redis):
@@ -100,7 +117,9 @@ async def test_disabled_limiter_never_refuses(redis):
 
 def test_client_identifier_prefers_the_first_forwarded_hop():
     """Only the first entry is trustworthy — nginx appends it, the rest is client-supplied."""
-    request = _FakeRequest(headers={"x-forwarded-for": "203.0.113.7, 10.0.0.1"}, host="10.0.0.2")
+    request = _FakeRequest(
+        headers={"x-forwarded-for": "203.0.113.7, 10.0.0.1"}, host="10.0.0.2"
+    )
 
     assert client_identifier(request) == "203.0.113.7"
 

@@ -1,19 +1,19 @@
-﻿import uuid
+import uuid
 
 from redis.asyncio import Redis
 
 from app.domains.chats.models import Chat
 from app.domains.chats.schemas.chat_schemas import ChatResponse
-from app.domains.messages.schemas.ws_schemas import WSMessageEnvelope, WSEventType
+from app.domains.messages.schemas.ws_schemas import WSEventType, WSMessageEnvelope
 
 
 async def send_key_epoch_started(
-        redis: Redis,
-        chat_id: uuid.UUID,
-        epoch: int,
-        member_set_hash: str,
-        reason: str,
-        recipient_ids: list[uuid.UUID],
+    redis: Redis,
+    chat_id: uuid.UUID,
+    epoch: int,
+    member_set_hash: str,
+    reason: str,
+    recipient_ids: list[uuid.UUID],
 ):
     """Tell members a new epoch opened so they can publish a chain and fetch grants.
 
@@ -45,7 +45,10 @@ async def _publish(redis: Redis, envelope: WSMessageEnvelope, recipient_ids) -> 
 
 
 async def send_participants_added(
-        redis: Redis, chat_id: uuid.UUID, added_ids: list[uuid.UUID], recipient_ids: list[uuid.UUID],
+    redis: Redis,
+    chat_id: uuid.UUID,
+    added_ids: list[uuid.UUID],
+    recipient_ids: list[uuid.UUID],
 ):
     await _publish(
         redis,
@@ -59,7 +62,10 @@ async def send_participants_added(
 
 
 async def send_participants_removed(
-        redis: Redis, chat_id: uuid.UUID, removed_ids: list[uuid.UUID], recipient_ids: list[uuid.UUID],
+    redis: Redis,
+    chat_id: uuid.UUID,
+    removed_ids: list[uuid.UUID],
+    recipient_ids: list[uuid.UUID],
 ):
     """Tell the remaining members who left or was removed.
 
@@ -78,16 +84,23 @@ async def send_participants_removed(
 
 
 async def send_chat_updated(
-        redis: Redis, chat_id: uuid.UUID, recipient_ids: list[uuid.UUID], payload: dict,
+    redis: Redis,
+    chat_id: uuid.UUID,
+    recipient_ids: list[uuid.UUID],
+    payload: dict,
 ):
     await _publish(
         redis,
-        WSMessageEnvelope(event_type=WSEventType.CHAT_UPDATED, chat_id=chat_id, payload=payload),
+        WSMessageEnvelope(
+            event_type=WSEventType.CHAT_UPDATED, chat_id=chat_id, payload=payload
+        ),
         recipient_ids,
     )
 
 
-async def send_chat_deleted(redis: Redis, chat_id: uuid.UUID, recipient_ids: list[uuid.UUID]):
+async def send_chat_deleted(
+    redis: Redis, chat_id: uuid.UUID, recipient_ids: list[uuid.UUID]
+):
     await _publish(
         redis,
         WSMessageEnvelope(
@@ -99,8 +112,10 @@ async def send_chat_deleted(redis: Redis, chat_id: uuid.UUID, recipient_ids: lis
     )
 
 
-async def send_chat_created_message(redis: Redis, chat: Chat, user_id: uuid.UUID, participant_ids: list[uuid.UUID]):
-    chat_dict = ChatResponse.model_validate(chat).model_dump(mode='json')
+async def send_chat_created_message(
+    redis: Redis, chat: Chat, user_id: uuid.UUID, participant_ids: list[uuid.UUID]
+):
+    chat_dict = ChatResponse.model_validate(chat).model_dump(mode="json")
 
     ws_envelope = WSMessageEnvelope(
         event_type=WSEventType.CHAT_CREATED,
@@ -108,8 +123,8 @@ async def send_chat_created_message(redis: Redis, chat: Chat, user_id: uuid.UUID
         user_id=user_id,
         payload={
             "message": f"Group '{chat.title}' has been created.",
-            "chat": chat_dict
-        }
+            "chat": chat_dict,
+        },
     )
     event_json = ws_envelope.model_dump_json()
     pids = set(participant_ids) | {user_id}

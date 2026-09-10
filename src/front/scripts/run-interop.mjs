@@ -98,7 +98,17 @@ try {
     console.log('\nComparing implementations:\n');
     execFileSync('node', [bundlePath, vectors], { stdio: 'inherit' });
 } catch (error) {
+    // Print what actually went wrong. This used to report only "Interop check failed", which is
+    // the least useful possible message for the one check that guards the wire format — a
+    // mismatch and a container that is not running looked identical.
     console.error('\nInterop check failed.');
+    console.error(error.message ?? error);
+
+    const stderr = error.stderr?.toString().trim();
+    if (stderr) {
+        console.error(stderr);
+    }
+
     if (error.status === undefined) {
         console.error('Is the backend up?  docker compose up -d api');
     }

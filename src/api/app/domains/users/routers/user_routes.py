@@ -1,4 +1,4 @@
-﻿from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,15 +23,20 @@ SEARCH_PER_WINDOW = 60
 
 @router.get("/search", response_model=SuccessResponse[list[UserSearchResponse]])
 async def search_users(
-        query: str = Query(..., min_length=1, max_length=50, description="Search query for username"),
-        limit: int = Query(20, ge=1, le=50),
-        user: User = Depends(get_current_user),
-        db: AsyncSession = Depends(get_db),
-        redis: Redis = Depends(get_redis),
+    query: str = Query(
+        ..., min_length=1, max_length=50, description="Search query for username"
+    ),
+    limit: int = Query(20, ge=1, le=50),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ):
     await enforce_rate_limit(
-        redis, scope="user-search", identifier=str(user.id),
-        limit=SEARCH_PER_WINDOW, window_seconds=LOOKUP_WINDOW,
+        redis,
+        scope="user-search",
+        identifier=str(user.id),
+        limit=SEARCH_PER_WINDOW,
+        window_seconds=LOOKUP_WINDOW,
         message="Too many searches. Please slow down.",
     )
 
@@ -41,9 +46,9 @@ async def search_users(
 
 @router.post("/batch", response_model=SuccessResponse[list[UserSearchResponse]])
 async def get_users_batch(
-        data: UserBatchRequest,
-        user: User = Depends(get_current_user),
-        db: AsyncSession = Depends(get_db),
+    data: UserBatchRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Resolve user ids to display names, mirroring POST /crypto/keys/batch.
 
@@ -60,10 +65,13 @@ async def get_users_batch(
 
 
 @router.get("/{query}", response_model=SuccessResponse[UserSearchResponse])
-async def find_user(query: str, request: Request,
-                    user: User = Depends(get_current_user),
-                    db: AsyncSession = Depends(get_db),
-                    redis: Redis = Depends(get_redis)):
+async def find_user(
+    query: str,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+):
     """Look one user up by exact username, or by phone number when the query starts with `+`.
 
     Returns the **public** projection only. This used to return the full `UserResponse`, which
@@ -76,15 +84,18 @@ async def find_user(query: str, request: Request,
     can walk a number range and map phone numbers to accounts.
     """
     await enforce_rate_limit(
-        redis, scope="user-lookup", identifier=str(user.id),
-        limit=LOOKUP_PER_WINDOW, window_seconds=LOOKUP_WINDOW,
+        redis,
+        scope="user-lookup",
+        identifier=str(user.id),
+        limit=LOOKUP_PER_WINDOW,
+        window_seconds=LOOKUP_WINDOW,
         message="Too many lookups. Please slow down.",
     )
 
     user_data = (
         await user_service.get_user_by_phone(db, query)
         if query.startswith("+")
-        else await (user_service.get_user_by_username(db, query))
+        else await user_service.get_user_by_username(db, query)
     )
 
     if not user_data:

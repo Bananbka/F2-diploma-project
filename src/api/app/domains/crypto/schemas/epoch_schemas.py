@@ -29,6 +29,7 @@ class RosterEntry(BaseModel):
     the client can check that each X25519 key (and each prekey) is vouched for by the Ed25519
     signing key, which is the key a peer pins out of band via the safety number.
     """
+
     user_id: uuid.UUID
     device_id: uuid.UUID
     identity_key_id: uuid.UUID
@@ -61,6 +62,7 @@ class GrantUpload(BaseModel):
 
 class SenderKeyUpload(BaseModel):
     """A sender's chain for one epoch, plus one wrapped copy per recipient device."""
+
     sender_device_id: uuid.UUID
     sender_key_id: uuid.UUID
     algorithm: str = Field(..., max_length=64)

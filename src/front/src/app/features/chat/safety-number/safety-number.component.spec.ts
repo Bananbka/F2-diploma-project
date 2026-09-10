@@ -1,8 +1,7 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { of } from 'rxjs';
 
-import { CryptoApiService } from '../../../core/services/crypto-api.service';
 import { DirectoryService } from '../../../core/services/directory.service';
+import { KeyStoreService } from '../../../core/services/key-store.service';
 import { TrustStoreService } from '../../../core/services/trust-store.service';
 import { SafetyNumberComponent } from './safety-number.component';
 
@@ -14,22 +13,26 @@ const NUMBER_B = '11111 22222 33333 44444 55555 66666 77777 88888 99999 00000 12
 describe('SafetyNumberComponent', () => {
     let fixture: ComponentFixture<SafetyNumberComponent>;
     let trust: TrustStoreService;
+    let keyStore: jasmine.SpyObj<KeyStoreService>;
 
     async function render(safetyNumber: string): Promise<HTMLElement> {
+        keyStore.computeSafetyNumber.and.resolveTo(safetyNumber);
+
         fixture.componentRef.setInput('chatId', CHAT);
         fixture.componentRef.setInput('userId', PEER);
         fixture.detectChanges();
         await fixture.whenStable();
         fixture.detectChanges();
-        void safetyNumber;
         return fixture.nativeElement as HTMLElement;
     }
 
     beforeEach(async () => {
         localStorage.clear();
 
-        const cryptoApi = jasmine.createSpyObj<CryptoApiService>('CryptoApiService', ['getSafetyNumber']);
-        cryptoApi.getSafetyNumber.and.returnValue(of(NUMBER_A));
+        // The number is derived in KeyStoreService, not fetched. A fingerprint the server hands
+        // you cannot detect a key the server substituted, which is the one thing it exists for.
+        keyStore = jasmine.createSpyObj<KeyStoreService>('KeyStoreService', ['computeSafetyNumber']);
+        keyStore.computeSafetyNumber.and.resolveTo(NUMBER_A);
 
         const directory = jasmine.createSpyObj<DirectoryService>('DirectoryService', ['lookup']);
         directory.lookup.and.returnValue({
@@ -43,7 +46,7 @@ describe('SafetyNumberComponent', () => {
         await TestBed.configureTestingModule({
             imports: [SafetyNumberComponent],
             providers: [
-                { provide: CryptoApiService, useValue: cryptoApi },
+                { provide: KeyStoreService, useValue: keyStore },
                 { provide: DirectoryService, useValue: directory },
             ],
         }).compileComponents();

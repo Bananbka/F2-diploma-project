@@ -1,8 +1,9 @@
-﻿import json
+import json
 import uuid
 
 import botocore
 from aiobotocore.session import get_session
+
 from app.core.config import settings
 
 
@@ -12,18 +13,15 @@ class MinioClient:
         self.endpoint_url = settings.MINIO_URL
         self.access_key = settings.MINIO_USER
         self.secret_key = settings.MINIO_PASSWORD
-        self.buckets = [
-            settings.MINIO_MESSAGE_BUCKET,
-            settings.MINIO_AVATAR_BUCKET
-        ]
+        self.buckets = [settings.MINIO_MESSAGE_BUCKET, settings.MINIO_AVATAR_BUCKET]
 
     def get_client(self):
         return self.session.create_client(
-            's3',
-            region_name='us-east-1',
+            "s3",
+            region_name="us-east-1",
             endpoint_url=self.endpoint_url,
             aws_access_key_id=self.access_key,
-            aws_secret_access_key=self.secret_key
+            aws_secret_access_key=self.secret_key,
         )
 
     async def ensure_bucket_exists(self):
@@ -32,9 +30,11 @@ class MinioClient:
                 try:
                     await client.head_bucket(Bucket=bucket_name)
                 except botocore.exceptions.ClientError as e:
-                    error_code = e.response['Error']['Code']
-                    if error_code == '404':
-                        print(f'Bucket {bucket_name} does not exist. Creating new bucket...')
+                    error_code = e.response["Error"]["Code"]
+                    if error_code == "404":
+                        print(
+                            f"Bucket {bucket_name} does not exist. Creating new bucket..."
+                        )
                         await client.create_bucket(Bucket=bucket_name)
 
                         if bucket_name == settings.MINIO_AVATAR_BUCKET:
@@ -46,12 +46,14 @@ class MinioClient:
                                         "Effect": "Allow",
                                         "Principal": "*",
                                         "Action": ["s3:GetObject"],
-                                        "Resource": [f"arn:aws:s3:::{bucket_name}/*"]
+                                        "Resource": [f"arn:aws:s3:::{bucket_name}/*"],
                                     }
-                                ]
+                                ],
                             }
-                            await client.put_bucket_policy(Bucket=bucket_name, Policy=json.dumps(policy))
-                            print(f'Set public policy for {bucket_name}')
+                            await client.put_bucket_policy(
+                                Bucket=bucket_name, Policy=json.dumps(policy)
+                            )
+                            print(f"Set public policy for {bucket_name}")
                     else:
                         raise e
 
@@ -70,9 +72,15 @@ class MinioClient:
 
         return (response.get("Metadata") or {}).get("owner-id")
 
-    async def upload_file(self, file_bytes: bytes, original_filename: str, content_type: str,
-                          bucket_name: str, force_octet_stream: bool = False,
-                          owner_id: str | None = None) -> str:
+    async def upload_file(
+        self,
+        file_bytes: bytes,
+        original_filename: str,
+        content_type: str,
+        bucket_name: str,
+        force_octet_stream: bool = False,
+        owner_id: str | None = None,
+    ) -> str:
         """Store one object under a server-generated key.
 
         The extension is derived from the client's filename, so it is sanitised: taking the last
@@ -80,7 +88,9 @@ class MinioClient:
         attachment-url validator then rejects — leaving an object nothing could ever reference,
         download or delete.
         """
-        extension = original_filename.rsplit(".", 1)[-1] if "." in original_filename else "enc"
+        extension = (
+            original_filename.rsplit(".", 1)[-1] if "." in original_filename else "enc"
+        )
         extension = "".join(c for c in extension if c.isalnum())[:10].lower() or "enc"
 
         unique_filename = f"{uuid.uuid4()}.{extension}"
@@ -90,7 +100,9 @@ class MinioClient:
                 Bucket=bucket_name,
                 Key=unique_filename,
                 Body=file_bytes,
-                ContentType="application/octet-stream" if force_octet_stream else content_type,
+                ContentType="application/octet-stream"
+                if force_octet_stream
+                else content_type,
                 Metadata={"owner-id": owner_id} if owner_id else {},
             )
 

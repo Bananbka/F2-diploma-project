@@ -22,14 +22,20 @@ The hash alone is not the whole defence, because the server writes it. It is the
 check; the binding signature on each roster entry (see `identity.verify_identity_binding`) is what
 actually roots that key material in an identity the peer can pin out of band.
 """
-import os
+
 from dataclasses import dataclass
 from hashlib import sha256
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
+from cryptography.hazmat.primitives.asymmetric.x25519 import (
+    X25519PrivateKey,
+    X25519PublicKey,
+)
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -54,6 +60,7 @@ WRAP_KEY_BYTES = 32
 @dataclass(frozen=True)
 class MemberKeys:
     """One member device's published key material, as it enters the member-set commitment."""
+
     device_id: str
     identity_public_key: str = ""
     signing_public_key: str = ""
@@ -79,12 +86,14 @@ def _member_record(member) -> str:
         # A bare device id: a device with no published key material.
         entry = MemberKeys(device_id=str(member))
 
-    return ":".join((
-        entry.device_id,
-        entry.identity_public_key,
-        entry.signing_public_key,
-        entry.signed_prekey_public,
-    ))
+    return ":".join(
+        (
+            entry.device_id,
+            entry.identity_public_key,
+            entry.signing_public_key,
+            entry.signed_prekey_public,
+        )
+    )
 
 
 def compute_member_set_hash(members) -> str:
@@ -103,7 +112,7 @@ def compute_member_set_hash(members) -> str:
 
 
 def distribution_signing_payload(
-        chat_id, epoch: int, sender_key_id, signing_public: bytes, chain_start_index: int
+    chat_id, epoch: int, sender_key_id, signing_public: bytes, chain_start_index: int
 ) -> bytes:
     return (
         DS_SENDER_KEY
@@ -116,8 +125,13 @@ def distribution_signing_payload(
 
 
 def sign_distribution(
-        *, identity_signing_private: bytes, chat_id, epoch: int, sender_key_id,
-        chain_signing_public: bytes, chain_start_index: int,
+    *,
+    identity_signing_private: bytes,
+    chat_id,
+    epoch: int,
+    sender_key_id,
+    chain_signing_public: bytes,
+    chain_start_index: int,
 ) -> bytes:
     """Vouch for a chain's signing key with the sender's long-term identity key."""
     return Ed25519PrivateKey.from_private_bytes(identity_signing_private).sign(
@@ -128,8 +142,14 @@ def sign_distribution(
 
 
 def verify_distribution(
-        *, identity_signing_public: bytes, signature: bytes, chat_id, epoch: int, sender_key_id,
-        chain_signing_public: bytes, chain_start_index: int,
+    *,
+    identity_signing_public: bytes,
+    signature: bytes,
+    chat_id,
+    epoch: int,
+    sender_key_id,
+    chain_signing_public: bytes,
+    chain_start_index: int,
 ) -> bool:
     try:
         Ed25519PublicKey.from_public_bytes(identity_signing_public).verify(
@@ -144,8 +164,13 @@ def verify_distribution(
 
 
 def build_grant_aad(
-        *, chat_id, epoch: int, sender_key_id, sender_device_id, recipient_device_id,
-        ephemeral_public: bytes,
+    *,
+    chat_id,
+    epoch: int,
+    sender_key_id,
+    sender_device_id,
+    recipient_device_id,
+    ephemeral_public: bytes,
 ) -> bytes:
     """Bind a wrapped key to exactly one (chat, epoch, sender, recipient, ephemeral) tuple.
 
@@ -163,7 +188,9 @@ def build_grant_aad(
     )
 
 
-def _derive_wrap_key(shared_secret: bytes, chat_id, epoch: int, aad: bytes) -> tuple[bytes, bytes]:
+def _derive_wrap_key(
+    shared_secret: bytes, chat_id, epoch: int, aad: bytes
+) -> tuple[bytes, bytes]:
     okm = HKDF(
         algorithm=SHA256(),
         length=WRAP_KEY_BYTES + NONCE_BYTES,
@@ -175,8 +202,15 @@ def _derive_wrap_key(shared_secret: bytes, chat_id, epoch: int, aad: bytes) -> t
 
 
 def wrap_chain_key(
-        *, chain_key: bytes, chain_start_index: int, recipient_public: bytes,
-        chat_id, epoch: int, sender_key_id, sender_device_id, recipient_device_id,
+    *,
+    chain_key: bytes,
+    chain_start_index: int,
+    recipient_public: bytes,
+    chat_id,
+    epoch: int,
+    sender_key_id,
+    sender_device_id,
+    recipient_device_id,
 ) -> tuple[str, str]:
     """Wrap a chain key for one recipient device. Returns (ephemeral_public, wrapped) as b64u.
 
@@ -193,8 +227,11 @@ def wrap_chain_key(
     )
 
     aad = build_grant_aad(
-        chat_id=chat_id, epoch=epoch, sender_key_id=sender_key_id,
-        sender_device_id=sender_device_id, recipient_device_id=recipient_device_id,
+        chat_id=chat_id,
+        epoch=epoch,
+        sender_key_id=sender_key_id,
+        sender_device_id=sender_device_id,
+        recipient_device_id=recipient_device_id,
         ephemeral_public=ephemeral_public,
     )
     wrap_key, nonce = _derive_wrap_key(shared_secret, chat_id, epoch, aad)
@@ -207,8 +244,15 @@ def wrap_chain_key(
 
 
 def unwrap_chain_key(
-        *, wrapped: str, ephemeral_public: str, recipient_private: bytes,
-        chat_id, epoch: int, sender_key_id, sender_device_id, recipient_device_id,
+    *,
+    wrapped: str,
+    ephemeral_public: str,
+    recipient_private: bytes,
+    chat_id,
+    epoch: int,
+    sender_key_id,
+    sender_device_id,
+    recipient_device_id,
 ) -> tuple[bytes, int]:
     """Inverse of wrap_chain_key. Returns (chain_key, chain_start_index).
 
@@ -224,8 +268,11 @@ def unwrap_chain_key(
     )
 
     aad = build_grant_aad(
-        chat_id=chat_id, epoch=epoch, sender_key_id=sender_key_id,
-        sender_device_id=sender_device_id, recipient_device_id=recipient_device_id,
+        chat_id=chat_id,
+        epoch=epoch,
+        sender_key_id=sender_key_id,
+        sender_device_id=sender_device_id,
+        recipient_device_id=recipient_device_id,
         ephemeral_public=ephemeral_raw,
     )
     wrap_key, _ = _derive_wrap_key(shared_secret, chat_id, epoch, aad)

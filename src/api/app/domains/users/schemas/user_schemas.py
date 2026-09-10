@@ -1,8 +1,8 @@
-﻿import re
+import re
 import uuid
 
 import phonenumbers
-from pydantic import BaseModel, Field, ConfigDict, EmailStr, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from app.domains.crypto.schemas.crypto_schemas import RewrappedIdentity
 
@@ -16,28 +16,30 @@ class UserCreate(BaseModel):
     public_key: str
     encrypted_private_key: str
 
-    @field_validator('username')
+    @field_validator("username")
     @classmethod
     def validate_username(cls, v: str):
-        if not re.fullmatch(r'^[a-zA-Z][a-zA-Z0-9_]*$', v):
+        if not re.fullmatch(r"^[a-zA-Z][a-zA-Z0-9_]*$", v):
             raise ValueError(
-                'Username must start with a letter and contain only letters, numbers, and underscore (_)'
+                "Username must start with a letter and contain only letters, numbers, and underscore (_)"
             )
         return v
 
-    @field_validator('phone_number')
+    @field_validator("phone_number")
     @classmethod
     def validate_phone(cls, v: str):
         try:
             parsed_number = phonenumbers.parse(v)
 
             if not phonenumbers.is_valid_number(parsed_number):
-                raise ValueError('Invalid phone number for this country.')
+                raise ValueError("Invalid phone number for this country.")
 
-            return phonenumbers.format_number(parsed_number, phonenumbers.PhoneNumberFormat.E164)
+            return phonenumbers.format_number(
+                parsed_number, phonenumbers.PhoneNumberFormat.E164
+            )
 
         except phonenumbers.NumberParseException:
-            raise ValueError('Invalid phone number format.')
+            raise ValueError("Invalid phone number format.")
 
 
 class UserLogin(BaseModel):
@@ -74,6 +76,7 @@ class UserSearchResponse(BaseModel):
 
 class UserBatchRequest(BaseModel):
     """Resolve ids to display names. Bounded like the crypto keys batch it mirrors."""
+
     user_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=512)
 
 
@@ -98,6 +101,7 @@ class PasswordChange(BaseModel):
     bundle. Nothing about the identity changes, so history stays readable. Contrast PasswordReset,
     where the bundle is unrecoverable and the identity necessarily dies with it.
     """
+
     old_password: str
     new_password: str = Field(..., min_length=8, max_length=72)
 

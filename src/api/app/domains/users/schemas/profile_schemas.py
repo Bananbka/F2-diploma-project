@@ -1,4 +1,4 @@
-﻿import re
+import re
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -10,6 +10,7 @@ class ProfileRequestSchema(BaseModel):
     changing only a bio had to resend the name it was not touching, and forgetting to would blank
     nothing but fail validation instead.
     """
+
     full_name: str | None = Field(None, min_length=1, max_length=30)
     username: str | None = Field(None, min_length=6, max_length=50)
     # Bounded because the columns are unbounded `Text`: without a limit one PATCH can store as
@@ -17,7 +18,7 @@ class ProfileRequestSchema(BaseModel):
     bio: str | None = Field(None, max_length=500)
     avatar_url: str | None = Field(None, max_length=1024)
 
-    @field_validator('username')
+    @field_validator("username")
     @classmethod
     def validate_username(cls, v: str | None):
         # An explicit `"username": null` used to reach `re.fullmatch(pattern, None)` and raise a
@@ -25,8 +26,8 @@ class ProfileRequestSchema(BaseModel):
         if v is None:
             return v
 
-        if not re.fullmatch(r'^[a-zA-Z][a-zA-Z0-9_]*$', v):
+        if not re.fullmatch(r"^[a-zA-Z][a-zA-Z0-9_]*$", v):
             raise ValueError(
-                'Username must start with a letter and contain only letters, numbers, and underscore (_)'
+                "Username must start with a letter and contain only letters, numbers, and underscore (_)"
             )
         return v

@@ -45,11 +45,11 @@ IDENTITY_PUBLISH_LIMIT = 5
 
 @router.post("/identity", response_model=SuccessResponse[PublicKeyResponse])
 async def publish_identity(
-        data: IdentityPublishRequest,
-        user: User = Depends(get_current_user),
-        db: AsyncSession = Depends(get_db),
-        redis: Redis = Depends(get_redis),
-        mongo_db=Depends(get_mongo_db),
+    data: IdentityPublishRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+    mongo_db=Depends(get_mongo_db),
 ):
     """Publish or rotate this device's identity keys.
 
@@ -63,14 +63,19 @@ async def publish_identity(
     # next send — so an unlimited publish endpoint is a cheap amplification lever against the
     # whole group, not just against the caller.
     await enforce_rate_limit(
-        redis, scope="publish-identity", identifier=str(user.id),
-        limit=IDENTITY_PUBLISH_LIMIT, window_seconds=IDENTITY_PUBLISH_WINDOW,
+        redis,
+        scope="publish-identity",
+        identifier=str(user.id),
+        limit=IDENTITY_PUBLISH_LIMIT,
+        window_seconds=IDENTITY_PUBLISH_WINDOW,
         message="Identity keys were published very recently. Please wait before rotating again.",
     )
 
     key = await identity_service.publish_identity(db, user.id, data)
 
-    epochs = await epoch_service.rotate_chats_for_new_device(db, user.id, mongo_db=mongo_db)
+    epochs = await epoch_service.rotate_chats_for_new_device(
+        db, user.id, mongo_db=mongo_db
+    )
     await db.commit()
 
     # Best-effort, like every other epoch announcement: anyone offline reconciles on reconnect.
@@ -81,7 +86,9 @@ async def publish_identity(
             chat_id=chat_id,
             epoch=epoch.epoch,
             member_set_hash=epoch.member_set_hash,
-            reason=epoch.reason.value if hasattr(epoch.reason, "value") else str(epoch.reason),
+            reason=epoch.reason.value
+            if hasattr(epoch.reason, "value")
+            else str(epoch.reason),
             recipient_ids=list(participant_ids),
         )
 
@@ -90,19 +97,23 @@ async def publish_identity(
 
 @router.get("/identity/me", response_model=SuccessResponse[list[OwnIdentityResponse]])
 async def get_my_identities(
-        user: User = Depends(get_current_user),
-        db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Own key material including the wrapped private bundle, for unlocking after login."""
     keys = await identity_service.get_own_identities(db, user.id)
     return SuccessResponse(data=keys)
 
 
-@router.put("/identity/prekey", response_model=SuccessResponse[PublicKeyResponse], deprecated=True)
+@router.put(
+    "/identity/prekey",
+    response_model=SuccessResponse[PublicKeyResponse],
+    deprecated=True,
+)
 async def rotate_prekey(
-        data: PrekeyRotateRequest,
-        user: User = Depends(get_current_user),
-        db: AsyncSession = Depends(get_db),
+    data: PrekeyRotateRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Disabled: rotating a prekey currently makes a device permanently unreadable.
 
@@ -121,7 +132,8 @@ async def rotate_prekey(
     private bundle carries `prekey_private` from registration onward.
     """
     raise AppException(
-        410, "PREKEY_ROTATION_DISABLED",
+        410,
+        "PREKEY_ROTATION_DISABLED",
         "Signed-prekey rotation is disabled: the private half cannot yet be stored, so rotating "
         "would make every key grant addressed to this device permanently unopenable.",
     )
@@ -129,11 +141,11 @@ async def rotate_prekey(
 
 @router.post("/identity/{device_id}/revoke", response_model=SuccessResponse[dict])
 async def revoke_device(
-        device_id: uuid.UUID = Path(..., description="Device to revoke"),
-        user: User = Depends(get_current_user),
-        db: AsyncSession = Depends(get_db),
-        redis: Redis = Depends(get_redis),
-        mongo_db=Depends(get_mongo_db),
+    device_id: uuid.UUID = Path(..., description="Device to revoke"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+    mongo_db=Depends(get_mongo_db),
 ):
     """Revoke one of your own devices — a lost phone, a borrowed laptop.
 
@@ -149,7 +161,10 @@ async def revoke_device(
     await identity_service.revoke_device(db, user.id, device_id)
 
     epochs = await epoch_service.rotate_chats_for_member_change(
-        db, user.id, EpochReason.MEMBER_REMOVED, mongo_db=mongo_db,
+        db,
+        user.id,
+        EpochReason.MEMBER_REMOVED,
+        mongo_db=mongo_db,
     )
     await db.commit()
 
@@ -160,20 +175,23 @@ async def revoke_device(
             chat_id=chat_id,
             epoch=epoch.epoch,
             member_set_hash=epoch.member_set_hash,
-            reason=epoch.reason.value if hasattr(epoch.reason, "value") else str(epoch.reason),
+            reason=epoch.reason.value
+            if hasattr(epoch.reason, "value")
+            else str(epoch.reason),
             recipient_ids=list(participant_ids),
         )
 
     return SuccessResponse(
-        data={"message": "Device revoked."}, meta={"rotated_chats": len(epochs)},
+        data={"message": "Device revoked."},
+        meta={"rotated_chats": len(epochs)},
     )
 
 
 @router.post("/keys/batch", response_model=SuccessResponse[list[PublicKeyResponse]])
 async def get_keys_batch(
-        data: UserKeysRequest,
-        user: User = Depends(get_current_user),
-        db: AsyncSession = Depends(get_db),
+    data: UserKeysRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Batch-fetch public keys. Called before wrapping group keys for a chat's members."""
     keys = await identity_service.get_active_keys_for_users(db, data.user_ids)
@@ -182,9 +200,9 @@ async def get_keys_batch(
 
 @router.post("/chats/{chat_id}/enable", response_model=SuccessResponse[EpochResponse])
 async def enable_chat_encryption(
-        chat_id: uuid.UUID = Path(..., description="Chat ID"),
-        user: User = Depends(get_current_user),
-        db: AsyncSession = Depends(get_db),
+    chat_id: uuid.UUID = Path(..., description="Chat ID"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Enable end-to-end encryption and open the chat's first epoch.
 
@@ -199,14 +217,21 @@ async def enable_chat_encryption(
     """
     participant = await messages_service.is_user_in_chat(db, user.id, chat_id)
     if participant is None:
-        raise AppException(403, "ACCESS_DENIED", "You are not a participant of this chat.")
+        raise AppException(
+            403, "ACCESS_DENIED", "You are not a participant of this chat."
+        )
 
     chat = await chat_services.get_chat_by_id(db, chat_id)
     if chat is None:
         raise AppException(404, "NOT_FOUND", "Chat doesn't exist.")
 
-    if chat.chat_type is not ChatType.PRIVATE and participant.role is not ParticipantRole.OWNER:
-        raise AppException(403, "ACCESS_DENIED", "Only the owner can enable encryption.")
+    if (
+        chat.chat_type is not ChatType.PRIVATE
+        and participant.role is not ParticipantRole.OWNER
+    ):
+        raise AppException(
+            403, "ACCESS_DENIED", "Only the owner can enable encryption."
+        )
 
     epoch = await epoch_service.enable_encryption(db, chat, user.id)
     return SuccessResponse(data=epoch)
@@ -214,9 +239,9 @@ async def enable_chat_encryption(
 
 @router.get("/chats/{chat_id}/roster", response_model=SuccessResponse[RosterResponse])
 async def get_chat_roster(
-        chat_id: uuid.UUID = Path(..., description="Chat ID"),
-        user: User = Depends(get_current_user),
-        db: AsyncSession = Depends(get_db),
+    chat_id: uuid.UUID = Path(..., description="Chat ID"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Member devices and their public keys, plus the current epoch's stored member set hash.
 
@@ -237,24 +262,27 @@ async def get_chat_roster(
     epoch = await epoch_service.get_epoch(db, chat_id, settings.current_epoch)
     if epoch is None:
         raise AppException(
-            409, "EPOCH_MISSING",
+            409,
+            "EPOCH_MISSING",
             "This chat has no open epoch; it must be re-keyed before keys can be distributed.",
         )
 
-    return SuccessResponse(data=RosterResponse(
-        chat_id=chat_id,
-        current_epoch=settings.current_epoch,
-        member_set_hash=epoch.member_set_hash,
-        members=[RosterEntry(**r) for r in roster],
-    ))
+    return SuccessResponse(
+        data=RosterResponse(
+            chat_id=chat_id,
+            current_epoch=settings.current_epoch,
+            member_set_hash=epoch.member_set_hash,
+            members=[RosterEntry(**r) for r in roster],
+        )
+    )
 
 
 @router.get("/chats/{chat_id}/keys", response_model=SuccessResponse[ChatKeysResponse])
 async def get_chat_keys(
-        chat_id: uuid.UUID = Path(..., description="Chat ID"),
-        since_epoch: int = Query(0, ge=0, description="Only return epochs after this one"),
-        user: User = Depends(get_current_user),
-        db: AsyncSession = Depends(get_db),
+    chat_id: uuid.UUID = Path(..., description="Chat ID"),
+    since_epoch: int = Query(0, ge=0, description="Only return epochs after this one"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Epochs and the key grants addressed to the caller's devices."""
     await messages_service.get_chat_or_403(db, chat_id, user.id)
@@ -268,11 +296,11 @@ async def get_chat_keys(
     response_model=SuccessResponse[SenderKeyPublishedResponse],
 )
 async def publish_sender_key(
-        data: SenderKeyUpload,
-        chat_id: uuid.UUID = Path(..., description="Chat ID"),
-        epoch: int = Path(..., ge=1, description="Epoch to publish into"),
-        user: User = Depends(get_current_user),
-        db: AsyncSession = Depends(get_db),
+    data: SenderKeyUpload,
+    chat_id: uuid.UUID = Path(..., description="Chat ID"),
+    epoch: int = Path(..., ge=1, description="Epoch to publish into"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Publish a chain for this epoch, with one wrapped copy per member device.
 
@@ -281,21 +309,28 @@ async def publish_sender_key(
     """
     await messages_service.get_chat_or_403(db, chat_id, user.id)
 
-    distribution = await epoch_service.publish_sender_key(db, chat_id, user.id, epoch, data)
+    distribution = await epoch_service.publish_sender_key(
+        db, chat_id, user.id, epoch, data
+    )
 
-    return SuccessResponse(data=SenderKeyPublishedResponse(
-        distribution_id=distribution.id,
-        epoch=epoch,
-        sender_key_id=distribution.sender_key_id,
-        grant_count=len(data.grants),
-    ))
+    return SuccessResponse(
+        data=SenderKeyPublishedResponse(
+            distribution_id=distribution.id,
+            epoch=epoch,
+            sender_key_id=distribution.sender_key_id,
+            grant_count=len(data.grants),
+        )
+    )
 
 
-@router.get("/safety-number/{peer_user_id}", response_model=SuccessResponse[SafetyNumberResponse])
+@router.get(
+    "/safety-number/{peer_user_id}",
+    response_model=SuccessResponse[SafetyNumberResponse],
+)
 async def get_safety_number(
-        peer_user_id: uuid.UUID = Path(..., description="The user to verify against"),
-        user: User = Depends(get_current_user),
-        db: AsyncSession = Depends(get_db),
+    peer_user_id: uuid.UUID = Path(..., description="The user to verify against"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Fingerprint for out-of-band verification.
 
@@ -305,8 +340,10 @@ async def get_safety_number(
     """
     number = await identity_service.compute_safety_number(db, user.id, peer_user_id)
 
-    return SuccessResponse(data=SafetyNumberResponse(
-        user_id=user.id,
-        peer_user_id=peer_user_id,
-        safety_number=number,
-    ))
+    return SuccessResponse(
+        data=SafetyNumberResponse(
+            user_id=user.id,
+            peer_user_id=peer_user_id,
+            safety_number=number,
+        )
+    )

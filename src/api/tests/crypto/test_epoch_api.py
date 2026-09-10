@@ -4,6 +4,7 @@ The headline test walks the whole protocol: enable encryption, fetch the roster,
 set hash, wrap a chain key for every member, publish, then have the other member fetch their grant,
 unwrap it and decrypt a real message.
 """
+
 import uuid
 
 from app.domains.crypto.reference.envelope import open_message, seal_message
@@ -15,12 +16,14 @@ from app.domains.crypto.reference.grants import (
 )
 from app.domains.crypto.reference.identity import (
     generate_identity,
-    unwrap_private_bundle,
     verify_identity_binding,
 )
 from app.domains.crypto.reference.primitives import b64u_decode, b64u_encode
-from app.domains.crypto.reference.ratchet import ReceiverChain, SenderChain, generate_chain_key
-
+from app.domains.crypto.reference.ratchet import (
+    ReceiverChain,
+    SenderChain,
+    generate_chain_key,
+)
 from tests.crypto.test_identity_api import _register_user
 
 PASSWORD = "TestPassw0rd!"
@@ -33,25 +36,34 @@ async def _publish_identity(client, user_id):
     bundle = generate_identity(user_id, device_id)
 
     from app.domains.crypto.reference.identity import wrap_private_bundle
+
     wrapped, kdf = wrap_private_bundle(bundle, PASSWORD)
 
-    r = await client.post("/crypto/identity", json={
-        "device_id": str(device_id),
-        "display_name": "test",
-        "identity_public_key": b64u_encode(bundle.identity_public),
-        "signing_public_key": b64u_encode(bundle.signing_public),
-        "identity_key_signature": b64u_encode(bundle.identity_key_signature),
-        "encrypted_private_bundle": wrapped,
-        "kdf_params": kdf,
-    })
+    r = await client.post(
+        "/crypto/identity",
+        json={
+            "device_id": str(device_id),
+            "display_name": "test",
+            "identity_public_key": b64u_encode(bundle.identity_public),
+            "signing_public_key": b64u_encode(bundle.signing_public),
+            "identity_key_signature": b64u_encode(bundle.identity_key_signature),
+            "encrypted_private_bundle": wrapped,
+            "kdf_params": kdf,
+        },
+    )
     assert r.status_code == 200, r.text
     return device_id, bundle
 
 
 async def _group_with(alice, bob_id, title="Crypto Group"):
-    r = await alice.post("/chats/group", json={
-        "title": title, "description": "d", "participant_ids": [str(bob_id)],
-    })
+    r = await alice.post(
+        "/chats/group",
+        json={
+            "title": title,
+            "description": "d",
+            "participant_ids": [str(bob_id)],
+        },
+    )
     assert r.status_code == 200, r.text
     return uuid.UUID(r.json()["data"]["id"])
 
@@ -80,13 +92,16 @@ async def test_full_group_key_distribution_and_message_exchange():
         # Over the whole roster entry, not just the device ids. Hashing ids alone let a server
         # keep the device set identical and swap a member's public key for one it held.
         recomputed = compute_member_set_hash(roster["members"])
-        assert recomputed == roster["member_set_hash"], \
+        assert recomputed == roster["member_set_hash"], (
             "client-side verification must match; a mismatch means a ghost or substituted device"
+        )
 
         # Every entry must carry the binding signature the client checks before wrapping. Without
         # it the roster is only an assertion by the server and there is nothing to verify against.
         for member in roster["members"]:
-            assert member["identity_key_signature"], "roster entries must carry their binding"
+            assert member["identity_key_signature"], (
+                "roster entries must carry their binding"
+            )
             assert verify_identity_binding(
                 uuid.UUID(member["user_id"]),
                 uuid.UUID(member["device_id"]),
@@ -116,33 +131,45 @@ async def test_full_group_key_distribution_and_message_exchange():
                 member["signed_prekey_public"] or member["identity_public_key"]
             )
             eph, wrapped = wrap_chain_key(
-                chain_key=chain_key, chain_start_index=0, recipient_public=recipient_pub,
-                chat_id=chat_id, epoch=epoch_number, sender_key_id=sender_key_id,
+                chain_key=chain_key,
+                chain_start_index=0,
+                recipient_public=recipient_pub,
+                chat_id=chat_id,
+                epoch=epoch_number,
+                sender_key_id=sender_key_id,
                 sender_device_id=alice_device,
                 recipient_device_id=uuid.UUID(member["device_id"]),
             )
-            grants.append({
-                "recipient_device_id": member["device_id"],
-                "wrap_algorithm": "x25519_hkdf_sha256_aes256gcm_v1",
-                "ephemeral_public_key": eph,
-                "wrapped_chain_key": wrapped,
-            })
+            grants.append(
+                {
+                    "recipient_device_id": member["device_id"],
+                    "wrap_algorithm": "x25519_hkdf_sha256_aes256gcm_v1",
+                    "ephemeral_public_key": eph,
+                    "wrapped_chain_key": wrapped,
+                }
+            )
 
         signature = sign_distribution(
             identity_signing_private=alice_keys.signing_private,
-            chat_id=chat_id, epoch=epoch_number, sender_key_id=sender_key_id,
-            chain_signing_public=chain_identity.signing_public, chain_start_index=0,
+            chat_id=chat_id,
+            epoch=epoch_number,
+            sender_key_id=sender_key_id,
+            chain_signing_public=chain_identity.signing_public,
+            chain_start_index=0,
         )
 
-        r = await alice.post(f"/crypto/chats/{chat_id}/epochs/{epoch_number}/sender-keys", json={
-            "sender_device_id": str(alice_device),
-            "sender_key_id": str(sender_key_id),
-            "algorithm": "hkdf_sha256_aes256gcm_v1",
-            "signing_public_key": b64u_encode(chain_identity.signing_public),
-            "chain_start_index": 0,
-            "signature": b64u_encode(signature),
-            "grants": grants,
-        })
+        r = await alice.post(
+            f"/crypto/chats/{chat_id}/epochs/{epoch_number}/sender-keys",
+            json={
+                "sender_device_id": str(alice_device),
+                "sender_key_id": str(sender_key_id),
+                "algorithm": "hkdf_sha256_aes256gcm_v1",
+                "signing_public_key": b64u_encode(chain_identity.signing_public),
+                "chain_start_index": 0,
+                "signature": b64u_encode(signature),
+                "grants": grants,
+            },
+        )
         assert r.status_code == 200, r.text
         assert r.json()["data"]["grant_count"] == 2
 
@@ -150,11 +177,19 @@ async def test_full_group_key_distribution_and_message_exchange():
         sender = SenderChain(chain_key)
         mk, nonce, idx = sender.next_message_key()
         envelope = seal_message(
-            message_key=mk, nonce=nonce, signing_private=chain_identity.signing_private,
-            chat_id=chat_id, epoch=epoch_number, sender_id=alice_id,
-            sender_key_id=sender_key_id, chain_index=idx, plaintext=SECRET,
+            message_key=mk,
+            nonce=nonce,
+            signing_private=chain_identity.signing_private,
+            chat_id=chat_id,
+            epoch=epoch_number,
+            sender_id=alice_id,
+            sender_key_id=sender_key_id,
+            chain_index=idx,
+            plaintext=SECRET,
         )
-        r = await alice.post("/messages/", json={"chat_id": str(chat_id), "envelope": envelope})
+        r = await alice.post(
+            "/messages/", json={"chat_id": str(chat_id), "envelope": envelope}
+        )
         assert r.status_code == 200, r.text
 
         # --- bob fetches keys, unwraps his grant, and decrypts ---
@@ -173,7 +208,8 @@ async def test_full_group_key_distribution_and_message_exchange():
             wrapped=dist["grant"]["wrapped_chain_key"],
             ephemeral_public=dist["grant"]["ephemeral_public_key"],
             recipient_private=bob_keys.identity_private,
-            chat_id=chat_id, epoch=dist["epoch"],
+            chat_id=chat_id,
+            epoch=dist["epoch"],
             sender_key_id=uuid.UUID(dist["sender_key_id"]),
             sender_device_id=uuid.UUID(dist["sender_device_id"]),
             recipient_device_id=bob_device,
@@ -185,8 +221,12 @@ async def test_full_group_key_distribution_and_message_exchange():
         fetched = r.json()["data"][0]
 
         plaintext = open_message(
-            message_key=ReceiverChain(recovered_chain).message_key_for(fetched["envelope"]["idx"])[0],
-            envelope=fetched["envelope"], chat_id=chat_id, sender_id=alice_id,
+            message_key=ReceiverChain(recovered_chain).message_key_for(
+                fetched["envelope"]["idx"]
+            )[0],
+            envelope=fetched["envelope"],
+            chat_id=chat_id,
+            sender_id=alice_id,
             signing_public=b64u_decode(dist["signing_public_key"]),
         )
         assert plaintext == SECRET
@@ -251,31 +291,43 @@ async def test_partial_grant_upload_is_rejected():
 
         # Wrap for alice only, omitting bob.
         eph, wrapped = wrap_chain_key(
-            chain_key=chain_key, chain_start_index=0,
+            chain_key=chain_key,
+            chain_start_index=0,
             recipient_public=alice_keys.identity_public,
-            chat_id=chat_id, epoch=1, sender_key_id=sender_key_id,
-            sender_device_id=alice_device, recipient_device_id=alice_device,
+            chat_id=chat_id,
+            epoch=1,
+            sender_key_id=sender_key_id,
+            sender_device_id=alice_device,
+            recipient_device_id=alice_device,
         )
         signature = sign_distribution(
             identity_signing_private=alice_keys.signing_private,
-            chat_id=chat_id, epoch=1, sender_key_id=sender_key_id,
-            chain_signing_public=chain_identity.signing_public, chain_start_index=0,
+            chat_id=chat_id,
+            epoch=1,
+            sender_key_id=sender_key_id,
+            chain_signing_public=chain_identity.signing_public,
+            chain_start_index=0,
         )
 
-        r = await alice.post(f"/crypto/chats/{chat_id}/epochs/1/sender-keys", json={
-            "sender_device_id": str(alice_device),
-            "sender_key_id": str(sender_key_id),
-            "algorithm": "hkdf_sha256_aes256gcm_v1",
-            "signing_public_key": b64u_encode(chain_identity.signing_public),
-            "chain_start_index": 0,
-            "signature": b64u_encode(signature),
-            "grants": [{
-                "recipient_device_id": str(alice_device),
-                "wrap_algorithm": "x25519_hkdf_sha256_aes256gcm_v1",
-                "ephemeral_public_key": eph,
-                "wrapped_chain_key": wrapped,
-            }],
-        })
+        r = await alice.post(
+            f"/crypto/chats/{chat_id}/epochs/1/sender-keys",
+            json={
+                "sender_device_id": str(alice_device),
+                "sender_key_id": str(sender_key_id),
+                "algorithm": "hkdf_sha256_aes256gcm_v1",
+                "signing_public_key": b64u_encode(chain_identity.signing_public),
+                "chain_start_index": 0,
+                "signature": b64u_encode(signature),
+                "grants": [
+                    {
+                        "recipient_device_id": str(alice_device),
+                        "wrap_algorithm": "x25519_hkdf_sha256_aes256gcm_v1",
+                        "ephemeral_public_key": eph,
+                        "wrapped_chain_key": wrapped,
+                    }
+                ],
+            },
+        )
         assert r.status_code == 400
         assert r.json()["error_code"] == "GRANT_SET_MISMATCH"
     finally:
@@ -302,34 +354,46 @@ async def test_forged_distribution_signature_is_rejected():
         grants = []
         for device_id, keys in ((alice_device, alice_keys), (bob_device, bob_keys)):
             eph, wrapped = wrap_chain_key(
-                chain_key=chain_key, chain_start_index=0,
+                chain_key=chain_key,
+                chain_start_index=0,
                 recipient_public=keys.identity_public,
-                chat_id=chat_id, epoch=1, sender_key_id=sender_key_id,
-                sender_device_id=alice_device, recipient_device_id=device_id,
+                chat_id=chat_id,
+                epoch=1,
+                sender_key_id=sender_key_id,
+                sender_device_id=alice_device,
+                recipient_device_id=device_id,
             )
-            grants.append({
-                "recipient_device_id": str(device_id),
-                "wrap_algorithm": "x25519_hkdf_sha256_aes256gcm_v1",
-                "ephemeral_public_key": eph,
-                "wrapped_chain_key": wrapped,
-            })
+            grants.append(
+                {
+                    "recipient_device_id": str(device_id),
+                    "wrap_algorithm": "x25519_hkdf_sha256_aes256gcm_v1",
+                    "ephemeral_public_key": eph,
+                    "wrapped_chain_key": wrapped,
+                }
+            )
 
         # Signed by someone who is not alice.
         signature = sign_distribution(
             identity_signing_private=impostor.signing_private,
-            chat_id=chat_id, epoch=1, sender_key_id=sender_key_id,
-            chain_signing_public=chain_identity.signing_public, chain_start_index=0,
+            chat_id=chat_id,
+            epoch=1,
+            sender_key_id=sender_key_id,
+            chain_signing_public=chain_identity.signing_public,
+            chain_start_index=0,
         )
 
-        r = await alice.post(f"/crypto/chats/{chat_id}/epochs/1/sender-keys", json={
-            "sender_device_id": str(alice_device),
-            "sender_key_id": str(sender_key_id),
-            "algorithm": "hkdf_sha256_aes256gcm_v1",
-            "signing_public_key": b64u_encode(chain_identity.signing_public),
-            "chain_start_index": 0,
-            "signature": b64u_encode(signature),
-            "grants": grants,
-        })
+        r = await alice.post(
+            f"/crypto/chats/{chat_id}/epochs/1/sender-keys",
+            json={
+                "sender_device_id": str(alice_device),
+                "sender_key_id": str(sender_key_id),
+                "algorithm": "hkdf_sha256_aes256gcm_v1",
+                "signing_public_key": b64u_encode(chain_identity.signing_public),
+                "chain_start_index": 0,
+                "signature": b64u_encode(signature),
+                "grants": grants,
+            },
+        )
         assert r.status_code == 400
         assert r.json()["error_code"] == "INVALID_DISTRIBUTION_SIGNATURE"
     finally:

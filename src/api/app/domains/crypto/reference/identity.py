@@ -18,14 +18,21 @@ therefore a security control, not hygiene.
 Contrast with the old `tests.py` scratch script, which used `password.ljust(32, 'X')` as its
 "KDF" — that is not key derivation at all and produced keys recoverable in milliseconds.
 """
+
 import json
 import os
 from dataclasses import dataclass
 
 from argon2.low_level import Type, hash_secret_raw
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
+from cryptography.hazmat.primitives.asymmetric.x25519 import (
+    X25519PrivateKey,
+    X25519PublicKey,
+)
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.hashes import SHA512, Hash
 
@@ -52,6 +59,7 @@ GCM_NONCE_BYTES = 12
 @dataclass(frozen=True)
 class IdentityBundle:
     """A device's full keypair set. The private fields never leave the client in production."""
+
     signing_private: bytes
     signing_public: bytes
     identity_private: bytes
@@ -80,7 +88,9 @@ def identity_binding_message(user_id, device_id, identity_public: bytes) -> byte
     Binding user_id and device_id in stops a valid (identity_public, signature) pair being
     transplanted onto a different user or device.
     """
-    return DS_IDENTITY_BIND + uuid_bytes(user_id) + uuid_bytes(device_id) + identity_public
+    return (
+        DS_IDENTITY_BIND + uuid_bytes(user_id) + uuid_bytes(device_id) + identity_public
+    )
 
 
 def generate_identity(user_id, device_id) -> IdentityBundle:
@@ -104,11 +114,11 @@ def generate_identity(user_id, device_id) -> IdentityBundle:
 
 
 def verify_identity_binding(
-        user_id,
-        device_id,
-        identity_public: bytes,
-        signing_public: bytes,
-        signature: bytes,
+    user_id,
+    device_id,
+    identity_public: bytes,
+    signing_public: bytes,
+    signature: bytes,
 ) -> bool:
     """Check that signing_public vouches for identity_public. Cheap enough to run server-side."""
     try:
@@ -128,15 +138,20 @@ def prekey_binding_message(user_id, device_id, signed_prekey_public: bytes) -> b
     identity-key binding and vice versa. User and device are bound in for the same reason they are
     in the identity binding — a valid (key, signature) pair must not transplant onto another device.
     """
-    return DS_PREKEY_BIND + uuid_bytes(user_id) + uuid_bytes(device_id) + signed_prekey_public
+    return (
+        DS_PREKEY_BIND
+        + uuid_bytes(user_id)
+        + uuid_bytes(device_id)
+        + signed_prekey_public
+    )
 
 
 def verify_signed_prekey(
-        user_id,
-        device_id,
-        signed_prekey_public: bytes,
-        signing_public: bytes,
-        signature: bytes,
+    user_id,
+    device_id,
+    signed_prekey_public: bytes,
+    signing_public: bytes,
+    signature: bytes,
 ) -> bool:
     """Check that the device's identity signing key vouches for this prekey.
 
@@ -176,10 +191,12 @@ def wrap_private_bundle(bundle: IdentityBundle, password: str) -> tuple[str, dic
     nonce = os.urandom(GCM_NONCE_BYTES)
     kek = derive_kek(password, salt)
 
-    plaintext = json.dumps({
-        "signing_private": b64u_encode(bundle.signing_private),
-        "identity_private": b64u_encode(bundle.identity_private),
-    }).encode("utf-8")
+    plaintext = json.dumps(
+        {
+            "signing_private": b64u_encode(bundle.signing_private),
+            "identity_private": b64u_encode(bundle.identity_private),
+        }
+    ).encode("utf-8")
 
     ciphertext = AESGCM(kek).encrypt(nonce, plaintext, None)
 
@@ -194,7 +211,9 @@ def wrap_private_bundle(bundle: IdentityBundle, password: str) -> tuple[str, dic
     return b64u_encode(ciphertext), kdf_params
 
 
-def unwrap_private_bundle(wrapped: str, kdf_params: dict, password: str) -> dict[str, bytes]:
+def unwrap_private_bundle(
+    wrapped: str, kdf_params: dict, password: str
+) -> dict[str, bytes]:
     """Inverse of wrap_private_bundle. Raises on a wrong password (GCM tag failure)."""
     kek = hash_secret_raw(
         secret=password.encode("utf-8"),
@@ -258,7 +277,6 @@ def safety_number(signing_public_a: bytes, signing_public_b: bytes) -> str:
 
     # 12 groups of 5 digits, derived from successive 4-byte words.
     groups = [
-        f"{int.from_bytes(raw[i:i + 4], 'big') % 100000:05d}"
-        for i in range(0, 48, 4)
+        f"{int.from_bytes(raw[i : i + 4], 'big') % 100000:05d}" for i in range(0, 48, 4)
     ]
     return " ".join(groups)

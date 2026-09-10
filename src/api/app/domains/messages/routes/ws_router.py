@@ -1,8 +1,8 @@
-﻿import asyncio
+import asyncio
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
-from motor.motor_asyncio import AsyncIOMotorDatabase
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from loguru import logger
+from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import ValidationError
 from redis.asyncio import Redis
 from sqlalchemy import select
@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import AppException
 from app.domains.chats.models import ChatParticipant
 from app.domains.chats.services.chat_services import update_participant_last_read
-from app.domains.messages.schemas.ws_schemas import WSMessageEnvelope, WSEventType
+from app.domains.messages.schemas.ws_schemas import WSEventType, WSMessageEnvelope
 from app.domains.messages.services import messages_service
 from app.domains.users.dependencies import get_ws_current_user
 from app.domains.users.models import User
@@ -42,7 +42,9 @@ PRESENCE_TTL_SECONDS = 86400
 MAX_FRAME_BYTES = 64 * 1024
 
 
-async def _broadcast_presence(db: AsyncSession, redis: Redis, user_id, online: bool) -> None:
+async def _broadcast_presence(
+    db: AsyncSession, redis: Redis, user_id, online: bool
+) -> None:
     """Tell this user's conversation partners that they came online or went offline.
 
     USER_ONLINE and USER_OFFLINE were declared in the event enum and handled in the client, but
@@ -51,11 +53,20 @@ async def _broadcast_presence(db: AsyncSession, redis: Redis, user_id, online: b
     """
     my_chats = select(ChatParticipant.chat_id).where(ChatParticipant.user_id == user_id)
 
-    peer_ids = (await db.execute(
-        select(ChatParticipant.user_id)
-        .where(ChatParticipant.chat_id.in_(my_chats), ChatParticipant.user_id != user_id)
-        .distinct()
-    )).scalars().all()
+    peer_ids = (
+        (
+            await db.execute(
+                select(ChatParticipant.user_id)
+                .where(
+                    ChatParticipant.chat_id.in_(my_chats),
+                    ChatParticipant.user_id != user_id,
+                )
+                .distinct()
+            )
+        )
+        .scalars()
+        .all()
+    )
 
     if not peer_ids:
         return
@@ -88,17 +99,23 @@ async def _may_act_on(db: AsyncSession, user_id, chat_id, websocket: WebSocket) 
         WSMessageEnvelope(
             event_type=WSEventType.ERROR,
             chat_id=chat_id,
-            payload={"error_code": "FORBIDDEN", "message": "You are not a participant of this chat."},
+            payload={
+                "error_code": "FORBIDDEN",
+                "message": "You are not a participant of this chat.",
+            },
         ).model_dump_json()
     )
     return False
 
 
-@ws_router.websocket('/ws')
-async def websocket_endpoint(websocket: WebSocket,
-                             user: User = Depends(get_ws_current_user),
-                             db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
-                             mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db)):
+@ws_router.websocket("/ws")
+async def websocket_endpoint(
+    websocket: WebSocket,
+    user: User = Depends(get_ws_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+    mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
+):
     await websocket.accept()
 
     # Presence is refcounted, not a flag. With a plain set/clear, closing one of two open tabs
@@ -127,7 +144,10 @@ async def websocket_endpoint(websocket: WebSocket,
                 await websocket.send_text(
                     WSMessageEnvelope(
                         event_type=WSEventType.ERROR,
-                        payload={"error_code": "FRAME_TOO_LARGE", "message": "Frame exceeds the size limit."},
+                        payload={
+                            "error_code": "FRAME_TOO_LARGE",
+                            "message": "Frame exceeds the size limit.",
+                        },
                     ).model_dump_json()
                 )
                 continue
@@ -137,8 +157,8 @@ async def websocket_endpoint(websocket: WebSocket,
                 ws_event.user_id = user.id
 
                 if ws_event.event_type in (
-                        WSEventType.TYPING_START,
-                        WSEventType.TYPING_STOP
+                    WSEventType.TYPING_START,
+                    WSEventType.TYPING_STOP,
                 ):
                     if not ws_event.chat_id:
                         continue
@@ -146,7 +166,9 @@ async def websocket_endpoint(websocket: WebSocket,
                     if not await _may_act_on(db, user.id, ws_event.chat_id, websocket):
                         continue
 
-                    stmt = select(ChatParticipant.user_id).where(ChatParticipant.chat_id == ws_event.chat_id)
+                    stmt = select(ChatParticipant.user_id).where(
+                        ChatParticipant.chat_id == ws_event.chat_id
+                    )
                     res = await db.execute(stmt)
                     participant_ids = res.scalars().all()
 
@@ -165,14 +187,18 @@ async def websocket_endpoint(websocket: WebSocket,
                     if not await _may_act_on(db, user.id, ws_event.chat_id, websocket):
                         continue
 
-                    await update_participant_last_read(db, ws_event.chat_id, user.id, last_read_id)
+                    await update_participant_last_read(
+                        db, ws_event.chat_id, user.id, last_read_id
+                    )
 
                     updated_count = await messages_service.mark_messages_as_read(
                         db, mongo_db, ws_event.chat_id, user.id, last_read_id
                     )
 
                     if updated_count > 0:
-                        stmt = select(ChatParticipant.user_id).where(ChatParticipant.chat_id == ws_event.chat_id)
+                        stmt = select(ChatParticipant.user_id).where(
+                            ChatParticipant.chat_id == ws_event.chat_id
+                        )
                         res = await db.execute(stmt)
                         participant_ids = res.scalars().all()
 
@@ -181,20 +207,19 @@ async def websocket_endpoint(websocket: WebSocket,
                         for p_id in participant_ids:
                             await redis.publish(f"user:{p_id}", event_json)
 
-
                 elif ws_event.event_type in (
-                        WSEventType.NEW_MESSAGE,
-                        WSEventType.MESSAGE_EDITED,
-                        WSEventType.MESSAGE_DELETED
+                    WSEventType.NEW_MESSAGE,
+                    WSEventType.MESSAGE_EDITED,
+                    WSEventType.MESSAGE_DELETED,
                 ):
                     # WSMessageEnvelope sets use_enum_values=True, so event_type is already a str.
                     error_envelope = WSMessageEnvelope(
                         event_type=WSEventType.ERROR,
-                        payload={"message": f"Please use HTTP endpoints for {ws_event.event_type}"}
+                        payload={
+                            "message": f"Please use HTTP endpoints for {ws_event.event_type}"
+                        },
                     )
                     await websocket.send_text(error_envelope.model_dump_json())
-
-
 
             except ValidationError as e:
                 error_envelope = WSMessageEnvelope(

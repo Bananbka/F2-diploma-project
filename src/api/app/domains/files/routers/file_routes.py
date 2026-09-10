@@ -1,6 +1,6 @@
-﻿import uuid
+import uuid
 
-from fastapi import APIRouter, UploadFile, File, Depends, Form, Response
+from fastapi import APIRouter, Depends, File, Form, Response, UploadFile
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,7 +44,8 @@ async def _read_bounded(file: UploadFile, limit: int) -> bytes:
         total += len(chunk)
         if total > limit:
             raise AppException(
-                413, "FILE_SIZE_TOO_LARGE",
+                413,
+                "FILE_SIZE_TOO_LARGE",
                 f"File size exceeds the maximum limit of {limit // (1024 * 1024)} MB.",
             )
         chunks.append(chunk)
@@ -53,28 +54,39 @@ async def _read_bounded(file: UploadFile, limit: int) -> bytes:
 
 
 @router.post("/upload", response_model=SuccessResponse[dict])
-async def upload_file(file: UploadFile = File(...), category: FileCategory = Form(FileCategory.MESSAGE),
-                      user: User = Depends(get_current_user),
-                      redis: Redis = Depends(get_redis)):
+async def upload_file(
+    file: UploadFile = File(...),
+    category: FileCategory = Form(FileCategory.MESSAGE),
+    user: User = Depends(get_current_user),
+    redis: Redis = Depends(get_redis),
+):
     await enforce_rate_limit(
-        redis, scope="upload", identifier=str(user.id),
-        limit=UPLOAD_LIMIT, window_seconds=UPLOAD_WINDOW,
+        redis,
+        scope="upload",
+        identifier=str(user.id),
+        limit=UPLOAD_LIMIT,
+        window_seconds=UPLOAD_WINDOW,
         message="Too many uploads. Please wait before uploading more.",
     )
 
     is_avatar = category == FileCategory.AVATAR
-    target_bucket = settings.MINIO_AVATAR_BUCKET if is_avatar else settings.MINIO_MESSAGE_BUCKET
+    target_bucket = (
+        settings.MINIO_AVATAR_BUCKET if is_avatar else settings.MINIO_MESSAGE_BUCKET
+    )
 
     filename = file.filename or "encrypted_file.enc"
     content_type = file.content_type or "application/octet-stream"
 
     if is_avatar and content_type not in ALLOWED_AVATAR_TYPES:
         raise AppException(
-            415, "UNSUPPORTED_MEDIA_TYPE",
+            415,
+            "UNSUPPORTED_MEDIA_TYPE",
             "Avatars must be a JPEG, PNG, WebP or GIF image.",
         )
 
-    file_bytes = await _read_bounded(file, MAX_AVATAR_SIZE if is_avatar else MAX_FILE_SIZE)
+    file_bytes = await _read_bounded(
+        file, MAX_AVATAR_SIZE if is_avatar else MAX_FILE_SIZE
+    )
     file_size = len(file_bytes)
 
     if file_size == 0:
@@ -83,7 +95,9 @@ async def upload_file(file: UploadFile = File(...), category: FileCategory = For
     if is_avatar and not _looks_like_image(file_bytes):
         # The declared Content-Type is client-supplied. Checking the leading bytes stops a file
         # that merely claims to be a PNG from being served as one from a public bucket.
-        raise AppException(415, "UNSUPPORTED_MEDIA_TYPE", "That file is not a recognised image.")
+        raise AppException(
+            415, "UNSUPPORTED_MEDIA_TYPE", "That file is not a recognised image."
+        )
 
     file_url = await minio_manager.upload_file(
         file_bytes=file_bytes,
@@ -108,20 +122,21 @@ async def upload_file(file: UploadFile = File(...), category: FileCategory = For
 def _looks_like_image(data: bytes) -> bool:
     """Magic-number check for the formats the avatar bucket accepts."""
     return (
-        data.startswith(b"\xff\xd8\xff")                       # JPEG
-        or data.startswith(b"\x89PNG\r\n\x1a\n")               # PNG
-        or data.startswith(b"GIF87a") or data.startswith(b"GIF89a")
-        or (data[:4] == b"RIFF" and data[8:12] == b"WEBP")     # WebP
+        data.startswith(b"\xff\xd8\xff")  # JPEG
+        or data.startswith(b"\x89PNG\r\n\x1a\n")  # PNG
+        or data.startswith(b"GIF87a")
+        or data.startswith(b"GIF89a")
+        or (data[:4] == b"RIFF" and data[8:12] == b"WEBP")  # WebP
     )
 
 
 @router.get("/attachments/{chat_id}/{object_key}")
 async def download_attachment(
-        chat_id: uuid.UUID,
-        object_key: str,
-        user: User = Depends(get_current_user),
-        db: AsyncSession = Depends(get_db),
-        mongo_db=Depends(get_mongo_db),
+    chat_id: uuid.UUID,
+    object_key: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    mongo_db=Depends(get_mongo_db),
 ):
     """Serve an attachment, authorising against Postgres first.
 
@@ -141,7 +156,9 @@ async def download_attachment(
         {"chat_id": chat_id, "attachments.url": file_url}, {"_id": 1}
     )
     if referenced is None:
-        raise AppException(404, "ATTACHMENT_NOT_FOUND", "No attachment with that key in this chat.")
+        raise AppException(
+            404, "ATTACHMENT_NOT_FOUND", "No attachment with that key in this chat."
+        )
 
     try:
         body, content_type, length = await minio_manager.stream_object(
@@ -150,7 +167,9 @@ async def download_attachment(
     except Exception:
         # The row survives but the object does not — most often the 24h GC reaped a blob whose
         # message was never sent, or an earlier delete removed it.
-        raise AppException(410, "ATTACHMENT_GONE", "This attachment is no longer stored.")
+        raise AppException(
+            410, "ATTACHMENT_GONE", "This attachment is no longer stored."
+        )
 
     return Response(
         content=body,

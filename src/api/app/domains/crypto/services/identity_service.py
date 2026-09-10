@@ -13,15 +13,18 @@ from app.domains.crypto.reference.identity import (
     verify_signed_prekey,
 )
 from app.domains.crypto.reference.primitives import b64u_decode
-from app.domains.crypto.schemas.crypto_schemas import IdentityPublishRequest, PrekeyRotateRequest
+from app.domains.crypto.schemas.crypto_schemas import (
+    IdentityPublishRequest,
+    PrekeyRotateRequest,
+)
 
 MAX_ACTIVE_DEVICES_PER_USER = 5
 
 
 async def publish_identity(
-        db: AsyncSession,
-        user_id: uuid.UUID,
-        data: IdentityPublishRequest,
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    data: IdentityPublishRequest,
 ) -> UserIdentityKey:
     """Register or rotate a device's identity keys.
 
@@ -33,15 +36,16 @@ async def publish_identity(
     # X25519 key under this user and device. Rejecting here prevents unusable accounts and blocks
     # a key pair being transplanted from another identity.
     if not verify_identity_binding(
-            user_id,
-            data.device_id,
-            b64u_decode(data.identity_public_key),
-            b64u_decode(data.signing_public_key),
-            b64u_decode(data.identity_key_signature),
+        user_id,
+        data.device_id,
+        b64u_decode(data.identity_public_key),
+        b64u_decode(data.signing_public_key),
+        b64u_decode(data.identity_key_signature),
     ):
         raise AppException(
-            400, "INVALID_KEY_SIGNATURE",
-            "identity_key_signature does not verify for this user and device."
+            400,
+            "INVALID_KEY_SIGNATURE",
+            "identity_key_signature does not verify for this user and device.",
         )
 
     # A prekey published here was stored without its signature ever being checked — only the
@@ -51,19 +55,21 @@ async def publish_identity(
     if data.signed_prekey_public is not None:
         if data.signed_prekey_signature is None:
             raise AppException(
-                400, "PREKEY_SIGNATURE_REQUIRED",
+                400,
+                "PREKEY_SIGNATURE_REQUIRED",
                 "A signed prekey must be accompanied by its binding signature.",
             )
 
         if not verify_signed_prekey(
-                user_id=user_id,
-                device_id=data.device_id,
-                signed_prekey_public=b64u_decode(data.signed_prekey_public),
-                signing_public=b64u_decode(data.signing_public_key),
-                signature=b64u_decode(data.signed_prekey_signature),
+            user_id=user_id,
+            device_id=data.device_id,
+            signed_prekey_public=b64u_decode(data.signed_prekey_public),
+            signing_public=b64u_decode(data.signing_public_key),
+            signature=b64u_decode(data.signed_prekey_signature),
         ):
             raise AppException(
-                400, "INVALID_KEY_SIGNATURE",
+                400,
+                "INVALID_KEY_SIGNATURE",
                 "The prekey signature does not verify for this user and device.",
             )
 
@@ -81,7 +87,8 @@ async def publish_identity(
         )
         if active_devices >= MAX_ACTIVE_DEVICES_PER_USER:
             raise AppException(
-                409, "TOO_MANY_DEVICES",
+                409,
+                "TOO_MANY_DEVICES",
                 f"An account may have at most {MAX_ACTIVE_DEVICES_PER_USER} active devices. "
                 f"Revoke one before registering another.",
             )
@@ -94,16 +101,17 @@ async def publish_identity(
         db.add(device)
         await db.flush()
     elif device.user_id != user_id:
-        raise AppException(409, "DEVICE_CONFLICT", "This device id belongs to another user.")
+        raise AppException(
+            409, "DEVICE_CONFLICT", "This device id belongs to another user."
+        )
     elif not device.is_active:
         # Re-activating rather than silently attaching a key to a revoked device, whose keys the
         # roster query filters out — the account would look published and never receive a grant.
         device.is_active = True
         device.revoked_at = None
 
-    prev_stmt = (
-        select(UserIdentityKey)
-        .where(UserIdentityKey.device_id == device.id, UserIdentityKey.is_active.is_(True))
+    prev_stmt = select(UserIdentityKey).where(
+        UserIdentityKey.device_id == device.id, UserIdentityKey.is_active.is_(True)
     )
     previous = (await db.execute(prev_stmt)).scalar_one_or_none()
 
@@ -137,15 +145,17 @@ async def publish_identity(
 
 
 async def rotate_prekey(
-        db: AsyncSession,
-        user_id: uuid.UUID,
-        data: PrekeyRotateRequest,
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    data: PrekeyRotateRequest,
 ) -> UserIdentityKey:
     """Rotate only the medium-term prekey. Does not supersede the identity key or void grants."""
     key = await get_active_key_for_device(db, data.device_id)
 
     if key is None or key.user_id != user_id:
-        raise AppException(404, "DEVICE_NOT_FOUND", "No active identity key for this device.")
+        raise AppException(
+            404, "DEVICE_NOT_FOUND", "No active identity key for this device."
+        )
 
     # Grants prefer the signed prekey over the identity key as the ECDH recipient, so an unchecked
     # prekey would let anyone able to reach this endpoint swap in a key they hold and receive every
@@ -155,14 +165,15 @@ async def rotate_prekey(
     # Only what is supplied here is verified. Rows written before this check existed hold signatures
     # that were never verifiable, and retroactively rejecting them would lock those devices out.
     if not verify_signed_prekey(
-            user_id=user_id,
-            device_id=data.device_id,
-            signed_prekey_public=b64u_decode(data.signed_prekey_public),
-            signing_public=b64u_decode(key.signing_public_key),
-            signature=b64u_decode(data.signed_prekey_signature),
+        user_id=user_id,
+        device_id=data.device_id,
+        signed_prekey_public=b64u_decode(data.signed_prekey_public),
+        signing_public=b64u_decode(key.signing_public_key),
+        signature=b64u_decode(data.signed_prekey_signature),
     ):
         raise AppException(
-            400, "INVALID_KEY_SIGNATURE",
+            400,
+            "INVALID_KEY_SIGNATURE",
             "The prekey signature does not verify against this device's identity key.",
         )
 
@@ -176,8 +187,8 @@ async def rotate_prekey(
 
 
 async def get_active_key_for_device(
-        db: AsyncSession,
-        device_id: uuid.UUID,
+    db: AsyncSession,
+    device_id: uuid.UUID,
 ) -> UserIdentityKey | None:
     stmt = select(UserIdentityKey).where(
         UserIdentityKey.device_id == device_id,
@@ -187,8 +198,8 @@ async def get_active_key_for_device(
 
 
 async def get_active_keys_for_users(
-        db: AsyncSession,
-        user_ids: list[uuid.UUID],
+    db: AsyncSession,
+    user_ids: list[uuid.UUID],
 ) -> list[UserIdentityKey]:
     """Batch-fetch active public keys.
 
@@ -210,7 +221,9 @@ async def get_active_keys_for_users(
     return list((await db.execute(stmt)).scalars().all())
 
 
-async def get_active_signing_keys(db: AsyncSession, user_id: uuid.UUID) -> list[UserIdentityKey]:
+async def get_active_signing_keys(
+    db: AsyncSession, user_id: uuid.UUID
+) -> list[UserIdentityKey]:
     """**All** of the user's active identity keys, for verifying something they signed.
 
     This used to return a single row with a bare `.limit(1)` and no ordering. The rest of the
@@ -232,7 +245,9 @@ async def get_active_signing_keys(db: AsyncSession, user_id: uuid.UUID) -> list[
     return list((await db.execute(stmt)).scalars().all())
 
 
-async def revoke_device(db: AsyncSession, user_id: uuid.UUID, device_id: uuid.UUID) -> None:
+async def revoke_device(
+    db: AsyncSession, user_id: uuid.UUID, device_id: uuid.UUID
+) -> None:
     """Revoke one of your own devices — a lost phone, a shared machine.
 
     There was no way to do this short of a full password reset, which destroys the identity and
@@ -260,7 +275,8 @@ async def revoke_device(db: AsyncSession, user_id: uuid.UUID, device_id: uuid.UU
         # Revoking the last device leaves an account that can decrypt nothing and cannot publish
         # a replacement without a fresh identity, which is the password-reset path, not this one.
         raise AppException(
-            409, "LAST_DEVICE",
+            409,
+            "LAST_DEVICE",
             "You cannot revoke your only device. Register another one first.",
         )
 
@@ -268,7 +284,9 @@ async def revoke_device(db: AsyncSession, user_id: uuid.UUID, device_id: uuid.UU
 
     await db.execute(
         update(UserIdentityKey)
-        .where(UserIdentityKey.device_id == device_id, UserIdentityKey.is_active.is_(True))
+        .where(
+            UserIdentityKey.device_id == device_id, UserIdentityKey.is_active.is_(True)
+        )
         .values(is_active=False, revoked_at=now)
     )
     device.is_active = False
@@ -277,7 +295,9 @@ async def revoke_device(db: AsyncSession, user_id: uuid.UUID, device_id: uuid.UU
     await db.flush()
 
 
-async def get_own_identities(db: AsyncSession, user_id: uuid.UUID) -> list[UserIdentityKey]:
+async def get_own_identities(
+    db: AsyncSession, user_id: uuid.UUID
+) -> list[UserIdentityKey]:
     stmt = select(UserIdentityKey).where(
         UserIdentityKey.user_id == user_id,
         UserIdentityKey.is_active.is_(True),
@@ -286,9 +306,9 @@ async def get_own_identities(db: AsyncSession, user_id: uuid.UUID) -> list[UserI
 
 
 async def compute_safety_number(
-        db: AsyncSession,
-        user_id: uuid.UUID,
-        peer_user_id: uuid.UUID,
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    peer_user_id: uuid.UUID,
 ) -> str:
     """Fingerprint for out-of-band comparison between two users.
 
@@ -297,17 +317,25 @@ async def compute_safety_number(
     control, so the client must be able to derive it independently.
     """
     if user_id == peer_user_id:
-        raise AppException(400, "INVALID_TARGET", "Cannot compute a safety number with yourself.")
+        raise AppException(
+            400, "INVALID_TARGET", "Cannot compute a safety number with yourself."
+        )
 
     keys = await get_active_keys_for_users(db, [user_id, peer_user_id])
 
     mine = [b64u_decode(k.signing_public_key) for k in keys if k.user_id == user_id]
-    theirs = [b64u_decode(k.signing_public_key) for k in keys if k.user_id == peer_user_id]
+    theirs = [
+        b64u_decode(k.signing_public_key) for k in keys if k.user_id == peer_user_id
+    ]
 
     if not mine:
-        raise AppException(400, "NO_IDENTITY_KEY", "You have not published an identity key.")
+        raise AppException(
+            400, "NO_IDENTITY_KEY", "You have not published an identity key."
+        )
     if not theirs:
-        raise AppException(404, "PEER_NO_IDENTITY_KEY", "This user has not published an identity key.")
+        raise AppException(
+            404, "PEER_NO_IDENTITY_KEY", "This user has not published an identity key."
+        )
 
     # Every active device on each side contributes. Picking one key per user made the value
     # depend on row ordering and left it unchanged when a peer added a device — so a new device
@@ -319,9 +347,9 @@ async def compute_safety_number(
 
 
 async def rewrap_private_bundles(
-        db: AsyncSession,
-        user_id: uuid.UUID,
-        items: list,
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    items: list,
 ) -> int:
     """Re-wrap private bundles under a new password, keeping the keypairs intact.
 
@@ -343,8 +371,9 @@ async def rewrap_private_bundles(
 
     if len(keys) != len(by_device):
         raise AppException(
-            400, "UNKNOWN_DEVICE",
-            "One or more device ids do not have an active identity key for this user."
+            400,
+            "UNKNOWN_DEVICE",
+            "One or more device ids do not have an active identity key for this user.",
         )
 
     for key in keys:

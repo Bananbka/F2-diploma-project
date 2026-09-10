@@ -23,7 +23,9 @@ def _attempts_key(naming: str, identificator) -> str:
     return f"{naming}:attempts:{identificator}"
 
 
-async def generate_otp(redis: Redis, naming: str, identificator: uuid.UUID | str) -> str:
+async def generate_otp(
+    redis: Redis, naming: str, identificator: uuid.UUID | str
+) -> str:
     """Issue a fresh one-time code, resetting the attempt counter with it.
 
     `secrets` rather than `random`: the latter is a Mersenne Twister seeded from the clock, and
@@ -38,7 +40,9 @@ async def generate_otp(redis: Redis, naming: str, identificator: uuid.UUID | str
     return otp
 
 
-async def check_otp(redis: Redis, naming: str, identificator: uuid.UUID | str, otp: str) -> bool:
+async def check_otp(
+    redis: Redis, naming: str, identificator: uuid.UUID | str, otp: str
+) -> bool:
     """Verify a code, burning an attempt whether or not it matches.
 
     The code is destroyed after `MAX_OTP_ATTEMPTS` failures, so a wrong guess costs the attacker
@@ -59,7 +63,8 @@ async def check_otp(redis: Redis, naming: str, identificator: uuid.UUID | str, o
     if attempts > MAX_OTP_ATTEMPTS:
         await redis.delete(code_key)
         raise AppException(
-            429, "OTP_ATTEMPTS_EXCEEDED",
+            429,
+            "OTP_ATTEMPTS_EXCEEDED",
             "Too many incorrect codes. Request a new one.",
         )
 

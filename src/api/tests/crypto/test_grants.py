@@ -1,4 +1,5 @@
 """Grant wrapping, distribution signatures, and the member set hash."""
+
 import os
 import uuid
 
@@ -25,21 +26,33 @@ OTHER_DEV = uuid.UUID("aaaaaaaa-0000-0000-0000-aaaaaaaaaaaa")
 EPOCH = 3
 
 
-def _wrap(recipient, chain_key, *, chat_id=CHAT, epoch=EPOCH, recipient_device_id=RECIP_DEV):
+def _wrap(
+    recipient, chain_key, *, chat_id=CHAT, epoch=EPOCH, recipient_device_id=RECIP_DEV
+):
     return wrap_chain_key(
-        chain_key=chain_key, chain_start_index=0,
+        chain_key=chain_key,
+        chain_start_index=0,
         recipient_public=recipient.identity_public,
-        chat_id=chat_id, epoch=epoch, sender_key_id=SKID,
-        sender_device_id=SENDER_DEV, recipient_device_id=recipient_device_id,
+        chat_id=chat_id,
+        epoch=epoch,
+        sender_key_id=SKID,
+        sender_device_id=SENDER_DEV,
+        recipient_device_id=recipient_device_id,
     )
 
 
-def _unwrap(recipient, eph, wrapped, *, chat_id=CHAT, epoch=EPOCH, recipient_device_id=RECIP_DEV):
+def _unwrap(
+    recipient, eph, wrapped, *, chat_id=CHAT, epoch=EPOCH, recipient_device_id=RECIP_DEV
+):
     return unwrap_chain_key(
-        wrapped=wrapped, ephemeral_public=eph,
+        wrapped=wrapped,
+        ephemeral_public=eph,
         recipient_private=recipient.identity_private,
-        chat_id=chat_id, epoch=epoch, sender_key_id=SKID,
-        sender_device_id=SENDER_DEV, recipient_device_id=recipient_device_id,
+        chat_id=chat_id,
+        epoch=epoch,
+        sender_key_id=SKID,
+        sender_device_id=SENDER_DEV,
+        recipient_device_id=recipient_device_id,
     )
 
 
@@ -60,10 +73,14 @@ def test_wrap_preserves_start_index():
     chain_key = generate_chain_key()
 
     eph, wrapped = wrap_chain_key(
-        chain_key=chain_key, chain_start_index=17,
+        chain_key=chain_key,
+        chain_start_index=17,
         recipient_public=recipient.identity_public,
-        chat_id=CHAT, epoch=EPOCH, sender_key_id=SKID,
-        sender_device_id=SENDER_DEV, recipient_device_id=RECIP_DEV,
+        chat_id=CHAT,
+        epoch=EPOCH,
+        sender_key_id=SKID,
+        sender_device_id=SENDER_DEV,
+        recipient_device_id=RECIP_DEV,
     )
     recovered, start_index = _unwrap(recipient, eph, wrapped)
 
@@ -135,8 +152,11 @@ def test_tampered_wrapped_key_is_rejected():
 
 def test_grant_aad_layout():
     aad = build_grant_aad(
-        chat_id=CHAT, epoch=EPOCH, sender_key_id=SKID,
-        sender_device_id=SENDER_DEV, recipient_device_id=RECIP_DEV,
+        chat_id=CHAT,
+        epoch=EPOCH,
+        sender_key_id=SKID,
+        sender_device_id=SENDER_DEV,
+        recipient_device_id=RECIP_DEV,
         ephemeral_public=b"\x01" * 32,
     )
 
@@ -150,14 +170,21 @@ def test_distribution_signature_round_trip():
 
     signature = sign_distribution(
         identity_signing_private=identity.signing_private,
-        chat_id=CHAT, epoch=EPOCH, sender_key_id=SKID,
-        chain_signing_public=chain_identity.signing_public, chain_start_index=0,
+        chat_id=CHAT,
+        epoch=EPOCH,
+        sender_key_id=SKID,
+        chain_signing_public=chain_identity.signing_public,
+        chain_start_index=0,
     )
 
     assert verify_distribution(
-        identity_signing_public=identity.signing_public, signature=signature,
-        chat_id=CHAT, epoch=EPOCH, sender_key_id=SKID,
-        chain_signing_public=chain_identity.signing_public, chain_start_index=0,
+        identity_signing_public=identity.signing_public,
+        signature=signature,
+        chat_id=CHAT,
+        epoch=EPOCH,
+        sender_key_id=SKID,
+        chain_signing_public=chain_identity.signing_public,
+        chain_start_index=0,
     )
 
 
@@ -168,19 +195,26 @@ def test_distribution_signature_is_bound_to_chat_and_epoch():
 
     signature = sign_distribution(
         identity_signing_private=identity.signing_private,
-        chat_id=CHAT, epoch=EPOCH, sender_key_id=SKID,
-        chain_signing_public=chain_identity.signing_public, chain_start_index=0,
+        chat_id=CHAT,
+        epoch=EPOCH,
+        sender_key_id=SKID,
+        chain_signing_public=chain_identity.signing_public,
+        chain_start_index=0,
     )
 
     for kwargs in (
-            {"chat_id": OTHER_CHAT},
-            {"epoch": EPOCH + 1},
-            {"sender_key_id": uuid.uuid4()},
+        {"chat_id": OTHER_CHAT},
+        {"epoch": EPOCH + 1},
+        {"sender_key_id": uuid.uuid4()},
     ):
         base = dict(
-            identity_signing_public=identity.signing_public, signature=signature,
-            chat_id=CHAT, epoch=EPOCH, sender_key_id=SKID,
-            chain_signing_public=chain_identity.signing_public, chain_start_index=0,
+            identity_signing_public=identity.signing_public,
+            signature=signature,
+            chat_id=CHAT,
+            epoch=EPOCH,
+            sender_key_id=SKID,
+            chain_signing_public=chain_identity.signing_public,
+            chain_start_index=0,
         )
         base.update(kwargs)
         assert not verify_distribution(**base)
@@ -194,22 +228,33 @@ def test_distribution_signature_detects_substituted_chain_key():
 
     signature = sign_distribution(
         identity_signing_private=identity.signing_private,
-        chat_id=CHAT, epoch=EPOCH, sender_key_id=SKID,
-        chain_signing_public=real.signing_public, chain_start_index=0,
+        chat_id=CHAT,
+        epoch=EPOCH,
+        sender_key_id=SKID,
+        chain_signing_public=real.signing_public,
+        chain_start_index=0,
     )
 
     assert not verify_distribution(
-        identity_signing_public=identity.signing_public, signature=signature,
-        chat_id=CHAT, epoch=EPOCH, sender_key_id=SKID,
-        chain_signing_public=forged.signing_public, chain_start_index=0,
+        identity_signing_public=identity.signing_public,
+        signature=signature,
+        chat_id=CHAT,
+        epoch=EPOCH,
+        sender_key_id=SKID,
+        chain_signing_public=forged.signing_public,
+        chain_start_index=0,
     )
 
 
 def test_member_set_hash_is_order_independent():
     devices = [uuid.uuid4() for _ in range(5)]
 
-    assert compute_member_set_hash(devices) == compute_member_set_hash(list(reversed(devices)))
-    assert compute_member_set_hash(devices) == compute_member_set_hash([str(d) for d in devices])
+    assert compute_member_set_hash(devices) == compute_member_set_hash(
+        list(reversed(devices))
+    )
+    assert compute_member_set_hash(devices) == compute_member_set_hash(
+        [str(d) for d in devices]
+    )
 
 
 def test_member_set_hash_detects_a_ghost_device():
@@ -274,7 +319,9 @@ def test_member_set_hash_detects_an_injected_prekey():
 def test_member_set_hash_over_records_is_order_independent():
     roster = [_roster_entry() for _ in range(4)]
 
-    assert compute_member_set_hash(roster) == compute_member_set_hash(list(reversed(roster)))
+    assert compute_member_set_hash(roster) == compute_member_set_hash(
+        list(reversed(roster))
+    )
 
 
 def test_member_set_hash_fields_cannot_be_shifted_between_records():
