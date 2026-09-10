@@ -13,6 +13,10 @@ export type WsEventType =
     | 'user_online'
     | 'user_offline'
     | 'chat_created'
+    | 'chat_updated'
+    | 'chat_deleted'
+    | 'participants_added'
+    | 'participants_removed'
     | 'key_epoch_started'
     | 'error';
 

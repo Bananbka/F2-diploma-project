@@ -1,5 +1,6 @@
 import { HttpErrorResponse } from '@angular/common/http';
 import { computed, effect, inject, Injectable, signal, untracked } from '@angular/core';
+import { Router } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
 
 import { Chat } from '../models/chat.model';
@@ -67,6 +68,7 @@ export class ChatStoreService {
     private readonly directory = inject(DirectoryService);
     private readonly session = inject(SessionService);
     private readonly ws = inject(WebSocketService);
+    private readonly router = inject(Router);
 
     readonly chats = signal<Chat[]>([]);
     readonly chatsLoading = signal(false);
@@ -245,10 +247,39 @@ export class ChatStoreService {
                     this.setPresence(event.user_id, false);
                     break;
                 case 'chat_created':
+                case 'chat_updated':
+                case 'participants_added':
+                case 'participants_removed':
                     void this.loadChats();
+                    break;
+                case 'chat_deleted':
+                    this.onChatDeleted(event.chat_id);
                     break;
             }
         });
+    }
+
+    /**
+     * The chat is gone — deleted by its owner, or we were removed from it.
+     *
+     * Both arrive as the same event on purpose: from this client's side the outcome is identical,
+     * and there is nothing useful to distinguish. Previously nothing was sent at all, so a
+     * removed member's client went on displaying a conversation it could no longer read or post
+     * to, and only a manual reload revealed it was gone.
+     */
+    private onChatDeleted(chatId: string | null): void {
+        if (!chatId) {
+            return;
+        }
+
+        this.chats.update((chats) => chats.filter((chat) => chat.id !== chatId));
+
+        if (this.activeChatId() === chatId) {
+            // Navigate away before clearing, so the conversation pane never renders against a
+            // chat that no longer exists.
+            void this.router.navigate(['/chats']);
+            this.activeChatId.set(null);
+        }
     }
 
     async loadChats(): Promise<void> {

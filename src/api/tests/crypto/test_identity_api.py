@@ -183,12 +183,20 @@ async def test_prekey_rotation_requires_a_valid_signature():
     Grants prefer the signed prekey over the identity key as the ECDH recipient, so a prekey the
     server accepts without checking is a key-substitution hole: anyone who can reach this endpoint
     could swap in a key they hold and receive every subsequent sender key.
+
+    Rotation itself is disabled — see the 410 assertion at the end — so this now covers the
+    *publish* path, which is where an unverified prekey actually used to get in: only
+    `rotate_prekey` ever checked the signature, and `publish_identity` stored whatever it was
+    handed.
     """
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
-    from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PublicFormat, PrivateFormat
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-    from app.domains.crypto.reference.identity import prekey_binding_message
+    from app.domains.crypto.reference.identity import (
+        identity_binding_message,
+        prekey_binding_message,
+    )
 
     client, user_id = await _register_user()
     device_id = uuid.uuid4()
@@ -196,59 +204,70 @@ async def test_prekey_rotation_requires_a_valid_signature():
     bundle = generate_identity(user_id, device_id)
     wrapped, kdf_params = wrap_private_bundle(bundle, "pw")
 
-    r = await client.post("/crypto/identity", json={
-        "device_id": str(device_id),
-        "display_name": "test-device",
-        "identity_public_key": b64u_encode(bundle.identity_public),
-        "signing_public_key": b64u_encode(bundle.signing_public),
-        "identity_key_signature": b64u_encode(bundle.identity_key_signature),
-        "encrypted_private_bundle": wrapped,
-        "kdf_params": kdf_params,
-    })
-    assert r.status_code == 200, r.text
-
     prekey_private = X25519PrivateKey.generate()
     prekey_public = prekey_private.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
 
     signing_private = Ed25519PrivateKey.from_private_bytes(bundle.signing_private)
     good_sig = signing_private.sign(prekey_binding_message(user_id, device_id, prekey_public))
 
-    # A signature by a key that is not this device's identity key must be refused, even though it is
-    # a structurally valid Ed25519 signature over the right message.
+    def publish(**overrides):
+        body = {
+            "device_id": str(device_id),
+            "display_name": "test-device",
+            "identity_public_key": b64u_encode(bundle.identity_public),
+            "signing_public_key": b64u_encode(bundle.signing_public),
+            "identity_key_signature": b64u_encode(bundle.identity_key_signature),
+            "encrypted_private_bundle": wrapped,
+            "kdf_params": kdf_params,
+        }
+        body.update(overrides)
+        return client.post("/crypto/identity", json=body)
+
+    # A prekey with no signature at all must be refused rather than quietly stored.
+    r = await publish(signed_prekey_public=b64u_encode(prekey_public))
+    assert r.status_code == 400, r.text
+    assert r.json()["error_code"] == "PREKEY_SIGNATURE_REQUIRED"
+
+    # A signature by a key that is not this device's identity key must be refused, even though it
+    # is a structurally valid Ed25519 signature over the right message.
     attacker_sig = Ed25519PrivateKey.generate().sign(
         prekey_binding_message(user_id, device_id, prekey_public)
     )
-
-    r = await client.put("/crypto/identity/prekey", json={
-        "device_id": str(device_id),
-        "signed_prekey_public": b64u_encode(prekey_public),
-        "signed_prekey_signature": b64u_encode(attacker_sig),
-    })
+    r = await publish(
+        signed_prekey_public=b64u_encode(prekey_public),
+        signed_prekey_signature=b64u_encode(attacker_sig),
+    )
     assert r.status_code == 400, r.text
     assert r.json()["error_code"] == "INVALID_KEY_SIGNATURE"
 
     # Signing the identity-binding message instead must also fail: the two share a shape but not a
     # domain separator, and that is exactly what the separator is for.
-    from app.domains.crypto.reference.identity import identity_binding_message
     crossed_sig = signing_private.sign(identity_binding_message(user_id, device_id, prekey_public))
-
-    r = await client.put("/crypto/identity/prekey", json={
-        "device_id": str(device_id),
-        "signed_prekey_public": b64u_encode(prekey_public),
-        "signed_prekey_signature": b64u_encode(crossed_sig),
-    })
+    r = await publish(
+        signed_prekey_public=b64u_encode(prekey_public),
+        signed_prekey_signature=b64u_encode(crossed_sig),
+    )
     assert r.status_code == 400, r.text
+    assert r.json()["error_code"] == "INVALID_KEY_SIGNATURE"
 
+    # A correctly bound prekey is accepted.
+    r = await publish(
+        signed_prekey_public=b64u_encode(prekey_public),
+        signed_prekey_signature=b64u_encode(good_sig),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["signed_prekey_public"] == b64u_encode(prekey_public)
+    assert r.json()["data"]["identity_public_key"] == b64u_encode(bundle.identity_public)
+
+    # Rotation stays disabled until the sealed bundle can carry `prekey_private`. Until then a
+    # rotated prekey has no private half anywhere, so every grant wrapped to it is unopenable.
+    # A 410 rather than a 404 so a client built against the old contract gets a real answer.
     r = await client.put("/crypto/identity/prekey", json={
         "device_id": str(device_id),
         "signed_prekey_public": b64u_encode(prekey_public),
         "signed_prekey_signature": b64u_encode(good_sig),
     })
-    assert r.status_code == 200, r.text
-    assert r.json()["data"]["signed_prekey_public"] == b64u_encode(prekey_public)
-
-    # Rotation must not disturb the identity key or supersede the key version.
-    assert r.json()["data"]["identity_public_key"] == b64u_encode(bundle.identity_public)
-    assert r.json()["data"]["version"] == 1
+    assert r.status_code == 410, r.text
+    assert r.json()["error_code"] == "PREKEY_ROTATION_DISABLED"
 
     await client.aclose()

@@ -16,6 +16,7 @@ import time
 
 from redis.asyncio import Redis
 
+from app.core.config import settings
 from app.core.exceptions import AppException
 
 
@@ -35,6 +36,9 @@ async def enforce_rate_limit(
     limits on the address alone is imperfect behind a shared NAT, which is why the account-scoped
     limits below exist alongside them rather than instead of them.
     """
+    if not settings.RATE_LIMIT_ENABLED:
+        return
+
     window = int(time.time()) // window_seconds
     key = f"ratelimit:{scope}:{identifier}:{window}"
 
@@ -51,6 +55,9 @@ async def enforce_rate_limit(
 
 async def reset_rate_limit(redis: Redis, *, scope: str, identifier: str, window_seconds: int) -> None:
     """Clear the current window after a success, so honest users are never penalised for a typo."""
+    if not settings.RATE_LIMIT_ENABLED:
+        return
+
     window = int(time.time()) // window_seconds
     await redis.delete(f"ratelimit:{scope}:{identifier}:{window}")
 

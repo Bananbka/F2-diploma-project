@@ -26,6 +26,14 @@ class Settings(BaseSettings):
     # Set to False only for local HTTP development; auth cookies leak over plaintext without it.
     COOKIE_SECURE: bool = True
 
+    # Rate limiting. On by default, because every unauthenticated endpoint depends on it — the
+    # six-digit OTP in particular is only safe while guesses are scarce.
+    #
+    # The integration suite in tests/crypto registers dozens of accounts from one address, which
+    # is exactly the pattern the registration limit exists to stop, so it has to be turned off for
+    # those runs. Never turn it off anywhere a real user can reach.
+    RATE_LIMIT_ENABLED: bool = True
+
     # EMAIL
     SMTP_HOST: str = "smtp.gmail.com"
     SMTP_PORT: int = 587

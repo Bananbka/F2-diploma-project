@@ -13,7 +13,11 @@ from app.domains.crypto.reference.grants import (
     unwrap_chain_key,
     wrap_chain_key,
 )
-from app.domains.crypto.reference.identity import generate_identity, unwrap_private_bundle
+from app.domains.crypto.reference.identity import (
+    generate_identity,
+    unwrap_private_bundle,
+    verify_identity_binding,
+)
 from app.domains.crypto.reference.primitives import b64u_decode, b64u_encode
 from app.domains.crypto.reference.ratchet import ReceiverChain, SenderChain, generate_chain_key
 
@@ -73,9 +77,33 @@ async def test_full_group_key_distribution_and_message_exchange():
         assert r.status_code == 200, r.text
         roster = r.json()["data"]
 
-        recomputed = compute_member_set_hash([m["device_id"] for m in roster["members"]])
+        # Over the whole roster entry, not just the device ids. Hashing ids alone let a server
+        # keep the device set identical and swap a member's public key for one it held.
+        recomputed = compute_member_set_hash(roster["members"])
         assert recomputed == roster["member_set_hash"], \
-            "client-side verification must match; a mismatch means a ghost device"
+            "client-side verification must match; a mismatch means a ghost or substituted device"
+
+        # Every entry must carry the binding signature the client checks before wrapping. Without
+        # it the roster is only an assertion by the server and there is nothing to verify against.
+        for member in roster["members"]:
+            assert member["identity_key_signature"], "roster entries must carry their binding"
+            assert verify_identity_binding(
+                uuid.UUID(member["user_id"]),
+                uuid.UUID(member["device_id"]),
+                b64u_decode(member["identity_public_key"]),
+                b64u_decode(member["signing_public_key"]),
+                b64u_decode(member["identity_key_signature"]),
+            ), "the roster's identity key must be vouched for by its own signing key"
+
+        # The commitment must come from the epoch row, not be recomputed from the response. When
+        # it was recomputed the comparison above compared the server's hash of a list against the
+        # client's hash of the same list, which passes for any list the server cares to send.
+        r_epoch = await alice.get(f"/crypto/chats/{chat_id}/keys")
+        assert r_epoch.status_code == 200, r_epoch.text
+        stored = next(
+            e for e in r_epoch.json()["data"]["epochs"] if e["epoch"] == epoch_number
+        )
+        assert stored["member_set_hash"] == roster["member_set_hash"]
 
         # --- alice mints a chain and wraps it for every member device ---
         chain_key = generate_chain_key()
