@@ -23,6 +23,8 @@ export interface OwnIdentity extends PublicKey {
     created_at: string;
     /** Owner-only: when this device's prekey was minted, so the client knows when to rotate it. */
     signed_prekey_created_at: string | null;
+    /** Owner-only: the device's label, so the settings device list can name what it revokes. */
+    display_name: string | null;
 }
 
 export interface RosterEntry {

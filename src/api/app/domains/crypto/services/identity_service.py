@@ -311,11 +311,33 @@ async def revoke_device(
 async def get_own_identities(
     db: AsyncSession, user_id: uuid.UUID
 ) -> list[UserIdentityKey]:
-    stmt = select(UserIdentityKey).where(
-        UserIdentityKey.user_id == user_id,
-        UserIdentityKey.is_active.is_(True),
+    """Active keys for this account, each carrying its device's label.
+
+    `display_name` belongs to `UserDevice`, not to the key, so it is joined in and attached to the
+    returned object — the same shape `chat_services.get_user_chats` uses for `partner_alias`. The
+    device list in settings needs it to name what it is offering to revoke, and an unlabelled list
+    of uuids is not something anyone can act on safely.
+
+    Revoked devices are excluded: this is the caller's *current* key material, and a revoked
+    device has nothing left to show or to revoke again.
+    """
+    stmt = (
+        select(UserIdentityKey, UserDevice.display_name)
+        .join(UserDevice, UserDevice.id == UserIdentityKey.device_id)
+        .where(
+            UserIdentityKey.user_id == user_id,
+            UserIdentityKey.is_active.is_(True),
+            UserDevice.is_active.is_(True),
+        )
+        .order_by(UserIdentityKey.created_at)
     )
-    return list((await db.execute(stmt)).scalars().all())
+
+    keys = []
+    for key, display_name in (await db.execute(stmt)).all():
+        key.display_name = display_name
+        keys.append(key)
+
+    return keys
 
 
 async def compute_safety_number(

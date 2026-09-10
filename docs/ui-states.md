@@ -36,18 +36,52 @@ actually checked and passed — never as a default.
 
 ## Security-critical states
 
-These two carry the most weight and should be the least like ordinary chrome.
+These carry the most weight and should be the least like ordinary chrome.
 
 **Safety number** — 12 groups of 5 digits, plus a QR code. Two users compare it out of band. This
 is the **only** defence against the server substituting a public key, so it must be reachable in
 one or two taps, not buried. It needs a distinct **key-changed** variant: when a peer's key
 changes, the number changes, and the user must be told loudly rather than silently re-trusting.
 
-**Member verification failure** — the client recomputes `member_set_hash` from the roster before
-wrapping keys and refuses if it disagrees with the epoch's commitment. That means the server may
-have inserted a device that would receive future messages. This is the highest-severity state in
-the app: it should be unmistakable, block key distribution, and read as "the server may be lying to
-you." The backend stores the hash but **cannot** enforce this check — only the client can.
+**Roster verification failure** — the highest-severity state in the app. It should be
+unmistakable, block key distribution and sending, and read as "the server may be lying to you."
+The backend **cannot** enforce any of this; only the client can.
+
+It has **two distinct causes**, and they are not interchangeable:
+
+- *Binding signature invalid* — a roster entry's X25519 key is not vouched for by that device's own
+  Ed25519 signing key, or a signed prekey arrives without a valid signature. This is the stronger
+  signal: the signing key is what the peer pins out of band as a safety number, so a key that fails
+  its binding is one nobody with the private half ever endorsed.
+- *Member set hash mismatch* — the roster disagrees with the commitment stored on the epoch. Cheaper
+  and more circumstantial, since the server writes both, but it catches a device inserted or dropped
+  after the epoch opened.
+
+Both must block. They are thrown as `RosterVerificationError` and classified by **type**, never by
+message text — an earlier prefix match silently stopped recognising the binding failure when it was
+added, so sending continued and no banner appeared for the failure that matters most.
+
+The check runs in two places, and both must stay in step: `KeyStoreService.verifyRoster` before
+wrapping, and `chat-info`, which recomputes independently on the screen that shows the roster.
+
+**Removed from a chat, or the chat was deleted** — both arrive as `chat_deleted` on the socket,
+because from this client's side the outcome is identical and there is nothing useful to
+distinguish. The chat must disappear from the list, and the conversation pane must navigate away
+rather than keep rendering against a chat that no longer exists. Nothing was sent at all before,
+so a removed member's client went on showing a conversation they could no longer read or post to
+until they happened to reload.
+
+**Owner cannot leave** — an owner has no Leave action available, because a chat with no owner has
+nobody who can ever delete it or hand it on. Say so *before* the press, alongside the two ways
+out: transfer ownership, or delete the chat. A refusal after the fact tells the user nothing
+about what to do instead.
+
+**Destructive confirmations** — transferring ownership, deleting a chat, and revoking a device are
+each irreversible and each need a deliberate second step. Deleting a chat in particular must say
+"for everyone": in most messengers deleting a conversation removes only your own copy, so the
+scope is the thing a user is most likely to misjudge. Revoking a device must not promise more than
+it delivers — future messages become unreadable to it, but whatever it already received stays
+readable, and no server can take that back.
 
 **Channel badge** — channels are signed but **not** encrypted, deliberately (see
 `docs/crypto-spec-v1.md` §6). If the UI shows the same lock as a private chat, it is claiming a

@@ -28,11 +28,12 @@ class IdentityPublishRequest(BaseModel):
     cannot validate the private bundle — that is opaque by design — but rejecting malformed
     public keys at the door prevents a whole class of permanently-broken accounts.
     """
+
     device_id: uuid.UUID
     display_name: str = Field("default", max_length=100)
 
-    identity_public_key: str   # X25519
-    signing_public_key: str    # Ed25519
+    identity_public_key: str  # X25519
+    signing_public_key: str  # Ed25519
     identity_key_signature: str
 
     signed_prekey_public: str | None = None
@@ -59,7 +60,11 @@ class IdentityPublishRequest(BaseModel):
     @field_validator("signed_prekey_public")
     @classmethod
     def _v_prekey(cls, v: str | None) -> str | None:
-        return v if v is None else _b64u_of_length(v, RAW_KEY_BYTES, "signed_prekey_public")
+        return (
+            v
+            if v is None
+            else _b64u_of_length(v, RAW_KEY_BYTES, "signed_prekey_public")
+        )
 
     @field_validator("kdf_params")
     @classmethod
@@ -100,6 +105,7 @@ class RewrappedIdentity(BaseModel):
     This is what makes "change password" non-destructive: only the wrapping changes, so every
     message and key grant the user could read before, they can still read.
     """
+
     device_id: uuid.UUID
     encrypted_private_bundle: str
     kdf_params: dict
@@ -122,6 +128,7 @@ class RewrappedIdentity(BaseModel):
 
 class PublicKeyResponse(BaseModel):
     """A peer's public key material. Never includes the wrapped private bundle."""
+
     user_id: uuid.UUID
     device_id: uuid.UUID
     # Exposed under a clearer name than the bare `id` the ORM object carries.
@@ -139,6 +146,7 @@ class PublicKeyResponse(BaseModel):
 
 class OwnIdentityResponse(PublicKeyResponse):
     """Own key material, including the wrapped private bundle needed to unlock after login."""
+
     encrypted_private_bundle: str
     kdf_params: dict
     created_at: datetime
@@ -146,6 +154,10 @@ class OwnIdentityResponse(PublicKeyResponse):
     # rotation. Absent from PublicKeyResponse: when a peer's prekey was minted is nobody else's
     # business, and it would leak device activity.
     signed_prekey_created_at: datetime | None = None
+    # The device's own label, so the account's device list can name what it is offering to revoke.
+    # Owner-only for the same reason as above: which devices someone owns, and what they call them,
+    # is not a peer's business.
+    display_name: str | None = None
 
 
 class UserKeysRequest(BaseModel):
@@ -154,6 +166,7 @@ class UserKeysRequest(BaseModel):
 
 class SafetyNumberResponse(BaseModel):
     """Out-of-band verification fingerprint. Both peers must see the same value."""
+
     user_id: uuid.UUID
     peer_user_id: uuid.UUID
     safety_number: str

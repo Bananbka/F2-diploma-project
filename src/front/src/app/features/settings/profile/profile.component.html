@@ -129,4 +129,81 @@
             </span>
         </button>
     </section>
+
+    <section class="group">
+        <p class="section">Your devices</p>
+
+        @if (devicesLoading()) {
+            <p class="muted small">Loading…</p>
+        } @else if (devices().length === 0) {
+            <p class="muted small">No devices have published keys for this account yet.</p>
+        } @else {
+            <ul class="devices">
+                @for (device of devices(); track device.device_id) {
+                    <li class="device">
+                        <span class="device-text">
+                            <span class="device-name">
+                                {{ device.display_name || 'Unnamed device' }}
+                                @if (device.isThis) {
+                                    <span class="device-tag">This device</span>
+                                }
+                            </span>
+                            <span class="device-sub">
+                                Key v{{ device.version }} · added {{ device.created_at | date: 'd MMM y' }}
+                            </span>
+                        </span>
+
+                        <!-- Revoking your own device would lock this session out of its keys with no
+                             way back, so it is not offered. The last remaining device is likewise
+                             excluded: the server refuses it, because an account with no device can
+                             read nothing and cannot publish a replacement. -->
+                        @if (!device.isThis && devices().length > 1) {
+                            @if (confirmingDevice() === device.device_id) {
+                                <button
+                                    type="button"
+                                    class="device-action is-confirm"
+                                    [disabled]="revoking()"
+                                    (click)="revokeDevice(device.device_id)"
+                                >
+                                    Revoke?
+                                </button>
+                                <button
+                                    type="button"
+                                    class="device-action"
+                                    [disabled]="revoking()"
+                                    (click)="cancelRevoke()"
+                                >
+                                    Cancel
+                                </button>
+                            } @else {
+                                <button
+                                    type="button"
+                                    class="device-action"
+                                    [disabled]="revoking()"
+                                    [attr.aria-label]="'Revoke ' + (device.display_name || 'this device')"
+                                    (click)="revokeDevice(device.device_id)"
+                                >
+                                    Revoke
+                                </button>
+                            }
+                        }
+                    </li>
+                }
+            </ul>
+        }
+
+        @if (deviceError()) {
+            <p
+                class="error-line"
+                role="alert"
+            >
+                {{ deviceError() }}
+            </p>
+        }
+
+        <p class="muted small">
+            Revoke a device you no longer have. Your encrypted chats re-key immediately, so nothing sent afterwards can
+            be read with the keys it holds — but it keeps whatever it already received, which no server can take back.
+        </p>
+    </section>
 </div>

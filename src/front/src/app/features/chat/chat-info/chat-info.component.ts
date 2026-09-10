@@ -5,6 +5,7 @@ import {
     BookmarkPlus,
     Check,
     ChevronRight,
+    Crown,
     LogOut,
     LucideAngularModule,
     Search,
@@ -15,6 +16,7 @@ import {
     Trash2,
     UserMinus,
     UserPlus,
+    X,
 } from 'lucide-angular';
 import { firstValueFrom } from 'rxjs';
 
@@ -199,6 +201,25 @@ export class ChatInfoComponent {
         return me?.role === 'owner' || me?.role === 'admin';
     });
 
+    /** Transferring ownership and deleting the chat are the owner's alone. */
+    readonly isOwner = computed(() => this.members().find((m) => m.isMe)?.role === 'owner');
+
+    /**
+     * An owner cannot leave — the server refuses, because a chat with no owner has nobody who can
+     * ever delete it or hand it on. Saying so up front is better than letting them press Leave and
+     * receive a refusal with no indication of what to do instead.
+     */
+    readonly ownerMustTransferFirst = computed(() => this.isOwner() && !this.isPrivate());
+
+    /**
+     * Which destructive action is armed, if any: `delete`, or `owner:<userId>`.
+     *
+     * A two-step press rather than `window.confirm`. The native dialog is unstyled, sits outside
+     * the app's own language, and is suppressible by the browser — a poor fit for the two actions
+     * here that cannot be undone.
+     */
+    readonly confirming = signal<string | null>(null);
+
     readonly arrowLeftIcon = ArrowLeft;
     readonly chevronRightIcon = ChevronRight;
     readonly shieldIcon = Shield;
@@ -212,6 +233,8 @@ export class ChatInfoComponent {
     readonly searchIcon = Search;
     readonly bookmarkIcon = BookmarkPlus;
     readonly checkIcon = Check;
+    readonly crownIcon = Crown;
+    readonly xIcon = X;
 
     constructor() {
         effect(() => void this.load(this.chatId()));
@@ -271,6 +294,67 @@ export class ChatInfoComponent {
      */
     canChangeRole(member: MemberRow): boolean {
         return this.canManage() && !member.isMe && member.role !== 'owner' && !this.isPrivate();
+    }
+
+    /** Only the owner, and only to someone who is not already the owner. */
+    canTransferTo(member: MemberRow): boolean {
+        return this.isOwner() && !member.isMe && member.role !== 'owner' && !this.isPrivate();
+    }
+
+    /**
+     * Hand the chat to someone else, demoting yourself to admin.
+     *
+     * Two-step rather than immediate: it is irreversible from this side — once done, only the new
+     * owner can hand it back — and it is the precondition for an owner ever leaving the chat.
+     */
+    async transferOwnership(userId: string): Promise<void> {
+        if (this.confirming() !== `owner:${userId}`) {
+            this.confirming.set(`owner:${userId}`);
+            return;
+        }
+
+        this.confirming.set(null);
+        this.busy.set(true);
+        try {
+            await firstValueFrom(this.chatApi.transferOwnership(this.chatId(), userId));
+            await this.load(this.chatId());
+            await this.store.loadChats();
+        } catch {
+            this.error.set('Could not transfer ownership.');
+        } finally {
+            this.busy.set(false);
+        }
+    }
+
+    /**
+     * Delete the chat and every message in it, for everyone.
+     *
+     * Two-step for the obvious reason, and worded as "for everyone" rather than "delete chat":
+     * the destructive scope is the thing a user is most likely to misjudge, since in most
+     * messengers deleting a conversation only removes your own copy.
+     */
+    async deleteChat(): Promise<void> {
+        if (this.confirming() !== 'delete') {
+            this.confirming.set('delete');
+            return;
+        }
+
+        this.confirming.set(null);
+        this.busy.set(true);
+        try {
+            await firstValueFrom(this.chatApi.deleteChat(this.chatId()));
+            this.store.activeChatId.set(null);
+            await this.store.loadChats();
+            await this.router.navigate(['/chats']);
+        } catch {
+            this.error.set('Could not delete this chat.');
+        } finally {
+            this.busy.set(false);
+        }
+    }
+
+    cancelConfirm(): void {
+        this.confirming.set(null);
     }
 
     async setRole(userId: string, role: ParticipantRole): Promise<void> {

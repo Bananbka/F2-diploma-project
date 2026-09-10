@@ -142,6 +142,25 @@ export class ChatApiService {
             .pipe(map((r) => r.data));
     }
 
+    /**
+     * Hand ownership to another member; the caller is demoted to admin.
+     *
+     * Separate from `changeRole`, which refuses to grant OWNER — a chat must never be observable
+     * with two owners or none, so the swap is one server-side transaction rather than two calls.
+     */
+    transferOwnership(chatId: string, userId: string): Observable<ChatParticipant> {
+        return this.http
+            .post<SuccessResponse<ChatParticipant>>(`${this.chatsUrl}${chatId}/transfer-ownership`, {
+                user_id: userId,
+            })
+            .pipe(map((r) => r.data));
+    }
+
+    /** Delete a group or channel and every message in it. Owner only, and irreversible. */
+    deleteChat(chatId: string): Observable<unknown> {
+        return this.http.delete<SuccessResponse<unknown>>(`${this.chatsUrl}${chatId}`).pipe(map((r) => r.data));
+    }
+
     /** Edit a message. The envelope must carry a FRESH chain index; reuse is rejected. */
     editMessage(messageId: string, envelope: MessageEnvelope): Observable<MessageResponse> {
         return this.http

@@ -226,9 +226,45 @@
                             </span>
                         }
 
+                        @if (canTransferTo(member)) {
+                            <!-- Armed on first press. Irreversible from this side: afterwards only
+                                 the new owner can hand it back. -->
+                            @if (confirming() === 'owner:' + member.userId) {
+                                <button
+                                    type="button"
+                                    class="member-action is-confirm"
+                                    [disabled]="busy()"
+                                    (click)="transferOwnership(member.userId)"
+                                >
+                                    Make owner?
+                                </button>
+                                <button
+                                    type="button"
+                                    class="member-action"
+                                    [disabled]="busy()"
+                                    aria-label="Cancel"
+                                    title="Cancel"
+                                    (click)="cancelConfirm()"
+                                >
+                                    <lucide-icon [img]="xIcon" />
+                                </button>
+                            } @else {
+                                <button
+                                    type="button"
+                                    class="member-action"
+                                    [disabled]="busy()"
+                                    [attr.aria-label]="'Make ' + member.name + ' the owner'"
+                                    title="Make owner"
+                                    (click)="transferOwnership(member.userId)"
+                                >
+                                    <lucide-icon [img]="crownIcon" />
+                                </button>
+                            }
+                        }
+
                         @if (canChangeRole(member)) {
-                            <!-- Only admin and member. Ownership cannot be transferred here, so
-                                 offering it would mean showing a control the server always rejects. -->
+                            <!-- Only admin and member here. Granting OWNER is a separate action
+                                 above, because it demotes the current owner in the same step. -->
                             <select
                                 class="member-role"
                                 [disabled]="busy()"
@@ -271,16 +307,64 @@
                 <button
                     type="button"
                     class="danger-row"
-                    [disabled]="busy()"
+                    [disabled]="busy() || ownerMustTransferFirst()"
                     (click)="leave()"
                 >
                     <lucide-icon [img]="logOutIcon" />
                     {{ isChannel() ? 'Unsubscribe from channel' : 'Leave chat' }}
                 </button>
+
+                @if (isOwner() && !isPrivate()) {
+                    @if (confirming() === 'delete') {
+                        <button
+                            type="button"
+                            class="danger-row is-confirm"
+                            [disabled]="busy()"
+                            (click)="deleteChat()"
+                        >
+                            <lucide-icon [img]="trashIcon" />
+                            Delete permanently, for everyone
+                        </button>
+                        <button
+                            type="button"
+                            class="danger-row is-cancel"
+                            [disabled]="busy()"
+                            (click)="cancelConfirm()"
+                        >
+                            Cancel
+                        </button>
+                    } @else {
+                        <button
+                            type="button"
+                            class="danger-row"
+                            [disabled]="busy()"
+                            (click)="deleteChat()"
+                        >
+                            <lucide-icon [img]="trashIcon" />
+                            {{ isChannel() ? 'Delete channel' : 'Delete chat' }}
+                        </button>
+                    }
+                }
             </div>
-            @if (!isChannel()) {
+
+            @if (ownerMustTransferFirst()) {
+                <!-- Said before they press it, not after the server refuses: a chat with no owner
+                     would have nobody able to delete it or hand it on, and the way out is not
+                     something the user can guess from a rejection. -->
+                <p class="muted small">
+                    You own this {{ isChannel() ? 'channel' : 'chat' }}, so you cannot leave it. Make someone else the
+                    owner first, or delete it.
+                </p>
+            } @else if (!isChannel()) {
                 <p class="muted small">
                     Leaving rotates the group key, so nothing sent after you go will be readable with the key you hold.
+                </p>
+            }
+
+            @if (isOwner() && !isPrivate()) {
+                <p class="muted small">
+                    Deleting removes the {{ isChannel() ? 'channel' : 'chat' }} and every message in it for
+                    <strong>everyone</strong>, not just for you. This cannot be undone.
                 </p>
             }
         </section>

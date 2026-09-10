@@ -376,6 +376,19 @@
         background: var(--danger-surface);
         color: var(--danger);
     }
+
+    // The armed half of a two-step action. Given a width and a label rather than an icon, because
+    // an armed control has to read as a question the user is answering, not as another icon to
+    // click past.
+    &.is-confirm {
+        width: auto;
+        padding: 0 0.625rem;
+        background: var(--danger-surface);
+        color: var(--danger);
+        font-size: 0.75rem;
+        font-weight: 600;
+        white-space: nowrap;
+    }
 }
 
 .warn-line {
@@ -427,5 +440,16 @@
     lucide-icon {
         width: 1rem;
         height: 1rem;
+    }
+
+    // Armed. Filled rather than merely tinted, so the destructive step never looks like the
+    // resting state of the control that armed it.
+    &.is-confirm {
+        background: var(--danger-surface);
+        font-weight: 600;
+    }
+
+    &.is-cancel {
+        color: var(--text-muted);
     }
 }
