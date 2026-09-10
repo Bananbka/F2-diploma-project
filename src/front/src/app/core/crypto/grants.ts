@@ -21,10 +21,15 @@ import {
  *
  * 1. The distribution signature — a grant alone says nothing about who produced it, so the sender
  *    signs the chain's signing key with its long-term identity.
- * 2. The member set hash — an epoch commits to an exact device set. Before wrapping, a client
- *    recomputes the hash from the roster and refuses on mismatch. Without that check a malicious
- *    server silently adds a ghost device and every sender dutifully wraps for it, with the
- *    cryptography behaving perfectly. **The backend cannot enforce this. It lives here.**
+ * 2. The member set hash — an epoch commits to an exact device set *and to the key material each
+ *    of those devices published*. Before wrapping, a client recomputes the hash from the roster
+ *    and refuses on mismatch. Without that check a malicious server silently adds a ghost device,
+ *    or keeps the device set identical and swaps one member's public key for its own, and every
+ *    sender dutifully wraps for it with the cryptography behaving perfectly.
+ *
+ * The hash is only a consistency check, because the server also writes it. What actually roots a
+ * roster entry in a real identity is the per-entry binding signature — see
+ * `identity.verifyIdentityBinding` and the roster verification in `KeyStoreService`.
  */
 
 export const WRAP_ALGORITHM = 'x25519_hkdf_sha256_aes256gcm_v1';
@@ -33,9 +38,43 @@ export const SENDER_KEY_ALGORITHM = 'hkdf_sha256_aes256gcm_v1';
 const NONCE_BYTES = 12;
 const WRAP_KEY_BYTES = 32;
 
-/** Commit to an epoch's exact device set. Sorted so every participant derives the same value. */
-export function computeMemberSetHash(deviceIds: readonly string[]): string {
-    const joined = [...deviceIds].map(String).sort().join('|');
+/** One member device's published key material, as it enters the member-set commitment. */
+export interface MemberKeys {
+    device_id: string;
+    identity_public_key?: string | null;
+    signing_public_key?: string | null;
+    signed_prekey_public?: string | null;
+}
+
+/**
+ * Canonical fixed-field record for one member.
+ *
+ * `:` and `|` are safe separators: every field is unpadded base64url or a hyphenated uuid, and
+ * neither character occurs in either alphabet, so no field value can forge a record boundary.
+ */
+function memberRecord(member: MemberKeys | string): string {
+    const entry: MemberKeys = typeof member === 'string' ? { device_id: member } : member;
+
+    return [
+        String(entry.device_id),
+        entry.identity_public_key ?? '',
+        entry.signing_public_key ?? '',
+        entry.signed_prekey_public ?? '',
+    ].join(':');
+}
+
+/**
+ * Commit to an epoch's exact device set **and the key material each device published**.
+ *
+ * Hashing device ids alone was not enough. A malicious server could return the same set of
+ * devices with one member's `identity_public_key` (or an injected `signed_prekey_public`)
+ * replaced by a key it holds: the hash was unchanged, every sender wrapped the chain key for the
+ * substituted key, and confidentiality was lost with the cryptography behaving perfectly.
+ *
+ * Sorted so every participant derives the same value regardless of roster ordering.
+ */
+export function computeMemberSetHash(members: readonly (MemberKeys | string)[]): string {
+    const joined = members.map(memberRecord).sort().join('|');
     const digest = sha256(concatBytes(DS_MEMBER_SET, utf8(joined)));
 
     return Array.from(digest)

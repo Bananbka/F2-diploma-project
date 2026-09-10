@@ -21,18 +21,33 @@ class EpochResponse(BaseModel):
 
 
 class RosterEntry(BaseModel):
-    """Public key material for one member device, everything needed to wrap a key for it."""
+    """Public key material for one member device, everything needed to wrap a key for it.
+
+    The binding signatures are part of the entry, not an optional extra. A roster without them is
+    just a list of keys the server asserts — the client has no way to tell a real key from one the
+    server substituted, and it will happily wrap the chain key for whatever it is handed. With them
+    the client can check that each X25519 key (and each prekey) is vouched for by the Ed25519
+    signing key, which is the key a peer pins out of band via the safety number.
+    """
     user_id: uuid.UUID
     device_id: uuid.UUID
     identity_key_id: uuid.UUID
     identity_public_key: str
     signing_public_key: str
+    # Ed25519 over DS_IDENTITY_BIND || user_id || device_id || identity_public_key.
+    identity_key_signature: str
     signed_prekey_public: str | None = None
+    # Ed25519 over DS_PREKEY_BIND || user_id || device_id || signed_prekey_public.
+    signed_prekey_signature: str | None = None
 
 
 class RosterResponse(BaseModel):
     chat_id: uuid.UUID
     current_epoch: int
+    # The epoch's *stored* commitment, written when the epoch was allocated — never recomputed
+    # from the roster being returned. Recomputing it here made the client's check tautological:
+    # it compared the server's hash of a list against its own hash of the same list, which passes
+    # for any list the server cares to send, ghost devices and substituted keys included.
     member_set_hash: str
     members: list[RosterEntry]
 

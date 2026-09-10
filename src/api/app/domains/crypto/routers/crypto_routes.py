@@ -8,7 +8,6 @@ from app.core.exceptions import AppException
 from app.core.responses import SuccessResponse
 from app.domains.chats.models import ChatType, ParticipantRole
 from app.domains.chats.services import chat_services
-from app.domains.crypto.reference.grants import compute_member_set_hash
 from app.domains.crypto.schemas.crypto_schemas import (
     IdentityPublishRequest,
     OwnIdentityResponse,
@@ -142,20 +141,33 @@ async def get_chat_roster(
         user: User = Depends(get_current_user),
         db: AsyncSession = Depends(get_db),
 ):
-    """Member devices and their public keys, plus the current epoch's member set hash.
+    """Member devices and their public keys, plus the current epoch's stored member set hash.
 
-    The client MUST compare `member_set_hash` against a hash it computes from `members` before
-    wrapping any key. A server that inserts a ghost device is otherwise undetectable.
+    Two client-side checks depend on what this returns, and both used to be defeatable:
+
+    1. `member_set_hash` is read from the epoch row, **not** recomputed from the roster below.
+       Recomputing it made the comparison tautological — the client hashed the same list the
+       server had just hashed, so it matched for any list at all, ghost devices included.
+    2. Each entry carries its binding signatures, so the client can verify that the X25519 key it
+       is about to wrap for is vouched for by the Ed25519 key a peer pins out of band. Without
+       them the roster is only an assertion by the server.
     """
     await messages_service.get_chat_or_403(db, chat_id, user.id)
 
     settings = await epoch_service.get_settings_or_404(db, chat_id)
     roster = await epoch_service.get_roster(db, chat_id)
 
+    epoch = await epoch_service.get_epoch(db, chat_id, settings.current_epoch)
+    if epoch is None:
+        raise AppException(
+            409, "EPOCH_MISSING",
+            "This chat has no open epoch; it must be re-keyed before keys can be distributed.",
+        )
+
     return SuccessResponse(data=RosterResponse(
         chat_id=chat_id,
         current_epoch=settings.current_epoch,
-        member_set_hash=compute_member_set_hash([r["device_id"] for r in roster]),
+        member_set_hash=epoch.member_set_hash,
         members=[RosterEntry(**r) for r in roster],
     ))
 

@@ -10,14 +10,20 @@ Two things here carry most of the security weight:
 signs (chat, epoch, sender_key_id, chain signing key, start index) with its long-term Ed25519
 identity, so a recipient can tell a real distribution from one the server fabricated.
 
-**The member set hash.** An epoch commits to the exact set of devices it was created for. Before
-wrapping, a client recomputes the hash from the roster the server returned and refuses on mismatch.
-Without that check a malicious server silently adds a ghost device and every sender dutifully wraps
-the chain key for it — the cryptography behaving perfectly while confidentiality is lost, because
-membership is server-authoritative while confidentiality is client-enforced. The backend cannot
-enforce this; it only stores the value so clients can compare.
+**The member set hash.** An epoch commits to the exact set of member devices it was created for
+*and to the public key material each of them published*. Before wrapping, a client recomputes the
+hash from the roster the server returned and refuses on mismatch. Without that check a malicious
+server silently adds a ghost device — or, worse, keeps the device set identical and swaps one
+member's public key for its own — and every sender dutifully wraps the chain key for it, the
+cryptography behaving perfectly while confidentiality is lost, because membership is
+server-authoritative while confidentiality is client-enforced.
+
+The hash alone is not the whole defence, because the server writes it. It is the cheap consistency
+check; the binding signature on each roster entry (see `identity.verify_identity_binding`) is what
+actually roots that key material in an identity the peer can pin out of band.
 """
 import os
+from dataclasses import dataclass
 from hashlib import sha256
 
 from cryptography.exceptions import InvalidSignature
@@ -45,12 +51,54 @@ NONCE_BYTES = 12
 WRAP_KEY_BYTES = 32
 
 
-def compute_member_set_hash(device_ids) -> str:
-    """Commit to an epoch's exact device set.
+@dataclass(frozen=True)
+class MemberKeys:
+    """One member device's published key material, as it enters the member-set commitment."""
+    device_id: str
+    identity_public_key: str = ""
+    signing_public_key: str = ""
+    signed_prekey_public: str = ""
+
+
+def _member_record(member) -> str:
+    """Canonical fixed-field record for one member.
+
+    `:` and `|` are safe separators: every field is unpadded base64url or a hyphenated uuid, and
+    neither character occurs in either alphabet, so no field value can forge a record boundary.
+    """
+    if isinstance(member, MemberKeys):
+        entry = member
+    elif isinstance(member, dict):
+        entry = MemberKeys(
+            device_id=str(member["device_id"]),
+            identity_public_key=member.get("identity_public_key") or "",
+            signing_public_key=member.get("signing_public_key") or "",
+            signed_prekey_public=member.get("signed_prekey_public") or "",
+        )
+    else:
+        # A bare device id: a device with no published key material.
+        entry = MemberKeys(device_id=str(member))
+
+    return ":".join((
+        entry.device_id,
+        entry.identity_public_key,
+        entry.signing_public_key,
+        entry.signed_prekey_public,
+    ))
+
+
+def compute_member_set_hash(members) -> str:
+    """Commit to an epoch's exact device set **and the key material each device published**.
+
+    Hashing device ids alone was not enough. A malicious server could return the same set of
+    devices with one member's `identity_public_key` (or an injected `signed_prekey_public`)
+    replaced by a key it holds: the hash was unchanged, every sender wrapped the chain key for
+    the substituted key, and confidentiality was lost with the cryptography behaving perfectly.
 
     Sorted so every participant derives the same value regardless of roster ordering.
     """
-    joined = "|".join(sorted(str(d) for d in device_ids)).encode("utf-8")
+    records = sorted(_member_record(m) for m in members)
+    joined = "|".join(records).encode("utf-8")
     return sha256(DS_MEMBER_SET + joined).hexdigest()
 
 

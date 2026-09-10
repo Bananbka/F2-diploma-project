@@ -309,6 +309,32 @@ async def update_message(
     chat_id = msg.get("chat_id")
     chat = await get_chat_or_403(db, chat_id, user_id)
 
+    chat_settings = await epoch_service.get_settings(db, chat_id)
+    is_encrypted_chat = (
+        chat_settings is not None and chat_settings.crypto_mode is CryptoMode.SENDER_KEYS_V1
+    )
+
+    # A channel post is signed over its own content, so replacing that content through the edit
+    # path would leave a document whose stored signature covers something else entirely — an
+    # "authenticated" post nobody actually authored. Editing a broadcast post is not supported.
+    if chat.chat_type == ChatType.CHANNEL:
+        raise AppException(
+            400, "CHANNEL_POST_NOT_EDITABLE",
+            "Channel posts cannot be edited; delete the post and publish a new one.",
+        )
+
+    # The send path gates every envelope on the live epoch, on owning the sender key it names, and
+    # on the signature verifying. None of that ran here, so an edit was a complete bypass: a member
+    # could re-seal under a superseded epoch — readable by whoever was just removed — claim another
+    # member's chain, or attach a signature that verifies against nothing.
+    if is_encrypted_chat:
+        await _validate_envelope(db, chat, user_id, chat_settings, message_in.envelope)
+    elif message_in.envelope is not None and chat_settings is not None:
+        raise AppException(
+            400, "ENVELOPE_NOT_ALLOWED",
+            "This chat is not end-to-end encrypted; an envelope cannot be verified here.",
+        )
+
     if message_in.envelope is not None:
         existing = msg.get("envelope")
 
@@ -379,11 +405,21 @@ async def delete_message(
 
 
 async def mark_messages_as_read(
+        db: AsyncSession,
         mongo_db: AsyncIOMotorDatabase,
         chat_id: uuid.UUID,
         user_id: uuid.UUID,
         last_read_message_id: str
 ) -> int:
+    """Mark everything up to `last_read_message_id` as read for this chat.
+
+    Takes `db` purely to authorise. Mongo carries no ownership information of its own, so a write
+    that reaches it without a Postgres membership check is unauthorised by construction — and this
+    one is reachable from the WebSocket, where `chat_id` arrives straight from the client.
+    """
+    if await is_user_in_chat(db, user_id, chat_id) is None:
+        raise AppException(403, "FORBIDDEN", "You are not a participant of this chat.")
+
     collection = mongo_db["messages"]
 
     message_id = objectify_id(last_read_message_id)

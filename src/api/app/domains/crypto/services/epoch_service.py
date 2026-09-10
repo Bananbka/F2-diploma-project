@@ -61,6 +61,9 @@ async def get_roster(db: AsyncSession, chat_id: uuid.UUID) -> list[dict]:
             UserIdentityKey.is_active.is_(True),
             UserDevice.is_active.is_(True),
         )
+        # Deterministic, so the member-set hash computed here matches the one any other call
+        # computes from the same rows regardless of what order Postgres feels like returning them.
+        .order_by(UserDevice.id)
     )
     rows = (await db.execute(stmt)).all()
 
@@ -71,7 +74,10 @@ async def get_roster(db: AsyncSession, chat_id: uuid.UUID) -> list[dict]:
             "identity_key_id": row.UserIdentityKey.id,
             "identity_public_key": row.UserIdentityKey.identity_public_key,
             "signing_public_key": row.UserIdentityKey.signing_public_key,
+            # Carried through to the client so it can verify the binding rather than trust us.
+            "identity_key_signature": row.UserIdentityKey.identity_key_signature,
             "signed_prekey_public": row.UserIdentityKey.signed_prekey_public,
+            "signed_prekey_signature": row.UserIdentityKey.signed_prekey_signature,
         }
         for row in rows
     ]
@@ -102,7 +108,6 @@ async def allocate_epoch(
     await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(str(chat_id)))))
 
     roster = await get_roster(db, chat_id)
-    device_ids = [r["device_id"] for r in roster]
 
     await db.execute(
         update(ChatKeyEpoch)
@@ -116,8 +121,10 @@ async def allocate_epoch(
         epoch=next_epoch,
         reason=reason,
         created_by_user_id=created_by_user_id,
-        member_count=len(device_ids),
-        member_set_hash=compute_member_set_hash(device_ids),
+        member_count=len(roster),
+        # Commits to the key material as well as the device ids, so a later key substitution on
+        # an unchanged device set no longer reproduces the same hash.
+        member_set_hash=compute_member_set_hash(roster),
     )
     db.add(epoch)
 

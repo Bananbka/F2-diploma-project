@@ -19,7 +19,7 @@ export const DS_MESSAGE_KEY = encoder.encode('NS-v1-msgkey');
 export const DS_CHAIN = encoder.encode('NS-v1-chain');
 export const DS_GRANT = encoder.encode('NS-v1-grant');
 export const DS_SENDER_KEY = encoder.encode('NS-v1-skdm');
-export const DS_MEMBER_SET = encoder.encode('NS-v1-memberset');
+export const DS_MEMBER_SET = encoder.encode('NS-v1-memberset-v2');
 export const DS_CHANNEL_POST = encoder.encode('NS-v1-post');
 export const DS_FINGERPRINT = encoder.encode('NS-v1-fingerprint');
 

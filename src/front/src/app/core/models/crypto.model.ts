@@ -31,13 +31,21 @@ export interface RosterEntry {
     identity_key_id: string;
     identity_public_key: string;
     signing_public_key: string;
+    /** Ed25519 over DS_IDENTITY_BIND || user_id || device_id || identity_public_key. */
+    identity_key_signature: string;
     signed_prekey_public: string | null;
+    /** Ed25519 over DS_PREKEY_BIND || user_id || device_id || signed_prekey_public. */
+    signed_prekey_signature: string | null;
 }
 
 export interface ChatRoster {
     chat_id: string;
     current_epoch: number;
-    /** Clients MUST recompute this from `members` and refuse to wrap keys on mismatch. */
+    /**
+     * The epoch's stored commitment. Clients MUST recompute it from `members` and refuse to wrap
+     * keys on mismatch — and MUST also verify each member's binding signatures, because the
+     * server writes this value too and a consistent lie would otherwise pass.
+     */
     member_set_hash: string;
     members: RosterEntry[];
 }

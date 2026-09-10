@@ -11,10 +11,17 @@ import {
     WRAP_ALGORITHM,
     wrapChainKey,
 } from '../crypto/grants';
-import { generateIdentity, unwrapPrivateBundle, WrappedBundle, wrapPrivateBundle } from '../crypto/identity';
+import {
+    generateIdentity,
+    unwrapPrivateBundle,
+    verifyIdentityBinding,
+    verifySignedPrekey,
+    WrappedBundle,
+    wrapPrivateBundle,
+} from '../crypto/identity';
 import { b64uDecode, b64uEncode } from '../crypto/primitives';
 import { generateChainKey, ReceiverChain, SenderChain } from '../crypto/ratchet';
-import { Distribution, GrantUpload, OwnIdentity } from '../models/crypto.model';
+import { ChatRoster, Distribution, GrantUpload, OwnIdentity } from '../models/crypto.model';
 import { CryptoApiService } from './crypto-api.service';
 
 const DEVICE_ID_KEY = 'ns.device_id';
@@ -233,6 +240,76 @@ export class KeyStoreService {
     }
 
     /**
+     * Refuse to hand out keys unless the roster proves itself. Throws on any failure.
+     *
+     * Two independent checks, and both are necessary:
+     *
+     * **The member set hash** catches a roster that disagrees with the epoch the server committed
+     * to when it opened — a ghost device inserted after the fact, or a device quietly dropped. On
+     * its own it proves little, because the server writes the commitment as well as the roster and
+     * could simply write a consistent lie. It is the cheap consistency check, not the root of trust.
+     *
+     * **The binding signatures** are the root of trust. Each entry's X25519 key (and its prekey,
+     * when present) must be signed by that device's Ed25519 signing key — and the signing key is
+     * exactly what a peer pins out of band through the safety number. So to substitute a key the
+     * server would have to substitute the signing key too, which changes the safety number and
+     * becomes visible to a user who has verified their peer.
+     *
+     * Without this, everything above it was decorative: the client wrapped the chain key for
+     * whatever public key the server put in front of it.
+     */
+    private verifyRoster(roster: ChatRoster): void {
+        for (const member of roster.members) {
+            const signingPublic = b64uDecode(member.signing_public_key);
+
+            if (
+                !verifyIdentityBinding(
+                    member.user_id,
+                    member.device_id,
+                    b64uDecode(member.identity_public_key),
+                    signingPublic,
+                    b64uDecode(member.identity_key_signature)
+                )
+            ) {
+                throw new Error(
+                    `Roster verification failed: device ${member.device_id} presents an identity key ` +
+                        'that its own signing key does not vouch for. Refusing to distribute keys.'
+                );
+            }
+
+            if (member.signed_prekey_public) {
+                // An unsigned prekey is rejected outright rather than silently ignored. Ignoring
+                // it would fall back to the identity key and quietly succeed, which hides the
+                // fact that someone tried to inject a key — and this client cannot open grants
+                // wrapped to a prekey anyway, so proceeding would only produce `no_key`.
+                if (
+                    !member.signed_prekey_signature ||
+                    !verifySignedPrekey(
+                        member.user_id,
+                        member.device_id,
+                        b64uDecode(member.signed_prekey_public),
+                        signingPublic,
+                        b64uDecode(member.signed_prekey_signature)
+                    )
+                ) {
+                    throw new Error(
+                        `Roster verification failed: device ${member.device_id} presents a signed prekey ` +
+                            'without a valid binding signature. Refusing to distribute keys.'
+                    );
+                }
+            }
+        }
+
+        const recomputed = computeMemberSetHash(roster.members);
+        if (recomputed !== roster.member_set_hash) {
+            throw new Error(
+                "Member set verification failed: the server's roster does not match the epoch commitment. " +
+                    'Refusing to distribute keys.'
+            );
+        }
+    }
+
+    /**
      * Ensure we have a published sending chain for this chat's current epoch.
      *
      * Called lazily on first send rather than at rotation time, which is what lets the server
@@ -248,16 +325,7 @@ export class KeyStoreService {
         const identity = this.requireIdentity();
         const roster = await firstValueFrom(this.cryptoApi.getRoster(chatId));
 
-        // The anti-ghost check. If the server has quietly inserted a device into the member set,
-        // the recomputed hash will not match the epoch's commitment and we refuse to hand it keys.
-        // The backend stores member_set_hash but cannot enforce this — only we can.
-        const recomputed = computeMemberSetHash(roster.members.map((m) => m.device_id));
-        if (recomputed !== roster.member_set_hash) {
-            throw new Error(
-                "Member set verification failed: the server's roster does not match the epoch commitment. " +
-                    'Refusing to distribute keys.'
-            );
-        }
+        this.verifyRoster(roster);
 
         const chainKey = generateChainKey();
         const senderKeyId = uuidv4();
@@ -340,8 +408,19 @@ export class KeyStoreService {
             const senderKeys = await firstValueFrom(this.cryptoApi.getKeysBatch([dist.sender_user_id]));
             const senderKey = senderKeys.find((k) => k.device_id === dist.sender_device_id);
 
+            // Fail closed on a missing key, not open. This used to read `senderKey && !verify(...)`,
+            // so a server that simply omitted the sender's device from the batch response skipped
+            // the check entirely and got its forged distribution accepted. "We could not check"
+            // must mean "we do not trust it".
             if (
-                senderKey &&
+                !senderKey ||
+                !verifyIdentityBinding(
+                    senderKey.user_id,
+                    senderKey.device_id,
+                    b64uDecode(senderKey.identity_public_key),
+                    b64uDecode(senderKey.signing_public_key),
+                    b64uDecode(senderKey.identity_key_signature)
+                ) ||
                 !verifyDistribution({
                     identitySigningPublic: b64uDecode(senderKey.signing_public_key),
                     signature: dist.signature,
@@ -352,7 +431,8 @@ export class KeyStoreService {
                     chainStartIndex: dist.chain_start_index,
                 })
             ) {
-                // A forged distribution: skip it rather than decrypt messages we cannot attribute.
+                // A forged or unverifiable distribution: skip it rather than decrypt messages we
+                // cannot attribute.
                 continue;
             }
 

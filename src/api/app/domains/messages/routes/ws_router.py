@@ -2,11 +2,13 @@
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from loguru import logger
 from pydantic import ValidationError
 from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import AppException
 from app.domains.chats.models import ChatParticipant
 from app.domains.chats.services.chat_services import update_participant_last_read
 from app.domains.messages.schemas.ws_schemas import WSMessageEnvelope, WSEventType
@@ -30,7 +32,66 @@ async def listen_to_redis(pubsub, websocket: WebSocket):
     except asyncio.CancelledError:
         pass
     except Exception as e:
-        print(f"REDIS TASK ERROR: {e}")
+        logger.error(f"redis fan-out task failed: {e}")
+
+
+PRESENCE_TTL_SECONDS = 86400
+
+# A frame larger than this is not a real client. Without a bound, one socket can make the server
+# buffer arbitrary amounts before validation ever runs.
+MAX_FRAME_BYTES = 64 * 1024
+
+
+async def _broadcast_presence(db: AsyncSession, redis: Redis, user_id, online: bool) -> None:
+    """Tell this user's conversation partners that they came online or went offline.
+
+    USER_ONLINE and USER_OFFLINE were declared in the event enum and handled in the client, but
+    nothing ever published them — presence was written to Redis and read by no one. Fan-out is
+    per-user like everything else, so the peers have to be resolved from Postgres first.
+    """
+    my_chats = select(ChatParticipant.chat_id).where(ChatParticipant.user_id == user_id)
+
+    peer_ids = (await db.execute(
+        select(ChatParticipant.user_id)
+        .where(ChatParticipant.chat_id.in_(my_chats), ChatParticipant.user_id != user_id)
+        .distinct()
+    )).scalars().all()
+
+    if not peer_ids:
+        return
+
+    envelope = WSMessageEnvelope(
+        event_type=WSEventType.USER_ONLINE if online else WSEventType.USER_OFFLINE,
+        user_id=user_id,
+        payload={"user_id": str(user_id), "online": online},
+    ).model_dump_json()
+
+    for peer_id in peer_ids:
+        await redis.publish(f"user:{peer_id}", envelope)
+
+
+async def _may_act_on(db: AsyncSession, user_id, chat_id, websocket: WebSocket) -> bool:
+    """Authorise a socket event against Postgres before it touches anything.
+
+    The socket used to take `chat_id` straight from the frame. Nothing checked membership, so any
+    authenticated user could publish typing indicators into conversations they had never been part
+    of, and — worse — drive `mark_messages_as_read` against an arbitrary chat, flipping `is_read`
+    on other people's messages and wiping their unread counts.
+
+    Access control lives in Postgres and content lives in Mongo, so the Postgres check has to come
+    first on every path that reaches Mongo. This is the socket's half of `get_chat_or_403`.
+    """
+    if await messages_service.is_user_in_chat(db, user_id, chat_id) is not None:
+        return True
+
+    await websocket.send_text(
+        WSMessageEnvelope(
+            event_type=WSEventType.ERROR,
+            chat_id=chat_id,
+            payload={"error_code": "FORBIDDEN", "message": "You are not a participant of this chat."},
+        ).model_dump_json()
+    )
+    return False
 
 
 @ws_router.websocket('/ws')
@@ -40,7 +101,14 @@ async def websocket_endpoint(websocket: WebSocket,
                              mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db)):
     await websocket.accept()
 
-    await redis.set(f"status:{user.id}", "1", ex=86400)
+    # Presence is refcounted, not a flag. With a plain set/clear, closing one of two open tabs
+    # marked the user offline while they were still connected in the other.
+    connection_count = await redis.incr(f"presence:{user.id}")
+    await redis.expire(f"presence:{user.id}", PRESENCE_TTL_SECONDS)
+    await redis.set(f"status:{user.id}", "1", ex=PRESENCE_TTL_SECONDS)
+
+    if connection_count == 1:
+        await _broadcast_presence(db, redis, user.id, online=True)
 
     pubsub = redis.pubsub()
     channel_name = f"user:{user.id}"
@@ -50,10 +118,22 @@ async def websocket_endpoint(websocket: WebSocket,
 
     try:
         while True:
-            raw = await websocket.receive_json()
+            # receive_text, not receive_json: a frame that is not valid JSON used to raise out of
+            # the loop past the WebSocketDisconnect handler and tear the connection down, so one
+            # malformed frame disconnected the client instead of being answered with an error.
+            text = await websocket.receive_text()
+
+            if len(text) > MAX_FRAME_BYTES:
+                await websocket.send_text(
+                    WSMessageEnvelope(
+                        event_type=WSEventType.ERROR,
+                        payload={"error_code": "FRAME_TOO_LARGE", "message": "Frame exceeds the size limit."},
+                    ).model_dump_json()
+                )
+                continue
 
             try:
-                ws_event = WSMessageEnvelope.model_validate(raw)
+                ws_event = WSMessageEnvelope.model_validate_json(text)
                 ws_event.user_id = user.id
 
                 if ws_event.event_type in (
@@ -61,6 +141,9 @@ async def websocket_endpoint(websocket: WebSocket,
                         WSEventType.TYPING_STOP
                 ):
                     if not ws_event.chat_id:
+                        continue
+
+                    if not await _may_act_on(db, user.id, ws_event.chat_id, websocket):
                         continue
 
                     stmt = select(ChatParticipant.user_id).where(ChatParticipant.chat_id == ws_event.chat_id)
@@ -79,10 +162,13 @@ async def websocket_endpoint(websocket: WebSocket,
                     if not ws_event.chat_id or not last_read_id:
                         continue
 
+                    if not await _may_act_on(db, user.id, ws_event.chat_id, websocket):
+                        continue
+
                     await update_participant_last_read(db, ws_event.chat_id, user.id, last_read_id)
 
                     updated_count = await messages_service.mark_messages_as_read(
-                        mongo_db, ws_event.chat_id, user.id, last_read_id
+                        db, mongo_db, ws_event.chat_id, user.id, last_read_id
                     )
 
                     if updated_count > 0:
@@ -117,6 +203,17 @@ async def websocket_endpoint(websocket: WebSocket,
                 )
                 await websocket.send_text(error_envelope.model_dump_json())
 
+            except AppException as e:
+                # The HTTP exception handlers registered in main.py do not run for a socket, so an
+                # AppException raised by a service (a bad message id, a failed authorisation)
+                # would otherwise escape the loop and drop the connection.
+                await websocket.send_text(
+                    WSMessageEnvelope(
+                        event_type=WSEventType.ERROR,
+                        payload={"error_code": e.error_code, "message": e.message},
+                    ).model_dump_json()
+                )
+
     except WebSocketDisconnect:
         pass
 
@@ -125,4 +222,8 @@ async def websocket_endpoint(websocket: WebSocket,
         await pubsub.unsubscribe(channel_name)
         await pubsub.close()
 
-        await redis.set(f"status:{user.id}", "0")
+        remaining = await redis.decr(f"presence:{user.id}")
+        if remaining <= 0:
+            await redis.delete(f"presence:{user.id}")
+            await redis.set(f"status:{user.id}", "0")
+            await _broadcast_presence(db, redis, user.id, online=False)
