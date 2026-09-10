@@ -3,9 +3,12 @@ import uuid
 
 import jwt
 from fastapi import APIRouter, Depends, Request, Response
+from motor.motor_asyncio import AsyncIOMotorDatabase
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import audit
+from app.core.audit import AuditEvent
 from app.core.config import settings
 from app.core.exceptions import AppException
 from app.core.rate_limit import client_identifier, enforce_rate_limit, reset_rate_limit
@@ -40,6 +43,7 @@ from app.domains.users.services.user_service import (
     get_user_by_username,
 )
 from app.domains.users.tasks import EmailTasks, send_email
+from app.infrastructure.mongo import get_mongo_db
 from app.infrastructure.postgres import get_db
 from app.infrastructure.redis import get_redis
 
@@ -163,6 +167,7 @@ async def login(
     request: Request,
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
+    mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
 ):
     caller = client_identifier(request)
 
@@ -185,11 +190,27 @@ async def login(
     user = await user_service.get_user_by_username(db, user_in.username)
 
     if not user or not verify_password(user_in.password, user.hashed_password):
+        # Recorded with the attempted username rather than a user id, since there may be no such
+        # user — that is the difference between a typo and someone walking the directory.
+        await audit.record(
+            mongo_db,
+            AuditEvent.LOGIN_FAILED,
+            user_id=user.id if user else None,
+            client_ip=caller,
+            details={"username": user_in.username},
+        )
         raise AppException(401, "INVALID_CREDENTIALS", "Incorrect username or password")
 
     # A disabled account could still sign in and use the API: `is_active` was written at
     # registration and then never read anywhere in the codebase.
     if not user.is_active:
+        await audit.record(
+            mongo_db,
+            AuditEvent.LOGIN_FAILED,
+            user_id=user.id,
+            client_ip=caller,
+            details={"reason": "account_disabled"},
+        )
         raise AppException(403, "ACCOUNT_DISABLED", "This account has been disabled.")
 
     # Clear the counters on success so a user who mistyped twice is not locked out of their own
@@ -210,12 +231,19 @@ async def login(
     set_token_cookie(response, access_token, "access")
     set_token_cookie(response, refresh_token, "refresh")
 
+    await audit.record(
+        mongo_db, AuditEvent.LOGIN_SUCCEEDED, user_id=user.id, client_ip=caller
+    )
+
     return SuccessResponse(data=user)
 
 
 @router.post("/logout", response_model=SuccessResponse[dict])
 async def logout(
-    request: Request, response: Response, redis: Redis = Depends(get_redis)
+    request: Request,
+    response: Response,
+    redis: Redis = Depends(get_redis),
+    mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
 ):
     # Both cookies are revoked. Blacklisting only the access token left the refresh token live,
     # so "log out" ended nothing a holder of that cookie could not immediately undo.
@@ -223,6 +251,8 @@ async def logout(
     # Signatures are verified before anything is written. Decoding with verify_signature=False let
     # an unauthenticated caller push arbitrary forged tokens with far-future `exp` values into
     # Redis and hold the memory for as long as they liked.
+    subject = None
+
     for cookie_name in ("access_token", "refresh_token"):
         token = request.cookies.get(cookie_name)
         if not token:
@@ -235,6 +265,8 @@ async def logout(
         except jwt.PyJWTError:
             continue
 
+        subject = subject or payload.get("sub")
+
         exp = payload.get("exp")
         if exp is None:
             continue
@@ -244,6 +276,18 @@ async def logout(
             await redis.setex(f"blacklist:{token}", ttl, "revoked")
 
     delete_token_cookies(response)
+
+    if subject:
+        try:
+            await audit.record(
+                mongo_db,
+                AuditEvent.LOGOUT,
+                user_id=uuid.UUID(subject),
+                client_ip=client_identifier(request),
+            )
+        except ValueError:
+            pass
+
     return SuccessResponse(data={"message": "Token deactivated"})
 
 
@@ -358,6 +402,7 @@ async def reset_password(
     request: Request,
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
+    mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
 ):
     await enforce_rate_limit(
         redis,
@@ -401,6 +446,17 @@ async def reset_password(
     # again with the new password.
     await redis.setex(f"force_logout:{user.id}", 604800, revocation_cutoff())
 
+    # The most consequential event in the system: the identity is destroyed and every device
+    # revoked, so all history becomes unreadable. If it was not the account holder who did this,
+    # this record is the only place it shows up.
+    await audit.record(
+        mongo_db,
+        AuditEvent.PASSWORD_RESET,
+        user_id=user.id,
+        client_ip=client_identifier(request),
+        details={"devices_revoked": True, "identity_destroyed": True},
+    )
+
     return SuccessResponse(
         data={"message": "Password and keys was successfully updated."}
     )
@@ -409,10 +465,12 @@ async def reset_password(
 @router.post("/change-password", response_model=SuccessResponse[dict])
 async def change_password(
     user_data: PasswordChange,
+    request: Request,
     response: Response,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
+    mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
 ):
     if not verify_password(user_data.old_password, current_user.hashed_password):
         raise AppException(401, "INVALID_PASSWORD", "Invalid password.")
@@ -443,5 +501,13 @@ async def change_password(
 
     set_token_cookie(response, new_access_token, "access")
     set_token_cookie(response, new_refresh_token, "refresh")
+
+    await audit.record(
+        mongo_db,
+        AuditEvent.PASSWORD_CHANGED,
+        user_id=current_user.id,
+        client_ip=client_identifier(request),
+        details={"rewrapped_devices": len(user_data.rewrapped_identities or [])},
+    )
 
     return SuccessResponse(data={"message": "Password changed successfully."})

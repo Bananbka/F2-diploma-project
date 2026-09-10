@@ -5,6 +5,8 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import audit
+from app.core.audit import AuditEvent
 from app.core.exceptions import AppException
 from app.core.responses import SuccessResponse
 from app.domains.chats.models import ChatType, ParticipantRole
@@ -251,6 +253,15 @@ async def delete_participants(
         redis, chat_id=chat_id, recipient_ids=removed_ids
     )
 
+    # Membership decides who can read what, so it belongs in the audit log alongside key changes.
+    await audit.record(
+        mongo_db,
+        AuditEvent.PARTICIPANTS_REMOVED,
+        user_id=user.id,
+        chat_id=chat_id,
+        details={"removed": [str(u) for u in removed_ids]},
+    )
+
     chat = await chat_services.get_chat_by_id(db, chat_id)
 
     return SuccessResponse(data=chat)
@@ -358,6 +369,14 @@ async def add_participants(
         recipient_ids=participant_ids,
     )
 
+    await audit.record(
+        mongo_db,
+        AuditEvent.PARTICIPANTS_ADDED,
+        user_id=user.id,
+        chat_id=chat_id,
+        details={"added": [str(u) for u in set(data.user_ids)]},
+    )
+
     chat = await chat_services.get_chat_by_id(db, chat_id)
 
     return SuccessResponse(data=chat)
@@ -373,6 +392,7 @@ async def transfer_ownership(
     chat_id: uuid.UUID = Path(..., description="Chat ID"),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
+    mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
 ):
     """Hand ownership of a group or channel to another member.
 
@@ -410,6 +430,14 @@ async def transfer_ownership(
         chat_id=chat_id,
         recipient_ids=list(await chat_services.get_chat_participants_ids(db, chat_id)),
         payload={"owner_id": str(data.user_id)},
+    )
+
+    await audit.record(
+        mongo_db,
+        AuditEvent.OWNERSHIP_TRANSFERRED,
+        user_id=user.id,
+        chat_id=chat_id,
+        details={"new_owner_id": str(data.user_id)},
     )
 
     return SuccessResponse(data=new_owner)
@@ -450,6 +478,14 @@ async def delete_chat(
 
     await redis_service.send_chat_deleted(
         redis, chat_id=chat_id, recipient_ids=participant_ids
+    )
+
+    await audit.record(
+        mongo_db,
+        AuditEvent.CHAT_DELETED,
+        user_id=user.id,
+        chat_id=chat_id,
+        details={"chat_type": chat.chat_type.value, "members": len(participant_ids)},
     )
 
     return SuccessResponse(data={"message": "Chat deleted."})

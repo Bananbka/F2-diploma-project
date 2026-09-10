@@ -23,6 +23,16 @@ export const NONCE_BYTES = 12;
  *  denial-of-service vector: a peer could claim index 2**31 and force that many HKDF rounds. */
 export const MAX_SKIP = 2000;
 
+/**
+ * Total retained skipped keys per chain.
+ *
+ * MAX_SKIP bounds a single jump but not the sum of them: a peer claiming indices 0, 2000, 4000,
+ * … passes every individual check while the map grows without limit. That is both a memory leak
+ * and a forward-secrecy leak, since a retained message key is exactly the material the ratchet
+ * deletes to provide forward secrecy. The oldest are dropped once the budget is exhausted.
+ */
+export const MAX_RETAINED_SKIPPED = 2000;
+
 export interface MessageKey {
     readonly key: Uint8Array;
     readonly nonce: Uint8Array;
@@ -105,6 +115,8 @@ export class ReceiverChain {
             this.skipped.set(this.index, deriveMessageKey(this.chainKey));
             this.chainKey = advanceChain(this.chainKey);
             this.index += 1;
+
+            this.evictOldestSkipped();
         }
 
         const derived = deriveMessageKey(this.chainKey);
@@ -112,5 +124,17 @@ export class ReceiverChain {
         this.index += 1;
 
         return derived;
+    }
+
+    /** Drop the lowest-indexed retained key once the budget is exceeded. Map preserves insertion
+     *  order and keys are only ever inserted ascending, so the first entry is the oldest. */
+    private evictOldestSkipped(): void {
+        while (this.skipped.size > MAX_RETAINED_SKIPPED) {
+            const oldest = this.skipped.keys().next();
+            if (oldest.done) {
+                return;
+            }
+            this.skipped.delete(oldest.value);
+        }
     }
 }

@@ -16,6 +16,7 @@ accidentally repeat a (key, nonce) pair by mishandling a random source.
 The chain is one-way, which is what makes ratchet-forward grants possible: handing a peer CK_i
 grants them messages i onward and nothing earlier.
 """
+
 import os
 
 from cryptography.hazmat.primitives.hashes import SHA256
@@ -30,6 +31,12 @@ NONCE_BYTES = 12
 # How far ahead we will derive keys to service an out-of-order message. Unbounded derivation is a
 # denial-of-service vector: a peer could claim index 2**31 and force that many HKDF rounds.
 MAX_SKIP = 2000
+
+# Total retained skipped keys per chain. MAX_SKIP bounds a single jump but not the sum of them,
+# so without this a peer claiming ever-increasing indices grows the cache without limit — a memory
+# leak, and a forward-secrecy leak, since a retained message key is exactly what the ratchet
+# deletes in order to provide forward secrecy.
+MAX_RETAINED_SKIPPED = 2000
 
 
 def generate_chain_key() -> bytes:
@@ -81,9 +88,9 @@ class ReceiverChain:
     """Receiving side, tolerant of out-of-order and dropped messages.
 
     Keys for indices we skipped past are cached so a late-arriving message still opens, bounded by
-    MAX_SKIP. A real client must persist `skipped` alongside the chain state, and should expire it
-    — retained message keys are exactly the material that undermines forward secrecy if kept
-    forever.
+    MAX_SKIP per jump *and* by MAX_RETAINED_SKIPPED in total. A real client must persist `skipped`
+    alongside the chain state — retained message keys are exactly the material that undermines
+    forward secrecy if kept forever.
     """
 
     def __init__(self, chain_key: bytes, index: int = 0):
@@ -110,6 +117,12 @@ class ReceiverChain:
             self.skipped[self.index] = derive_message_key(self._chain_key)
             self._chain_key = advance_chain(self._chain_key)
             self.index += 1
+
+            # MAX_SKIP bounds one jump but not the sum of them: indices 0, 2000, 4000, ... each
+            # pass the check above while the cache grows without limit. Dicts preserve insertion
+            # order and keys are only ever inserted ascending, so the first key is the oldest.
+            while len(self.skipped) > MAX_RETAINED_SKIPPED:
+                del self.skipped[next(iter(self.skipped))]
 
         message_key, nonce = derive_message_key(self._chain_key)
         self._chain_key = advance_chain(self._chain_key)

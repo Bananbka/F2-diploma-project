@@ -1,4 +1,5 @@
-﻿from motor.motor_asyncio import AsyncIOMotorClient
+from motor.motor_asyncio import AsyncIOMotorClient
+
 from app.core.config import settings
 
 
@@ -11,7 +12,9 @@ mongo_client = MongoClient()
 
 
 async def connect_to_mongo():
-    mongo_client.client = AsyncIOMotorClient(settings.MONGO_URL, uuidRepresentation="standard")
+    mongo_client.client = AsyncIOMotorClient(
+        settings.MONGO_URL, uuidRepresentation="standard"
+    )
     mongo_client.db = mongo_client.client[settings.MONGO_DB_NAME]
     print("Connected to MongoDB via Motor (Pure).")
 
@@ -33,6 +36,26 @@ async def ensure_indexes():
     # delete_message checks whether a blob is still referenced before reaping it from MinIO.
     await messages.create_index(
         [("attachments.url", 1)], name="ix_attachment_url", sparse=True
+    )
+
+    # _authorize_attachments asks whether an object is already referenced by a message in any of
+    # the sender's chats, which is what allows forwarding without allowing replay.
+    await messages.create_index(
+        [("chat_id", 1), ("attachments.url", 1)],
+        name="ix_chat_attachment_url",
+        sparse=True,
+    )
+
+    audit_log = mongo_client.db["security_audit"]
+
+    # The two ways an audit log is ever read: everything about one account, and everything in a
+    # window. Both are investigation-time queries, so they only need to be possible, not fast.
+    await audit_log.create_index(
+        [("user_id", 1), ("created_at", -1)], name="ix_audit_user_time"
+    )
+    await audit_log.create_index([("created_at", -1)], name="ix_audit_time")
+    await audit_log.create_index(
+        [("event", 1), ("created_at", -1)], name="ix_audit_event_time"
     )
 
     print("MongoDB indexes ensured.")

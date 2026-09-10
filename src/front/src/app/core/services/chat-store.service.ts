@@ -842,8 +842,30 @@ export class ChatStoreService {
         }
     }
 
+    /**
+     * Insert a message in history order, ignoring one we already hold.
+     *
+     * Both halves matter. Deduplication: the same message can arrive twice — once over the socket
+     * and once from a history fetch after a reconnect — and appending blindly would render it
+     * twice.
+     *
+     * Ordering: this used to append at the end, so the list followed *arrival* order rather than
+     * history order. Fan-out is per-user across N Redis publishes, and a client that reconnects
+     * mid-conversation interleaves socket traffic with a fetched page, so arrival order is not
+     * reliably send order. Message ids are ObjectIds, which are monotonic and therefore sort
+     * lexicographically in creation order — the same key the server pages and orders by, so the
+     * two never disagree.
+     */
     private appendDecrypted(message: DecryptedMessage): void {
-        this.messages.update((list) => (list.some((m) => m.id === message.id) ? list : [...list, message]));
+        this.messages.update((list) => {
+            if (list.some((m) => m.id === message.id)) {
+                return list;
+            }
+
+            const at = list.findIndex((m) => m.id > message.id);
+            return at === -1 ? [...list, message] : [...list.slice(0, at), message, ...list.slice(at)];
+        });
+
         this.cachePreview(message.chatId, [message]);
     }
 

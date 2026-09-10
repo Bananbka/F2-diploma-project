@@ -4,6 +4,8 @@ from fastapi import APIRouter, Depends, Path, Query
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import audit
+from app.core.audit import AuditEvent
 from app.core.exceptions import AppException
 from app.core.rate_limit import enforce_rate_limit
 from app.core.responses import SuccessResponse
@@ -91,6 +93,19 @@ async def publish_identity(
             else str(epoch.reason),
             recipient_ids=list(participant_ids),
         )
+
+    # A key change is what a successful server-side substitution looks like from the outside, so
+    # it has to leave a trace here as well as showing up in the peer's safety number.
+    await audit.record(
+        mongo_db,
+        AuditEvent.IDENTITY_PUBLISHED,
+        user_id=user.id,
+        details={
+            "device_id": str(data.device_id),
+            "version": key.version,
+            "rotated_chats": len(epochs),
+        },
+    )
 
     return SuccessResponse(data=key, meta={"rotated_chats": len(epochs)})
 
@@ -181,6 +196,13 @@ async def revoke_device(
             recipient_ids=list(participant_ids),
         )
 
+    await audit.record(
+        mongo_db,
+        AuditEvent.DEVICE_REVOKED,
+        user_id=user.id,
+        details={"device_id": str(device_id), "rotated_chats": len(epochs)},
+    )
+
     return SuccessResponse(
         data={"message": "Device revoked."},
         meta={"rotated_chats": len(epochs)},
@@ -203,6 +225,7 @@ async def enable_chat_encryption(
     chat_id: uuid.UUID = Path(..., description="Chat ID"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ):
     """Enable end-to-end encryption and open the chat's first epoch.
 
@@ -234,6 +257,23 @@ async def enable_chat_encryption(
         )
 
     epoch = await epoch_service.enable_encryption(db, chat, user.id)
+
+    # Announce it, like every other rotation path does. Without this the other members learn the
+    # chat became encrypted only when they happen to refetch — until then their clients keep
+    # sending plaintext into a chat that now refuses it, which surfaces as a failed send rather
+    # than as "this conversation is now encrypted".
+    participant_ids = await chat_services.get_chat_participants_ids(db, chat_id)
+    await redis_service.send_key_epoch_started(
+        redis,
+        chat_id=chat_id,
+        epoch=epoch.epoch,
+        member_set_hash=epoch.member_set_hash,
+        reason=epoch.reason.value
+        if hasattr(epoch.reason, "value")
+        else str(epoch.reason),
+        recipient_ids=list(participant_ids),
+    )
+
     return SuccessResponse(data=epoch)
 
 
