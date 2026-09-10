@@ -28,6 +28,58 @@ def _cookie_header(client: httpx.AsyncClient) -> str:
     return "; ".join(f"{k}={v}" for k, v in client.cookies.items())
 
 
+async def _read_otp(key: str) -> str:
+    """Read a one-time code straight out of Redis.
+
+    The code only ever reaches the user by email, and there is no mail server in the test
+    environment. Reading it here keeps the reset flow testable end to end without adding a
+    back door to the application itself.
+    """
+    from redis.asyncio import Redis
+
+    from app.core.config import settings
+
+    redis = Redis.from_url(settings.REDIS_URL, decode_responses=True)
+    try:
+        code = await redis.get(key)
+        assert code, f"no OTP stored at {key}"
+        return code
+    finally:
+        await redis.aclose()
+
+
+async def _publish_identity_with_device(client, user_id, device_id=None):
+    """Publish an identity, optionally reusing a device id the caller already holds.
+
+    `test_epoch_api._publish_identity` always mints a fresh device, which cannot express the
+    case that matters here: the same installation publishing again after its device was revoked.
+    """
+    from app.domains.crypto.reference.identity import (
+        generate_identity,
+        wrap_private_bundle,
+    )
+    from app.domains.crypto.reference.primitives import b64u_encode
+
+    device_id = device_id or uuid.uuid4()
+    bundle = generate_identity(user_id, device_id)
+    wrapped, kdf = wrap_private_bundle(bundle, "TestPassw0rd!")
+
+    r = await client.post(
+        "/crypto/identity",
+        json={
+            "device_id": str(device_id),
+            "display_name": "test",
+            "identity_public_key": b64u_encode(bundle.identity_public),
+            "signing_public_key": b64u_encode(bundle.signing_public),
+            "identity_key_signature": b64u_encode(bundle.identity_key_signature),
+            "encrypted_private_bundle": wrapped,
+            "kdf_params": kdf,
+        },
+    )
+    assert r.status_code == 200, r.text
+    return device_id, bundle
+
+
 # --------------------------------------------------------------------------------------------
 # The edit path skipped every envelope check the send path performs.
 # --------------------------------------------------------------------------------------------
@@ -503,5 +555,73 @@ async def test_forgot_password_does_not_reveal_whether_an_account_exists():
 
         assert real.status_code == fake.status_code == 200
         assert real.json() == fake.json(), "the response must not distinguish the two"
+    finally:
+        await client.aclose()
+
+
+# --------------------------------------------------------------------------------------------
+# Key lifecycle around revocation.
+# --------------------------------------------------------------------------------------------
+
+
+async def test_identity_can_be_republished_after_every_device_is_revoked():
+    """The documented recovery path after a password reset, which used to 500.
+
+    Reset revokes every device, and the client then publishes a fresh identity from the same
+    device id it kept in localStorage. `next_version` was derived from the *active* key, so with
+    none active it restarted at 1 — colliding with the version 1 row retained for audit, because
+    `uq_identity_key_device_version` covers superseded rows too.
+    """
+    client, user_id = await _register_user()
+
+    try:
+        device_id, _ = await _publish_identity_with_device(client, user_id)
+
+        r = await client.get("/crypto/identity/me")
+        assert r.json()["data"][0]["version"] == 1
+
+        # Reset destroys the identity and revokes the device.
+        username = (await client.get("/profile/me")).json()["data"]["username"]
+        email = (await client.get("/profile/me")).json()["data"]["email"]
+
+        r = await client.post(
+            "/auth/forgot-password", json={"username": username, "email": email}
+        )
+        assert r.status_code == 200, r.text
+
+        otp = await _read_otp(f"password_reset:{user_id}")
+        r = await client.post(
+            "/auth/reset-password",
+            json={
+                "username": username,
+                "otp": otp,
+                "new_password": "NewPassw0rd!",
+                "new_public_key": "legacy",
+                "new_encrypted_private_key": "legacy",
+            },
+        )
+        assert r.status_code == 200, r.text
+
+        # Log back in — reset forces every session out.
+        async with httpx.AsyncClient(base_url=BASE, timeout=30.0) as fresh:
+            r = await fresh.post(
+                "/auth/login", json={"username": username, "password": "NewPassw0rd!"}
+            )
+            assert r.status_code == 200, r.text
+
+            # The same device id publishes again. This is the case that used to collide.
+            new_device_id, _ = await _publish_identity_with_device(
+                fresh, user_id, device_id=device_id
+            )
+            assert new_device_id == device_id
+
+            r = await fresh.get("/crypto/identity/me")
+            assert r.status_code == 200, r.text
+            keys = r.json()["data"]
+
+            assert len(keys) == 1, "exactly one active key for the device"
+            assert keys[0]["version"] == 2, (
+                "the version must advance past the retained row"
+            )
     finally:
         await client.aclose()

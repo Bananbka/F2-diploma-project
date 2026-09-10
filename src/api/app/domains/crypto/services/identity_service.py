@@ -115,9 +115,22 @@ async def publish_identity(
     )
     previous = (await db.execute(prev_stmt)).scalar_one_or_none()
 
-    next_version = 1
+    # Taken from the highest version this device has *ever* had, not from the active one.
+    #
+    # Superseded keys are retained for audit, and `uq_identity_key_device_version` covers every
+    # row, active or not. Deriving the next version from the active key therefore restarted at 1
+    # whenever there was no active key — exactly the state a password reset leaves behind, since
+    # it revokes every device — and the insert then collided with the retained version 1 and
+    # surfaced as a 500. That is the documented recovery path: reset, log back in, publish a fresh
+    # identity from the same device id in localStorage.
+    highest_version = await db.scalar(
+        select(func.max(UserIdentityKey.version)).where(
+            UserIdentityKey.device_id == device.id
+        )
+    )
+    next_version = (highest_version or 0) + 1
+
     if previous is not None:
-        next_version = previous.version + 1
         previous.is_active = False
         previous.revoked_at = datetime.now(timezone.utc)
         # Release the partial unique index before inserting the replacement.
