@@ -260,14 +260,18 @@ async def _authorize_attachments(
     prefix = f"{settings.MINIO_URL}/{settings.MINIO_MESSAGE_BUCKET}/"
     collection = mongo_db["messages"]
 
+    # Resolved at most once, and only if some attachment is not the caller's own upload. Fetching
+    # it per attachment repeated the same query for every file on the message.
+    my_chat_ids: list[uuid.UUID] | None = None
+
     for attachment in attachments:
         url = attachment.url
         object_key = url[len(prefix) :]
 
-        owner = await minio_manager.get_object_owner(
+        exists, owner = await minio_manager.get_object_owner(
             object_key, settings.MINIO_MESSAGE_BUCKET
         )
-        if owner is None:
+        if not exists:
             raise AppException(
                 400, "ATTACHMENT_UNKNOWN", "That attachment no longer exists."
             )
@@ -275,20 +279,24 @@ async def _authorize_attachments(
         if owner == str(user_id):
             continue
 
-        my_chat_ids = (
-            (
-                await db.execute(
-                    select(ChatParticipant.chat_id).where(
-                        ChatParticipant.user_id == user_id
+        # `owner is None` means the object predates ownership being recorded. Those fall through
+        # to the visibility check below rather than being rejected outright — it is the same
+        # question, just answered from the message history instead of from object metadata.
+        if my_chat_ids is None:
+            my_chat_ids = list(
+                (
+                    await db.execute(
+                        select(ChatParticipant.chat_id).where(
+                            ChatParticipant.user_id == user_id
+                        )
                     )
                 )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
-        )
 
         visible = await collection.find_one(
-            {"chat_id": {"$in": list(my_chat_ids)}, "attachments.url": url}, {"_id": 1}
+            {"chat_id": {"$in": my_chat_ids}, "attachments.url": url}, {"_id": 1}
         )
         if visible is None:
             raise AppException(

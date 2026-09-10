@@ -474,6 +474,10 @@ async def delete_chat(
     if participant.role is not ParticipantRole.OWNER:
         raise AppException(403, "ACCESS_DENIED", "Only the owner can delete this chat.")
 
+    # Read before the delete. Afterwards `chat` refers to a row that no longer exists, and it
+    # only still answers because the session happens to use expire_on_commit=False.
+    chat_type = chat.chat_type.value
+
     participant_ids = await chat_services.delete_chat(db, mongo_db, chat_id)
 
     await redis_service.send_chat_deleted(
@@ -485,7 +489,7 @@ async def delete_chat(
         AuditEvent.CHAT_DELETED,
         user_id=user.id,
         chat_id=chat_id,
-        details={"chat_type": chat.chat_type.value, "members": len(participant_ids)},
+        details={"chat_type": chat_type, "members": len(participant_ids)},
     )
 
     return SuccessResponse(data={"message": "Chat deleted."})

@@ -57,20 +57,27 @@ class MinioClient:
                     else:
                         raise e
 
-    async def get_object_owner(self, object_key: str, bucket_name: str) -> str | None:
-        """The user id recorded on an object at upload time, or None if the object is unknown.
+    async def get_object_owner(
+        self, object_key: str, bucket_name: str
+    ) -> tuple[bool, str | None]:
+        """Returns `(exists, owner_id)` for one object.
 
         Ownership has to be recorded somewhere, because the attachment url on a message is
         entirely client-supplied: without this, naming someone else's object key in your own
         message was enough to make it downloadable through your own chat.
+
+        Two return values rather than one, because "no object" and "an object with no recorded
+        owner" are different situations and must not be conflated. Objects uploaded before
+        ownership was recorded have no `owner-id`, and collapsing both cases to `None` would have
+        made every one of them permanently unforwardable with a misleading "no longer exists".
         """
         try:
             async with self.get_client() as client:
                 response = await client.head_object(Bucket=bucket_name, Key=object_key)
         except botocore.exceptions.ClientError:
-            return None
+            return False, None
 
-        return (response.get("Metadata") or {}).get("owner-id")
+        return True, (response.get("Metadata") or {}).get("owner-id")
 
     async def upload_file(
         self,

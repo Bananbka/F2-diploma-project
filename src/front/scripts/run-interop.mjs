@@ -45,7 +45,6 @@ print(json.dumps({
     'next_chain_key': b64u_encode(advance_chain(ck)),
     'msg_aad': b64u_encode(build_message_aad(uuid.UUID(CHAT), 5, uuid.UUID(USER), uuid.UUID(SKID), 42)),
     'binding': b64u_encode(identity_binding_message(uuid.UUID(USER), uuid.UUID(DEV), k32)),
-    'member_set_hash': compute_member_set_hash([DEV, RDEV, CHAT]),
     # Full roster records, not bare ids. The hash binds the key material now, so the two
     # implementations must agree on the record encoding as well as on the digest.
     'member_set_hash_records': compute_member_set_hash([

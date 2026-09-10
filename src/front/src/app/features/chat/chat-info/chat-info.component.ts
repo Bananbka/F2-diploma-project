@@ -19,6 +19,8 @@ import {
 import { firstValueFrom } from 'rxjs';
 
 import { computeMemberSetHash } from '../../../core/crypto/grants';
+import { verifyIdentityBinding, verifySignedPrekey } from '../../../core/crypto/identity';
+import { b64uDecode } from '../../../core/crypto/primitives';
 import { Chat, ParticipantRole, UserSearchResult } from '../../../core/models/chat.model';
 import { ChatRoster } from '../../../core/models/crypto.model';
 import { ChatApiService } from '../../../core/services/chat-api.service';
@@ -78,17 +80,56 @@ export class ChatInfoComponent {
     /**
      * The anti-ghost check, run here as well as before key distribution.
      *
-     * `member_set_hash` is recomputed from the roster the server just handed us and compared with the
-     * commitment recorded for the epoch. A mismatch means the server may have inserted a device that
-     * would receive future messages. The backend stores the hash but cannot enforce this — only the
-     * client can, so it is surfaced on the screen where the roster is shown.
+     * Two independent things, both required — the same pair `KeyStoreService.verifyRoster` enforces
+     * before wrapping. This screen shows the roster, so it is where a failure has to be visible.
+     *
+     * **The binding signatures.** Each entry's X25519 key must be vouched for by that device's own
+     * Ed25519 signing key — the key a peer pins out of band as a safety number. This is the actual
+     * root of trust; without it the roster is merely what the server says it is.
+     *
+     * **The member set hash**, recomputed from the whole roster entry and compared against the
+     * epoch's stored commitment. Note `roster.members`, not `members.map(m => m.device_id)`: the
+     * commitment binds the key material now, precisely because hashing ids alone let a server keep
+     * the device set identical and swap one member's public key for its own.
      */
     readonly memberSetVerified = computed(() => {
         const roster = this.roster();
         if (!roster) {
             return null;
         }
-        return computeMemberSetHash(roster.members.map((m) => m.device_id)) === roster.member_set_hash;
+
+        const bindingsValid = roster.members.every((member) => {
+            const signingPublic = b64uDecode(member.signing_public_key);
+
+            const identityBound = verifyIdentityBinding(
+                member.user_id,
+                member.device_id,
+                b64uDecode(member.identity_public_key),
+                signingPublic,
+                b64uDecode(member.identity_key_signature)
+            );
+
+            if (!identityBound) {
+                return false;
+            }
+
+            if (!member.signed_prekey_public) {
+                return true;
+            }
+
+            return (
+                !!member.signed_prekey_signature &&
+                verifySignedPrekey(
+                    member.user_id,
+                    member.device_id,
+                    b64uDecode(member.signed_prekey_public),
+                    signingPublic,
+                    b64uDecode(member.signed_prekey_signature)
+                )
+            );
+        });
+
+        return bindingsValid && computeMemberSetHash(roster.members) === roster.member_set_hash;
     });
 
     readonly isPrivate = computed(() => this.chat()?.chat_type === 'private');

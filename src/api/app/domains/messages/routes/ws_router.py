@@ -120,20 +120,29 @@ async def websocket_endpoint(
 
     # Presence is refcounted, not a flag. With a plain set/clear, closing one of two open tabs
     # marked the user offline while they were still connected in the other.
-    connection_count = await redis.incr(f"presence:{user.id}")
-    await redis.expire(f"presence:{user.id}", PRESENCE_TTL_SECONDS)
-    await redis.set(f"status:{user.id}", "1", ex=PRESENCE_TTL_SECONDS)
-
-    if connection_count == 1:
-        await _broadcast_presence(db, redis, user.id, online=True)
-
-    pubsub = redis.pubsub()
+    #
+    # The increment is the first thing inside the try, so that *anything* failing afterwards —
+    # the presence broadcast, the pubsub subscribe — still decrements on the way out. Incrementing
+    # before the try left the counter stuck on any such failure, and a stuck counter means the
+    # user reads as permanently online and no later connection ever announces them again.
+    connection_count = 0
+    pubsub = None
+    redis_task = None
     channel_name = f"user:{user.id}"
-    await pubsub.subscribe(channel_name)
-
-    redis_task = asyncio.create_task(listen_to_redis(pubsub, websocket))
 
     try:
+        connection_count = await redis.incr(f"presence:{user.id}")
+        await redis.expire(f"presence:{user.id}", PRESENCE_TTL_SECONDS)
+        await redis.set(f"status:{user.id}", "1", ex=PRESENCE_TTL_SECONDS)
+
+        if connection_count == 1:
+            await _broadcast_presence(db, redis, user.id, online=True)
+
+        pubsub = redis.pubsub()
+        await pubsub.subscribe(channel_name)
+
+        redis_task = asyncio.create_task(listen_to_redis(pubsub, websocket))
+
         while True:
             # receive_text, not receive_json: a frame that is not valid JSON used to raise out of
             # the loop past the WebSocketDisconnect handler and tear the connection down, so one
@@ -243,12 +252,25 @@ async def websocket_endpoint(
         pass
 
     finally:
-        redis_task.cancel()
-        await pubsub.unsubscribe(channel_name)
-        await pubsub.close()
+        # Each step guarded, because the increment above may have been the only one that ran —
+        # and a teardown that raises half way through would skip the decrement it exists for.
+        if redis_task is not None:
+            redis_task.cancel()
 
-        remaining = await redis.decr(f"presence:{user.id}")
-        if remaining <= 0:
-            await redis.delete(f"presence:{user.id}")
-            await redis.set(f"status:{user.id}", "0")
-            await _broadcast_presence(db, redis, user.id, online=False)
+        if pubsub is not None:
+            try:
+                await pubsub.unsubscribe(channel_name)
+                await pubsub.close()
+            except Exception as exc:
+                logger.warning(f"pubsub teardown failed for {user.id}: {exc}")
+
+        if connection_count:
+            remaining = await redis.decr(f"presence:{user.id}")
+
+            if remaining <= 0:
+                # Left at zero rather than deleted. Deleting races a connection that increments
+                # between the decr and the delete — that connection would see 1, announce the
+                # user online, and then have its count thrown away. A key sitting at 0 costs
+                # nothing, expires on its own, and increments back to 1 correctly.
+                await redis.set(f"status:{user.id}", "0")
+                await _broadcast_presence(db, redis, user.id, online=False)

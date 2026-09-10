@@ -52,9 +52,7 @@ export interface MemberKeys {
  * `:` and `|` are safe separators: every field is unpadded base64url or a hyphenated uuid, and
  * neither character occurs in either alphabet, so no field value can forge a record boundary.
  */
-function memberRecord(member: MemberKeys | string): string {
-    const entry: MemberKeys = typeof member === 'string' ? { device_id: member } : member;
-
+function memberRecord(entry: MemberKeys): string {
     return [
         String(entry.device_id),
         entry.identity_public_key ?? '',
@@ -72,8 +70,14 @@ function memberRecord(member: MemberKeys | string): string {
  * substituted key, and confidentiality was lost with the cryptography behaving perfectly.
  *
  * Sorted so every participant derives the same value regardless of roster ordering.
+ *
+ * The parameter is whole roster entries and deliberately **not** `string[]`. It used to accept
+ * bare device ids as a convenience, and that permissiveness is exactly how a call site was left
+ * behind when the commitment changed: `computeMemberSetHash(members.map(m => m.device_id))` kept
+ * compiling and kept returning a plausible-looking hash that simply never matched. Requiring the
+ * entries makes that mistake a compile error.
  */
-export function computeMemberSetHash(members: readonly (MemberKeys | string)[]): string {
+export function computeMemberSetHash(members: readonly MemberKeys[]): string {
     const joined = members.map(memberRecord).sort().join('|');
     const digest = sha256(concatBytes(DS_MEMBER_SET, utf8(joined)));
 

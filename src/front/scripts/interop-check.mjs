@@ -56,7 +56,6 @@ const actual = {
     next_chain_key: b64uEncode(advanceChain(ck)),
     msg_aad: b64uEncode(buildMessageAad(CHAT, 5, USER, SKID, 42)),
     binding: b64uEncode(identityBindingMessage(USER, DEV, k32)),
-    member_set_hash: computeMemberSetHash([DEV, RDEV, CHAT]),
     // Full roster records, not bare ids. The hash binds the key material now, so the two
     // implementations must agree on the record encoding as well as on the digest.
     member_set_hash_records: computeMemberSetHash([
