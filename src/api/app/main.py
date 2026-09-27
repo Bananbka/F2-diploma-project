@@ -17,6 +17,10 @@ from app.domains.users.routers.user_routes import router as user_router
 from app.domains.users.routers.contact_routes import router as contact_router
 from app.domains.chats.routers.chat_routes import router as chats_router
 from app.domains.chats.routers.folder_routes import router as folder_router
+from app.domains.chats.routers.invite_link_routes import (
+    chat_scoped_router as invite_link_chat_router,
+    router as invite_link_router,
+)
 from app.domains.crypto.routers.crypto_routes import router as crypto_router
 from app.domains.files.routers.file_routes import router as file_router
 from app.domains.messages.routes.messages_routes import router as messages_router
@@ -67,6 +71,8 @@ app.include_router(profile_router)
 app.include_router(user_router)
 app.include_router(contact_router)
 app.include_router(chats_router)
+app.include_router(invite_link_chat_router)
+app.include_router(invite_link_router)
 app.include_router(folder_router)
 app.include_router(messages_router)
 app.include_router(ws_router)

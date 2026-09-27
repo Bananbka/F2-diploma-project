@@ -65,6 +65,9 @@ class AuditEvent(str, enum.Enum):
     PARTICIPANTS_REMOVED = "participants_removed"
     OWNERSHIP_TRANSFERRED = "ownership_transferred"
     CHAT_DELETED = "chat_deleted"
+    INVITE_LINK_CREATED = "invite_link_created"
+    INVITE_LINK_REVOKED = "invite_link_revoked"
+    INVITE_LINK_JOINED = "invite_link_joined"
 
 
 async def record(
