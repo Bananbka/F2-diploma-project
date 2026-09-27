@@ -4,6 +4,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from sqlalchemy.ext.asyncio import AsyncSession
 from redis.asyncio import Redis
 
+from app.core.rate_limit import enforce_rate_limit
 from app.core.responses import SuccessResponse
 from app.domains.chats.services.chat_services import get_chat_participants_ids
 from app.domains.messages.schemas.messages_schemas import MessageResponse, MessageCreateRequest, MessageUpdateRequest
@@ -17,6 +18,12 @@ from app.infrastructure.redis import get_redis
 
 router = APIRouter(prefix="/messages", tags=["Messages"])
 
+# Generous enough not to touch normal chat use, but bounded so a compromised or buggy client
+# cannot flood a chat or hammer envelope validation. Per user, not per chat, since fan-out already
+# resolves per-participant regardless of which chat a burst targets.
+MESSAGE_WRITE_WINDOW = 60
+MESSAGE_WRITE_LIMIT = 300
+
 
 # MESSAGES CRUD
 @router.post("/", response_model=SuccessResponse[MessageResponse])
@@ -25,6 +32,15 @@ async def create_message(
         db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
         mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db)
 ):
+    await enforce_rate_limit(
+        redis,
+        scope="message-send",
+        identifier=str(user.id),
+        limit=MESSAGE_WRITE_LIMIT,
+        window_seconds=MESSAGE_WRITE_WINDOW,
+        message="You are sending messages too quickly. Please slow down.",
+    )
+
     new_msg = await messages_service.send_message(db, mongo_db, user.id, message_in)
 
     participant_ids = await get_chat_participants_ids(db, new_msg.chat_id)
@@ -49,6 +65,15 @@ async def edit_message(
         db: AsyncSession = Depends(get_db), mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
         redis: Redis = Depends(get_redis)
 ):
+    await enforce_rate_limit(
+        redis,
+        scope="message-send",
+        identifier=str(user.id),
+        limit=MESSAGE_WRITE_LIMIT,
+        window_seconds=MESSAGE_WRITE_WINDOW,
+        message="You are sending messages too quickly. Please slow down.",
+    )
+
     upd_msg = await messages_service.update_message(db, mongo_db, user.id, message_id, message_in)
 
     participant_ids = await get_chat_participants_ids(db, upd_msg.chat_id)

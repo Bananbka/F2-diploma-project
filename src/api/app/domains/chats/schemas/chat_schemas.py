@@ -2,9 +2,32 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.core.config import settings
 from app.domains.chats.models import ChatType, ParticipantRole
+
+
+def _validate_avatar_url(v: str | None) -> str | None:
+    """Anchor an avatar url to the configured avatar bucket, the same way `Attachment.url` is
+    anchored to the message bucket in `messages_schemas.py`.
+
+    Not exploitable today — the CSP's `img-src 'self' data:` blocks any external image load — but
+    an arbitrary string here is still an unvalidated field a future consumer (or a relaxed CSP)
+    could turn into an open redirect or SSRF-adjacent surface. Anchoring costs nothing.
+    """
+    if v is None:
+        return v
+
+    prefix = f"{settings.MINIO_URL}/{settings.MINIO_AVATAR_BUCKET}/"
+    if not v.startswith(prefix):
+        raise ValueError("avatar_url must point at the avatar bucket.")
+
+    object_key = v[len(prefix):]
+    if not object_key or "/" in object_key:
+        raise ValueError("avatar_url must reference a single object key.")
+
+    return v
 
 
 class PrivateChatCreateRequest(BaseModel):
@@ -18,6 +41,11 @@ class GroupChatCreateRequest(BaseModel):
     description: str | None = Field(None, max_length=2000)
     avatar_url: str | None = Field(None, max_length=1024)
     participant_ids: list[uuid.UUID] = Field(default_factory=list, max_length=256)
+
+    @field_validator("avatar_url")
+    @classmethod
+    def _v_avatar_url(cls, v: str | None) -> str | None:
+        return _validate_avatar_url(v)
 
 
 class ChatParticipantResponse(BaseModel):
@@ -56,9 +84,14 @@ class ChannelCreateRequest(BaseModel):
     """
 
     title: str = Field(..., min_length=1, max_length=255)
-    description: str | None = None
-    avatar_url: str | None = None
+    description: str | None = Field(None, max_length=2000)
+    avatar_url: str | None = Field(None, max_length=1024)
     subscriber_ids: list[uuid.UUID] = Field(default_factory=list, max_length=1024)
+
+    @field_validator("avatar_url")
+    @classmethod
+    def _v_avatar_url(cls, v: str | None) -> str | None:
+        return _validate_avatar_url(v)
 
 
 class UserListRequest(BaseModel):

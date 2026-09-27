@@ -44,6 +44,12 @@ router = APIRouter(prefix="/crypto", tags=["Crypto"])
 IDENTITY_PUBLISH_WINDOW = 3600
 IDENTITY_PUBLISH_LIMIT = 5
 
+# Lighter than identity publication: publishing a chain is routine (once per epoch per sender,
+# lazily on first send) rather than something that re-keys other members, but it is still one
+# grant-wrapping-and-verification pass per member device, so it is not left unbounded either.
+SENDER_KEY_PUBLISH_WINDOW = 300
+SENDER_KEY_PUBLISH_LIMIT = 60
+
 
 @router.post("/identity", response_model=SuccessResponse[PublicKeyResponse])
 async def publish_identity(
@@ -341,12 +347,22 @@ async def publish_sender_key(
     epoch: int = Path(..., ge=1, description="Epoch to publish into"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ):
     """Publish a chain for this epoch, with one wrapped copy per member device.
 
     Done lazily on first send rather than at rotation time, so a member who never sends never pays
     the wrapping cost and rotation never waits for anyone to be online.
     """
+    await enforce_rate_limit(
+        redis,
+        scope="publish-sender-key",
+        identifier=str(user.id),
+        limit=SENDER_KEY_PUBLISH_LIMIT,
+        window_seconds=SENDER_KEY_PUBLISH_WINDOW,
+        message="Too many sender-key publications. Please slow down.",
+    )
+
     await messages_service.get_chat_or_403(db, chat_id, user.id)
 
     distribution = await epoch_service.publish_sender_key(

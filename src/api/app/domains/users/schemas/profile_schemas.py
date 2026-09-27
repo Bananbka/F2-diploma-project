@@ -2,6 +2,8 @@ import re
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.core.config import settings
+
 
 class ProfileRequestSchema(BaseModel):
     """Partial profile update.
@@ -17,6 +19,26 @@ class ProfileRequestSchema(BaseModel):
     # much as the request body allows.
     bio: str | None = Field(None, max_length=500)
     avatar_url: str | None = Field(None, max_length=1024)
+
+    @field_validator("avatar_url")
+    @classmethod
+    def validate_avatar_url(cls, v: str | None) -> str | None:
+        """Anchor to the avatar bucket, the same way `Attachment.url` is anchored in
+        `messages_schemas.py`. Not exploitable today under the current CSP, but an unvalidated
+        client-controlled url is worth closing regardless.
+        """
+        if v is None:
+            return v
+
+        prefix = f"{settings.MINIO_URL}/{settings.MINIO_AVATAR_BUCKET}/"
+        if not v.startswith(prefix):
+            raise ValueError("avatar_url must point at the avatar bucket.")
+
+        object_key = v[len(prefix):]
+        if not object_key or "/" in object_key:
+            raise ValueError("avatar_url must reference a single object key.")
+
+        return v
 
     @field_validator("username")
     @classmethod

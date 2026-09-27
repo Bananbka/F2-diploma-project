@@ -380,6 +380,54 @@ async def add_chat_participants(
     user_ids: list[uuid.UUID],
     mongo_db=None,
 ) -> tuple[int, "ChatKeyEpoch | None"]:
+    """Add participants, enforcing the encrypted-group member cap when the chat is encrypted.
+
+    `enable_encryption` only checks the cap at the moment encryption is turned on — nothing stopped
+    an owner from enabling it at 5 members and then adding past `MAX_E2E_GROUP_MEMBERS` afterwards,
+    which breaks the sender-key cost invariant (`S x (N-1)` grants per epoch) the cap exists to
+    bound. Only encrypted chats are capped; plain groups have no such limit.
+
+    The count-then-insert below is check-then-act, so it takes `FOR UPDATE` on the chat's crypto
+    settings row first: a second concurrent call for the same chat blocks until the first commits,
+    at which point its `count()` observes the first call's inserts. Without the lock, two concurrent
+    calls near the cap could both read the same count, both pass, and both commit, overshooting it.
+    """
+    crypto_settings = (
+        await db.execute(
+            select(ChatCryptoSettings)
+            .where(ChatCryptoSettings.chat_id == chat_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if (
+        crypto_settings is not None
+        and crypto_settings.crypto_mode == CryptoMode.SENDER_KEYS_V1
+    ):
+        current_count = await db.scalar(
+            select(func.count())
+            .select_from(ChatParticipant)
+            .where(ChatParticipant.chat_id == chat_id)
+        )
+        already_in = set(
+            (
+                await db.execute(
+                    select(ChatParticipant.user_id).where(
+                        ChatParticipant.chat_id == chat_id,
+                        ChatParticipant.user_id.in_(user_ids),
+                    )
+                )
+            ).scalars()
+        )
+        joining = len(set(user_ids) - already_in)
+
+        if current_count + joining > epoch_service.MAX_E2E_GROUP_MEMBERS:
+            raise AppException(
+                400,
+                "GROUP_TOO_LARGE",
+                f"Encrypted chats are limited to {epoch_service.MAX_E2E_GROUP_MEMBERS} members "
+                f"because key distribution cost grows with the square of the membership.",
+            )
+
     stmt = (
         postgresql.insert(ChatParticipant)
         .values(

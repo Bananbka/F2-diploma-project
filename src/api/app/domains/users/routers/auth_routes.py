@@ -65,6 +65,12 @@ VERIFY_PER_IP = 20
 REGISTER_WINDOW = 3600
 REGISTER_PER_IP = 5
 
+# `change-password` checks `old_password` against an authenticated session, so it has no IP-scoped
+# limit to pair with the account-scoped one — an attacker with a stolen session cookie has no other
+# address to spread guesses across. Same window/count as the account-scoped login limit.
+CHANGE_PASSWORD_WINDOW = 300
+CHANGE_PASSWORD_PER_ACCOUNT = 8
+
 
 ### AUTHENTICATION
 @router.post("/register", response_model=SuccessResponse[UserResponse])
@@ -472,8 +478,24 @@ async def change_password(
     redis: Redis = Depends(get_redis),
     mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
 ):
+    await enforce_rate_limit(
+        redis,
+        scope="change-password",
+        identifier=str(current_user.id),
+        limit=CHANGE_PASSWORD_PER_ACCOUNT,
+        window_seconds=CHANGE_PASSWORD_WINDOW,
+        message="Too many failed attempts. Please wait and try again.",
+    )
+
     if not verify_password(user_data.old_password, current_user.hashed_password):
         raise AppException(401, "INVALID_PASSWORD", "Invalid password.")
+
+    await reset_rate_limit(
+        redis,
+        scope="change-password",
+        identifier=str(current_user.id),
+        window_seconds=CHANGE_PASSWORD_WINDOW,
+    )
 
     current_user.hashed_password = get_password_hash(user_data.new_password)
 

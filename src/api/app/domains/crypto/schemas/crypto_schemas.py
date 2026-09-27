@@ -8,6 +8,17 @@ from app.domains.crypto.reference.primitives import b64u_decode
 RAW_KEY_BYTES = 32
 SIGNATURE_BYTES = 64
 
+# The sealed bundle is a handful of raw key bytes (X25519 + Ed25519 private halves, a handful of
+# key IDs) under AES-GCM, base64url-encoded — a few hundred bytes in every fixture and interop
+# vector in this codebase. 16 KiB of base64 is a wide margin over that while still bounding a
+# field that was previously an arbitrary-length string in a request body.
+ENCRYPTED_BUNDLE_MAX_LENGTH = 16384
+
+# The only keys `wrap_private_bundle` (and its client-side counterpart) ever emit. Anything else
+# is either a typo the client will never be able to unwrap, or an attempt to smuggle unbounded data
+# through a dict field that carries no size limit of its own.
+KDF_PARAM_KEYS = {"kdf", "m", "t", "p", "salt", "nonce"}
+
 
 def _b64u_of_length(value: str, expected: int, label: str) -> str:
     try:
@@ -39,7 +50,7 @@ class IdentityPublishRequest(BaseModel):
     signed_prekey_public: str | None = None
     signed_prekey_signature: str | None = None
 
-    encrypted_private_bundle: str
+    encrypted_private_bundle: str = Field(..., max_length=ENCRYPTED_BUNDLE_MAX_LENGTH)
     kdf_params: dict
 
     @field_validator("identity_public_key")
@@ -77,6 +88,13 @@ class IdentityPublishRequest(BaseModel):
             if field not in v:
                 raise ValueError(f"kdf_params missing '{field}'")
 
+        # Unknown keys have nowhere to go — the client only ever reads the six named above — so
+        # they are either a typo the client will never reproduce, or an attempt to smuggle
+        # unbounded data through a dict with no size limit of its own.
+        extra = set(v) - KDF_PARAM_KEYS
+        if extra:
+            raise ValueError(f"kdf_params has unexpected keys: {sorted(extra)}")
+
         if int(v["m"]) < 19456 or int(v["t"]) < 2:
             raise ValueError("argon2id parameters below minimum (m>=19456 KiB, t>=2)")
 
@@ -107,7 +125,7 @@ class RewrappedIdentity(BaseModel):
     """
 
     device_id: uuid.UUID
-    encrypted_private_bundle: str
+    encrypted_private_bundle: str = Field(..., max_length=ENCRYPTED_BUNDLE_MAX_LENGTH)
     kdf_params: dict
 
     @field_validator("kdf_params")
@@ -119,6 +137,10 @@ class RewrappedIdentity(BaseModel):
         for field in ("m", "t", "p", "salt", "nonce"):
             if field not in v:
                 raise ValueError(f"kdf_params missing '{field}'")
+
+        extra = set(v) - KDF_PARAM_KEYS
+        if extra:
+            raise ValueError(f"kdf_params has unexpected keys: {sorted(extra)}")
 
         if int(v["m"]) < 19456 or int(v["t"]) < 2:
             raise ValueError("argon2id parameters below minimum (m>=19456 KiB, t>=2)")
