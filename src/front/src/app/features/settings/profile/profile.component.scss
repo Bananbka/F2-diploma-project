@@ -172,13 +172,21 @@
 }
 
 .device-action {
+    display: inline-flex;
     flex-shrink: 0;
+    align-items: center;
+    gap: 0.3125rem;
     padding: 0.375rem 0.625rem;
     background: none;
     border: none;
     border-radius: var(--radius-lg);
     color: var(--muted-foreground);
     font-size: 0.75rem;
+
+    lucide-icon {
+        width: 0.875rem;
+        height: 0.875rem;
+    }
 
     &:hover:not(:disabled) {
         background: var(--danger-surface);
@@ -197,10 +205,23 @@
         color: var(--danger);
         font-weight: 600;
     }
+
+    // Rotation is routine key hygiene, not a destructive action — it gets the primary tint on
+    // hover rather than the danger one revoke/confirm use.
+    &.is-neutral:hover:not(:disabled) {
+        background: color-mix(in srgb, var(--primary) 15%, transparent);
+        color: var(--primary);
+    }
 }
 
 .error-line {
     margin: 0.75rem 0 0;
     color: var(--danger);
+    font-size: 0.8125rem;
+}
+
+.saved-line {
+    margin: 0.75rem 0 0;
+    color: var(--ok);
     font-size: 0.8125rem;
 }

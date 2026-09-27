@@ -44,6 +44,32 @@ export interface IdentityBundle {
     readonly identityPrivate: Uint8Array;
     readonly identityPublic: Uint8Array;
     readonly identityKeySignature: Uint8Array;
+    // Medium-term X25519 prekey. Present from `generateIdentity` onward (see its docstring) so its
+    // private half is already inside the sealed bundle by the time a rotation needs somewhere to
+    // put a new one. Optional because a bundle unwrapped from storage sealed before rotation was
+    // re-enabled has none — see `unwrapPrivateBundle` — and a throwaway chain identity (minted to
+    // sign a single sender-key distribution) has no business publishing one either.
+    readonly prekeyPrivate?: Uint8Array;
+    readonly prekeyPublic?: Uint8Array;
+    readonly signedPrekeySignature?: Uint8Array;
+    // The *previous* generation's prekey private half, retained for exactly one rotation cycle —
+    // see crypto-spec-v1.md §2.1.2/§2.2 and `KeyStoreService.rotatePrekey`. A grant published
+    // against the outgoing signed prekey but not yet ingested at the moment of rotation would
+    // otherwise become permanently unopenable. Absent for every bundle before its first rotation,
+    // and discarded (replaced by the generation being superseded) on every rotation after that —
+    // it is a one-cycle grace window, not an accumulated history.
+    readonly prevPrekeyPrivate?: Uint8Array;
+}
+
+/** The private-key fields `wrapPrivateBundle`/`sealPrivateBundle` actually seal. Deliberately not
+ *  all of `IdentityBundle` — the public halves and the identity-binding signature never enter the
+ *  sealed blob, so a caller re-sealing an already-published bundle (rotation, change-password)
+ *  does not need to carry them around just to satisfy the type. */
+export interface PrivateBundleFields {
+    readonly signingPrivate: Uint8Array;
+    readonly identityPrivate: Uint8Array;
+    readonly prekeyPrivate?: Uint8Array;
+    readonly prevPrekeyPrivate?: Uint8Array;
 }
 
 export interface KdfParams {
@@ -118,20 +144,37 @@ export function generateSignedPrekey(
     };
 }
 
-export function generateIdentity(userId: string, deviceId: string): IdentityBundle {
+/**
+ * Generate a device's full keypair set. Client half of `reference/identity.generate_identity`.
+ *
+ * `withPrekey = true` by default: a real client mints the signed prekey at registration time,
+ * alongside the identity keypair, precisely so its private half is available immediately after
+ * unlock with no extra password prompt — see `KeyStoreService.rotatePrekey` and
+ * crypto-spec-v1.md §2.1.2/§2.2. Pass `withPrekey = false` to model a bundle sealed before prekey
+ * rotation was re-enabled, or to build a throwaway identity that has no business publishing a
+ * prekey at all (e.g. a chain identity minted to sign one sender-key distribution).
+ */
+export function generateIdentity(userId: string, deviceId: string, withPrekey = true): IdentityBundle {
     const signingPrivate = ed25519.utils.randomSecretKey();
     const identityPrivate = x25519.utils.randomSecretKey();
 
     const signingPublic = ed25519.getPublicKey(signingPrivate);
     const identityPublic = x25519.getPublicKey(identityPrivate);
 
-    return {
+    const bundle: IdentityBundle = {
         signingPrivate,
         signingPublic,
         identityPrivate,
         identityPublic,
         identityKeySignature: ed25519.sign(identityBindingMessage(userId, deviceId, identityPublic), signingPrivate),
     };
+
+    if (!withPrekey) {
+        return bundle;
+    }
+
+    const { prekeyPrivate, prekeyPublic, signature } = generateSignedPrekey(signingPrivate, userId, deviceId);
+    return { ...bundle, prekeyPrivate, prekeyPublic, signedPrekeySignature: signature };
 }
 
 export function verifyIdentityBinding(
@@ -164,24 +207,50 @@ async function importAesKey(raw: Uint8Array): Promise<CryptoKey> {
 export interface WrappedBundle {
     encryptedPrivateBundle: string;
     kdfParams: KdfParams;
+    // The Argon2id-derived key this call just produced (or reused). Never sent over the wire —
+    // callers pick `encryptedPrivateBundle`/`kdfParams` off this explicitly — but keeping it here
+    // lets `KeyStoreService` hold onto it in memory and re-seal later (rotation) without prompting
+    // for the password again.
+    kek: Uint8Array;
 }
 
-export async function wrapPrivateBundle(bundle: IdentityBundle, password: string): Promise<WrappedBundle> {
-    const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
+async function encryptBundlePayload(
+    bundle: PrivateBundleFields,
+    kekRaw: Uint8Array
+): Promise<{ ciphertext: Uint8Array; nonce: Uint8Array }> {
     const nonce = crypto.getRandomValues(new Uint8Array(GCM_NONCE_BYTES));
+    const kek = await importAesKey(kekRaw);
 
-    const kek = await importAesKey(deriveKek(password, salt));
+    const payload: Record<string, string> = {
+        signing_private: b64uEncode(bundle.signingPrivate),
+        identity_private: b64uEncode(bundle.identityPrivate),
+    };
+    // Absent, not null, when there is no prekey — matches `wrap_private_bundle` in the Python
+    // reference, so a bundle sealed before rotation existed and one sealed by a client that chose
+    // not to publish a prekey are indistinguishable from a bundle with genuinely nothing to
+    // unwrap here.
+    if (bundle.prekeyPrivate) {
+        payload['prekey_private'] = b64uEncode(bundle.prekeyPrivate);
+    }
+    // Same convention: absent, not null, when there is no retained previous generation — every
+    // bundle before this device's first rotation, and any bundle re-sealed after two rotations
+    // have elapsed without the grace-window key being carried forward.
+    if (bundle.prevPrekeyPrivate) {
+        payload['prev_prekey_private'] = b64uEncode(bundle.prevPrekeyPrivate);
+    }
 
-    const plaintext = utf8(
-        JSON.stringify({
-            signing_private: b64uEncode(bundle.signingPrivate),
-            identity_private: b64uEncode(bundle.identityPrivate),
-        })
-    );
-
+    const plaintext = utf8(JSON.stringify(payload));
     const ciphertext = new Uint8Array(
         await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce as BufferSource }, kek, plaintext as BufferSource)
     );
+
+    return { ciphertext, nonce };
+}
+
+export async function wrapPrivateBundle(bundle: PrivateBundleFields, password: string): Promise<WrappedBundle> {
+    const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
+    const kekRaw = deriveKek(password, salt);
+    const { ciphertext, nonce } = await encryptBundlePayload(bundle, kekRaw);
 
     return {
         encryptedPrivateBundle: b64uEncode(ciphertext),
@@ -193,15 +262,51 @@ export async function wrapPrivateBundle(bundle: IdentityBundle, password: string
             salt: b64uEncode(salt),
             nonce: b64uEncode(nonce),
         },
+        kek: kekRaw,
     };
 }
 
-/** Inverse of wrapPrivateBundle. Throws on a wrong password (GCM tag failure). */
+/**
+ * Re-seal a bundle under a KEK already derived from a previous unlock or `wrapPrivateBundle` call
+ * — the point is to rotate the signed prekey (see `KeyStoreService.rotatePrekey`) without ever
+ * needing the password again, per crypto-spec-v1.md §2.1.2. Reuses the existing Argon2id
+ * salt/parameters, since the password has not changed and re-deriving from it would just recompute
+ * the same KEK at real cost; only the AES-GCM nonce, and the plaintext (now carrying the new
+ * `prekeyPrivate`), are fresh.
+ */
+export async function sealPrivateBundle(
+    bundle: PrivateBundleFields,
+    kek: Uint8Array,
+    kdfParams: KdfParams
+): Promise<WrappedBundle> {
+    const { ciphertext, nonce } = await encryptBundlePayload(bundle, kek);
+
+    return {
+        encryptedPrivateBundle: b64uEncode(ciphertext),
+        kdfParams: { ...kdfParams, nonce: b64uEncode(nonce) },
+        kek,
+    };
+}
+
+/**
+ * Inverse of wrapPrivateBundle/sealPrivateBundle. Throws on a wrong password (GCM tag failure).
+ *
+ * `prekeyPrivate` is only present in the result when the sealed plaintext carried one — a bundle
+ * sealed before prekey rotation was re-enabled has no such field, and that absence (not a null) is
+ * the entire backward-compat story: there is nothing server-side to migrate, since the blob is
+ * opaque, so the field simply starts appearing the next time this device's bundle is re-sealed.
+ */
 export async function unwrapPrivateBundle(
     wrapped: string,
     kdfParams: KdfParams,
     password: string
-): Promise<{ signingPrivate: Uint8Array; identityPrivate: Uint8Array }> {
+): Promise<{
+    signingPrivate: Uint8Array;
+    identityPrivate: Uint8Array;
+    prekeyPrivate?: Uint8Array;
+    prevPrekeyPrivate?: Uint8Array;
+    kek: Uint8Array;
+}> {
     const kekRaw = argon2id(utf8(password), b64uDecode(kdfParams.salt), {
         t: kdfParams.t,
         m: kdfParams.m,
@@ -218,12 +323,28 @@ export async function unwrapPrivateBundle(
     const payload = JSON.parse(fromUtf8(new Uint8Array(plaintext))) as {
         signing_private: string;
         identity_private: string;
+        prekey_private?: string;
+        prev_prekey_private?: string;
     };
 
-    return {
+    const result: {
+        signingPrivate: Uint8Array;
+        identityPrivate: Uint8Array;
+        prekeyPrivate?: Uint8Array;
+        prevPrekeyPrivate?: Uint8Array;
+        kek: Uint8Array;
+    } = {
         signingPrivate: b64uDecode(payload.signing_private),
         identityPrivate: b64uDecode(payload.identity_private),
+        kek: kekRaw,
     };
+    if (payload.prekey_private !== undefined) {
+        result.prekeyPrivate = b64uDecode(payload.prekey_private);
+    }
+    if (payload.prev_prekey_private !== undefined) {
+        result.prevPrekeyPrivate = b64uDecode(payload.prev_prekey_private);
+    }
+    return result;
 }
 
 /**

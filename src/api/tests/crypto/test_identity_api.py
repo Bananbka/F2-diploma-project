@@ -293,18 +293,7 @@ async def test_prekey_rotation_requires_a_valid_signature():
         bundle.identity_public
     )
 
-    # Rotation stays disabled until the sealed bundle can carry `prekey_private`. Until then a
-    # rotated prekey has no private half anywhere, so every grant wrapped to it is unopenable.
-    # A 410 rather than a 404 so a client built against the old contract gets a real answer.
-    r = await client.put(
-        "/crypto/identity/prekey",
-        json={
-            "device_id": str(device_id),
-            "signed_prekey_public": b64u_encode(prekey_public),
-            "signed_prekey_signature": b64u_encode(good_sig),
-        },
-    )
-    assert r.status_code == 410, r.text
-    assert r.json()["error_code"] == "PREKEY_ROTATION_DISABLED"
+    # Rotation itself is covered end-to-end in test_prekey_rotation.py, including the same
+    # signature-verification failures as above but against `PUT /crypto/identity/prekey`.
 
     await client.aclose()

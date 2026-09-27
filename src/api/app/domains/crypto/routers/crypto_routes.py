@@ -50,6 +50,13 @@ IDENTITY_PUBLISH_LIMIT = 5
 SENDER_KEY_PUBLISH_WINDOW = 300
 SENDER_KEY_PUBLISH_LIMIT = 60
 
+# Rotation does not re-key any chat (§5.2 of the spec: role and prekey changes are not
+# confidentiality boundaries), so it cannot amplify against other members the way identity
+# publication does. Still bounded, because it rewrites the stored private bundle: a limit here
+# keeps a compromised session from being used to hammer that write.
+PREKEY_ROTATE_WINDOW = 3600
+PREKEY_ROTATE_LIMIT = 10
+
 
 @router.post("/identity", response_model=SuccessResponse[PublicKeyResponse])
 async def publish_identity(
@@ -126,38 +133,53 @@ async def get_my_identities(
     return SuccessResponse(data=keys)
 
 
-@router.put(
-    "/identity/prekey",
-    response_model=SuccessResponse[PublicKeyResponse],
-    deprecated=True,
-)
+@router.put("/identity/prekey", response_model=SuccessResponse[PublicKeyResponse])
 async def rotate_prekey(
     data: PrekeyRotateRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+    mongo_db=Depends(get_mongo_db),
 ):
-    """Disabled: rotating a prekey currently makes a device permanently unreadable.
+    """Rotate this device's medium-term signed prekey.
 
-    Senders wrap grants to `signed_prekey_public ?? identity_public_key`, but the private half of
-    a rotated prekey has nowhere to live — the bundle is sealed under an Argon2id key derived from
-    the password, and the password is not kept after unlock. So the moment a device publishes a
-    prekey, every grant addressed to it becomes unopenable and every message reports `no_key`.
-    This shipped once, was reverted, and the columns were cleared in the database.
+    Re-enabled now that the sealed private bundle can carry `prekey_private` (generated at
+    registration, alongside the identity keypair — see crypto-spec-v1.md §2.2). Previously this
+    endpoint accepted only the new public prekey and its signature, which rotated the ECDH
+    recipient grants wrap to without anywhere for the matching private half to live; every grant
+    addressed to the device became permanently unopenable. That shipped once, was reverted, and
+    the prekey columns were cleared.
 
-    The endpoint stays mounted and returns 410 rather than being deleted, because a client built
-    against the old contract must get a clear refusal instead of a 404 it might read as a routing
-    mistake — and because silently accepting the rotation is how the original outage happened.
+    The fix is atomicity, not just storage: the client re-seals its *entire* bundle (now including
+    the freshly generated prekey's private half) under the still-in-memory session key and submits
+    the new public prekey, its binding signature, and the re-sealed bundle together.
+    `identity_service.rotate_prekey` writes both in one transaction, so there is no window in which
+    the public prekey has rotated but the stored bundle does not yet match it.
 
-    The signature machinery around it (`DS_PREKEY_BIND`, `verify_signed_prekey`, the interop
-    vector, the spec section) is correct and deliberately kept. Re-enable this only once the
-    private bundle carries `prekey_private` from registration onward.
+    Does not touch the identity keypair, its version, or any existing grant — role and key-medium
+    changes are not confidentiality boundaries (§5.2), so nothing here forces a chat re-key.
     """
-    raise AppException(
-        410,
-        "PREKEY_ROTATION_DISABLED",
-        "Signed-prekey rotation is disabled: the private half cannot yet be stored, so rotating "
-        "would make every key grant addressed to this device permanently unopenable.",
+    await enforce_rate_limit(
+        redis,
+        scope="rotate-prekey",
+        identifier=str(user.id),
+        limit=PREKEY_ROTATE_LIMIT,
+        window_seconds=PREKEY_ROTATE_WINDOW,
+        message="The signed prekey was rotated very recently. Please wait before rotating again.",
     )
+
+    key = await identity_service.rotate_prekey(db, user.id, data)
+
+    # A rotated prekey is a routine key-lifecycle event, not an incident, but it still changes what
+    # future grants to this device are wrapped under — worth being able to reconstruct later.
+    await audit.record(
+        mongo_db,
+        AuditEvent.PREKEY_ROTATED,
+        user_id=user.id,
+        details={"device_id": str(data.device_id)},
+    )
+
+    return SuccessResponse(data=key)
 
 
 @router.post("/identity/{device_id}/revoke", response_model=SuccessResponse[dict])

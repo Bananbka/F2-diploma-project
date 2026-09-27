@@ -82,7 +82,11 @@ prekey signature could be replayed as an identity-key binding, and vice versa.
 
 The server MUST verify this on rotation, against the signing key **already recorded** for that device
 rather than one supplied in the same request; a self-certifying rotation would prove nothing. Rotation
-MUST NOT change the identity key, supersede the key version, or invalidate existing grants.
+MUST NOT change the identity key or supersede the key version. It MUST NOT invalidate a grant already
+ingested by the recipient device. A grant published against the *previous* signed prekey but not yet
+ingested at the moment of rotation remains openable for exactly one further rotation cycle — see
+§2.1.2's `prev_prekey_private` grace window — but not beyond that: a grant that survives two rotations
+still un-ingested is not guaranteed openable.
 
 This matters because §7 prefers the signed prekey over the identity key as the ECDH recipient. An
 unverified prekey would let anyone able to reach the rotation endpoint substitute a key they hold and
@@ -92,15 +96,61 @@ The signature MUST be verified wherever a prekey enters the system, which includ
 path and not only rotation. Verifying on rotation alone left the identical substitution reachable
 through registration.
 
-> **Rotation is currently disabled** (`PUT /crypto/identity/prekey` returns 410). Grants are wrapped
-> to the prekey when one is present, but the private half has nowhere to live: the bundle is sealed
-> under an Argon2id key derived from the password, and the password is not retained after unlock, so
-> re-sealing it to store a rotated private half would mean re-prompting on every rotation. A device
-> that publishes a prekey therefore makes every grant addressed to it unopenable.
->
-> Everything in this section is implemented and verified and should be kept. Re-enable rotation only
-> once the private bundle carries `prekey_private` from registration onward. Until then the identity
-> key is the grant recipient, and forward secrecy across prekey rotations is not claimed.
+### 2.1.2 Rotation
+
+`PUT /crypto/identity/prekey` rotates the prekey. It was disabled for a full incident cycle — see
+below — and is re-enabled now that the private bundle (§2.2) has somewhere to keep the new prekey's
+private half. Rotation MUST NOT change the identity key or supersede the key version; it changes
+exactly the prekey columns and the stored bundle, atomically.
+
+Rotation MUST NOT invalidate a grant the recipient device has already ingested. It also gives a
+one-cycle grace window to a grant that was published against the *outgoing* prekey but not yet
+ingested when rotation happens: the client carries that prekey's private half forward as
+`prev_prekey_private` (§2.2) for exactly one further rotation. A grant still un-ingested after a
+*second* rotation is not guaranteed openable — `prev_prekey_private` holds only the immediately
+preceding generation, not an unbounded history.
+
+The client:
+
+1. Generates a fresh X25519 keypair.
+2. Signs the public half under §2.1.1 with the device's *existing* signing key.
+3. Re-seals its **entire** private bundle — the same JSON shape as §2.2, now with the new
+   `prekey_private`, and with the *outgoing* `prekey_private` carried forward as
+   `prev_prekey_private` (dropping whatever `prev_prekey_private` held before, if any) — under the
+   KEK it already holds from unlock. No password prompt is needed: rotation happens with the
+   session key already in memory.
+4. Submits all three together:
+
+```json
+PUT /crypto/identity/prekey
+{
+  "device_id": "<uuid>",
+  "signed_prekey_public": "<b64u, 32 bytes>",
+  "signed_prekey_signature": "<b64u, 64 bytes>",
+  "encrypted_private_bundle": "<b64u>",
+  "kdf_params": {"kdf":"argon2id","m":...,"t":...,"p":...,"salt":"<b64u>","nonce":"<b64u>"}
+}
+```
+
+The server verifies `signed_prekey_signature` against the signing key **already on record** for
+the device (never one supplied in the same request — see §2.1.1), then writes the new
+`signed_prekey_public`/`signed_prekey_signature`/`signed_prekey_created_at` and the new
+`encrypted_private_bundle`/`kdf_params` in one transaction. Splitting that into two requests — or
+two separate writes on the server — is exactly the bug that disabled this endpoint the first time:
+a public prekey rotates with no private half anywhere (or with the bundle still holding the
+previous one), and every grant addressed to the device becomes permanently unopenable, because §7
+prefers the prekey once one is present. The server cannot verify the bundle actually opens or that
+it contains the private half it claims to — the blob is opaque by design — but atomicity with the
+public-key write is what it *can* guarantee, and it is what the fix turns on.
+
+**Why rotation was disabled, for the historical record.** Grants were wrapped to
+`signed_prekey_public ?? identity_public_key`, but the private half had nowhere to live: the
+bundle was sealed under an Argon2id key derived from the password, and the password is not
+retained after unlock, so re-sealing it to store a rotated private half would have meant
+re-prompting on every rotation. This shipped once, was reverted, and the prekey columns were
+cleared. The fix closing that gap is §2.2's `prekey_private`: generated at registration, alongside
+the identity keypair, so it is already inside the bundle — and inside the in-memory KEK's reach —
+by the time a rotation needs somewhere to put a new one.
 
 ### 2.2 Private key storage
 
@@ -109,9 +159,33 @@ key, and stored server-side as an opaque blob:
 
 ```
 KEK        = Argon2id(password, salt, m>=65536 KiB, t>=3, p=4, len=32)
-plaintext  = {"signing_private": b64u, "identity_private": b64u}
+plaintext  = {"signing_private": b64u, "identity_private": b64u, "prekey_private": b64u,
+              "prev_prekey_private": b64u}
 bundle     = AES-256-GCM(KEK, nonce, plaintext, aad=none)
 ```
+
+`prekey_private` is the private half of the signed prekey (§2, §2.1.1). A client generates it at
+registration, alongside `signing_private`/`identity_private`, so it is available immediately after
+unlock with no extra password prompt — that immediacy is what makes rotation (§2.1.2) possible
+without re-prompting for the password on every rotation.
+
+`prekey_private` MAY be absent. A bundle sealed by a client that has not yet adopted this field —
+every bundle sealed before rotation was re-enabled — has no such key, and the server has no way
+to add it: the blob is opaque, so there is nothing to migrate server-side. A client MUST treat a
+missing `prekey_private` as "this device has no usable prekey yet" and fall back to
+`identity_private` for anything a peer wrapped to the identity key, exactly as it already does when
+a peer's roster entry has no `signed_prekey_public` at all. The field starts appearing the moment
+the bundle is next re-sealed for any reason — registration of a new device, prekey rotation, or a
+change-password re-wrap — after which it is populated from then on.
+
+`prev_prekey_private` MAY be absent, and normally is: it exists only during the one-rotation grace
+window described in §2.1.2. It holds the private half of the signed prekey that rotation is about
+to supersede, carried forward exactly once so a grant published against that outgoing prekey but
+not yet ingested at rotation time can still be opened. On the *next* rotation after that, whatever
+`prev_prekey_private` held is discarded outright — it is not accumulated into a history — and the
+prekey generation being superseded by that second rotation takes its place. A client unwrapping a
+grant MUST try, in order, the current `prekey_private`, then `prev_prekey_private` if present, then
+`identity_private`, before reporting the grant unopenable.
 
 `kdf_params` MUST accompany the blob: `{"kdf":"argon2id","m","t","p","salt","nonce"}`. The server
 MUST reject `m < 19456` or `t < 2`.

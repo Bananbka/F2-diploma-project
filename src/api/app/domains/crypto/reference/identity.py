@@ -58,13 +58,32 @@ GCM_NONCE_BYTES = 12
 
 @dataclass(frozen=True)
 class IdentityBundle:
-    """A device's full keypair set. The private fields never leave the client in production."""
+    """A device's full keypair set. The private fields never leave the client in production.
+
+    `prekey_*` are optional because a bundle unwrapped from storage sealed before prekey rotation
+    was re-enabled has no prekey at all (backward compat — see `unwrap_private_bundle`), and
+    because a caller who only wants an identity/signing pair (e.g. minting a throwaway chain
+    identity to sign a sender-key distribution) has no use for one either.
+    """
 
     signing_private: bytes
     signing_public: bytes
     identity_private: bytes
     identity_public: bytes
     identity_key_signature: bytes
+    # Medium-term X25519 prekey. Generated alongside the identity keypair from registration
+    # onward so its private half is already inside the sealed bundle by the time a rotation
+    # would need somewhere to put a new one — see module docstring and crypto-spec-v1.md §2.1.1.
+    prekey_private: bytes | None = None
+    prekey_public: bytes | None = None
+    signed_prekey_signature: bytes | None = None
+    # The *previous* generation's prekey private half, retained for exactly one rotation cycle.
+    # A grant published against the old signed prekey but not yet ingested by this device at the
+    # moment of rotation would otherwise become permanently unopenable — the recipient's private
+    # half was already gone by the time it tried to unwrap. This is a one-cycle grace window, not
+    # unlimited retention: a *second* rotation discards whatever was here and replaces it with the
+    # prekey generation that is itself being superseded. See crypto-spec-v1.md §2.1.2 and §2.2.
+    prev_prekey_private: bytes | None = None
 
 
 def _raw_public(key: Ed25519PublicKey | X25519PublicKey) -> bytes:
@@ -93,7 +112,15 @@ def identity_binding_message(user_id, device_id, identity_public: bytes) -> byte
     )
 
 
-def generate_identity(user_id, device_id) -> IdentityBundle:
+def generate_identity(user_id, device_id, *, with_prekey: bool = True) -> IdentityBundle:
+    """Generate a device's full keypair set.
+
+    `with_prekey=True` by default: a real client mints the signed prekey at registration time,
+    alongside the identity keypair, precisely so its private half is available immediately after
+    unlock with no extra password prompt. Pass `with_prekey=False` to model a bundle sealed before
+    prekey rotation was re-enabled (see `unwrap_private_bundle`'s backward-compat note) or to build
+    a throwaway identity that has no business publishing a prekey at all.
+    """
     signing_private = Ed25519PrivateKey.generate()
     identity_private = X25519PrivateKey.generate()
 
@@ -104,12 +131,24 @@ def generate_identity(user_id, device_id) -> IdentityBundle:
         identity_binding_message(user_id, device_id, identity_public)
     )
 
+    prekey_private = prekey_public = prekey_signature = None
+    if with_prekey:
+        prekey_keypair = X25519PrivateKey.generate()
+        prekey_public = _raw_public(prekey_keypair.public_key())
+        prekey_private = _raw_private(prekey_keypair)
+        prekey_signature = signing_private.sign(
+            prekey_binding_message(user_id, device_id, prekey_public)
+        )
+
     return IdentityBundle(
         signing_private=_raw_private(signing_private),
         signing_public=signing_public,
         identity_private=_raw_private(identity_private),
         identity_public=identity_public,
         identity_key_signature=signature,
+        prekey_private=prekey_private,
+        prekey_public=prekey_public,
+        signed_prekey_signature=prekey_signature,
     )
 
 
@@ -191,12 +230,23 @@ def wrap_private_bundle(bundle: IdentityBundle, password: str) -> tuple[str, dic
     nonce = os.urandom(GCM_NONCE_BYTES)
     kek = derive_kek(password, salt)
 
-    plaintext = json.dumps(
-        {
-            "signing_private": b64u_encode(bundle.signing_private),
-            "identity_private": b64u_encode(bundle.identity_private),
-        }
-    ).encode("utf-8")
+    payload = {
+        "signing_private": b64u_encode(bundle.signing_private),
+        "identity_private": b64u_encode(bundle.identity_private),
+    }
+    # Absent, not null, when there is no prekey — so a bundle sealed before rotation existed and
+    # one sealed by a client that chose not to publish a prekey are indistinguishable from a
+    # bundle that genuinely has nothing to unwrap here, and `unwrap_private_bundle` treats a
+    # missing key as "no prekey" rather than as a value to fail on.
+    if bundle.prekey_private is not None:
+        payload["prekey_private"] = b64u_encode(bundle.prekey_private)
+    # Same convention: absent, not null, when there is no retained previous generation — which is
+    # every bundle before a device's first rotation, and any bundle re-sealed after two rotations
+    # have already elapsed without the grace-window key being carried forward.
+    if bundle.prev_prekey_private is not None:
+        payload["prev_prekey_private"] = b64u_encode(bundle.prev_prekey_private)
+
+    plaintext = json.dumps(payload).encode("utf-8")
 
     ciphertext = AESGCM(kek).encrypt(nonce, plaintext, None)
 
@@ -214,7 +264,15 @@ def wrap_private_bundle(bundle: IdentityBundle, password: str) -> tuple[str, dic
 def unwrap_private_bundle(
     wrapped: str, kdf_params: dict, password: str
 ) -> dict[str, bytes]:
-    """Inverse of wrap_private_bundle. Raises on a wrong password (GCM tag failure)."""
+    """Inverse of wrap_private_bundle. Raises on a wrong password (GCM tag failure).
+
+    `prekey_private` and `prev_prekey_private` are only present in the returned dict when the
+    sealed plaintext carried them. A bundle sealed before prekey rotation was re-enabled has
+    neither field — that is the entire backward-compat story here, since the server never opens
+    the blob and so has nothing to migrate: the next re-seal (rotation, or a change-password
+    re-wrap) is what adds `prekey_private`, and a second rotation after that is what adds
+    `prev_prekey_private`.
+    """
     kek = hash_secret_raw(
         secret=password.encode("utf-8"),
         salt=b64u_decode(kdf_params["salt"]),
@@ -230,10 +288,16 @@ def unwrap_private_bundle(
     )
     payload = json.loads(plaintext)
 
-    return {
+    out = {
         "signing_private": b64u_decode(payload["signing_private"]),
         "identity_private": b64u_decode(payload["identity_private"]),
     }
+    if "prekey_private" in payload:
+        out["prekey_private"] = b64u_decode(payload["prekey_private"])
+    if "prev_prekey_private" in payload:
+        out["prev_prekey_private"] = b64u_decode(payload["prev_prekey_private"])
+
+    return out
 
 
 def user_fingerprint_material(signing_publics) -> bytes:

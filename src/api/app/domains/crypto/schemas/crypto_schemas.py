@@ -32,6 +32,31 @@ def _b64u_of_length(value: str, expected: int, label: str) -> str:
     return value
 
 
+def _validate_kdf_params(v: dict) -> dict:
+    """Shared by every schema that carries a sealed private bundle.
+
+    Pins the KDF so a client cannot downgrade itself to a weak or absent derivation, and bounds
+    the parameter set to the six keys `wrap_private_bundle` (and its client-side counterpart) ever
+    emit — anything else is either a typo or an attempt to smuggle unbounded data through a dict
+    field with no size limit of its own.
+    """
+    if v.get("kdf") != "argon2id":
+        raise ValueError("kdf must be 'argon2id'")
+
+    for field in ("m", "t", "p", "salt", "nonce"):
+        if field not in v:
+            raise ValueError(f"kdf_params missing '{field}'")
+
+    extra = set(v) - KDF_PARAM_KEYS
+    if extra:
+        raise ValueError(f"kdf_params has unexpected keys: {sorted(extra)}")
+
+    if int(v["m"]) < 19456 or int(v["t"]) < 2:
+        raise ValueError("argon2id parameters below minimum (m>=19456 KiB, t>=2)")
+
+    return v
+
+
 class IdentityPublishRequest(BaseModel):
     """Publish or rotate a device's identity.
 
@@ -80,31 +105,28 @@ class IdentityPublishRequest(BaseModel):
     @field_validator("kdf_params")
     @classmethod
     def _v_kdf(cls, v: dict) -> dict:
-        # Pin the KDF so a client cannot downgrade itself to a weak or absent derivation.
-        if v.get("kdf") != "argon2id":
-            raise ValueError("kdf must be 'argon2id'")
-
-        for field in ("m", "t", "p", "salt", "nonce"):
-            if field not in v:
-                raise ValueError(f"kdf_params missing '{field}'")
-
-        # Unknown keys have nowhere to go — the client only ever reads the six named above — so
-        # they are either a typo the client will never reproduce, or an attempt to smuggle
-        # unbounded data through a dict with no size limit of its own.
-        extra = set(v) - KDF_PARAM_KEYS
-        if extra:
-            raise ValueError(f"kdf_params has unexpected keys: {sorted(extra)}")
-
-        if int(v["m"]) < 19456 or int(v["t"]) < 2:
-            raise ValueError("argon2id parameters below minimum (m>=19456 KiB, t>=2)")
-
-        return v
+        return _validate_kdf_params(v)
 
 
 class PrekeyRotateRequest(BaseModel):
+    """Rotate a device's medium-term signed prekey.
+
+    Unlike `IdentityPublishRequest`, this does NOT touch the identity keypair, its version, or any
+    existing grant — see crypto-spec-v1.md §2.1.1. What it does replace is the entire private
+    bundle: the client generates a fresh X25519 prekey, re-seals the whole bundle (now including
+    that prekey's private half) under the still-in-memory session key, and submits the new public
+    prekey, its binding signature, and the re-sealed bundle together in one request. Splitting
+    those across two requests would let the public prekey be rotated while the bundle still holds
+    the old (or no) `prekey_private` — exactly the state that made every grant addressed to this
+    device unopenable the first time this shipped.
+    """
+
     device_id: uuid.UUID
     signed_prekey_public: str
     signed_prekey_signature: str
+
+    encrypted_private_bundle: str = Field(..., max_length=ENCRYPTED_BUNDLE_MAX_LENGTH)
+    kdf_params: dict
 
     @field_validator("signed_prekey_public")
     @classmethod
@@ -115,6 +137,11 @@ class PrekeyRotateRequest(BaseModel):
     @classmethod
     def _v_prekey_sig(cls, v: str) -> str:
         return _b64u_of_length(v, SIGNATURE_BYTES, "signed_prekey_signature")
+
+    @field_validator("kdf_params")
+    @classmethod
+    def _v_kdf(cls, v: dict) -> dict:
+        return _validate_kdf_params(v)
 
 
 class RewrappedIdentity(BaseModel):
@@ -131,21 +158,7 @@ class RewrappedIdentity(BaseModel):
     @field_validator("kdf_params")
     @classmethod
     def _v_kdf(cls, v: dict) -> dict:
-        if v.get("kdf") != "argon2id":
-            raise ValueError("kdf must be 'argon2id'")
-
-        for field in ("m", "t", "p", "salt", "nonce"):
-            if field not in v:
-                raise ValueError(f"kdf_params missing '{field}'")
-
-        extra = set(v) - KDF_PARAM_KEYS
-        if extra:
-            raise ValueError(f"kdf_params has unexpected keys: {sorted(extra)}")
-
-        if int(v["m"]) < 19456 or int(v["t"]) < 2:
-            raise ValueError("argon2id parameters below minimum (m>=19456 KiB, t>=2)")
-
-        return v
+        return _validate_kdf_params(v)
 
 
 class PublicKeyResponse(BaseModel):

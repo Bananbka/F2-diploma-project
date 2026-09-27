@@ -122,6 +122,22 @@ export interface IdentityPublishRequest {
     kdf_params: Record<string, unknown>;
 }
 
+/**
+ * Rotate a device's medium-term signed prekey — `PUT /crypto/identity/prekey`.
+ *
+ * Unlike `IdentityPublishRequest`, this never touches the identity keypair or its version. The
+ * bundle here is the client's *entire* re-sealed private bundle (now carrying the freshly
+ * generated prekey's private half), submitted atomically with the new public prekey and its
+ * signature — see `KeyStoreService.rotatePrekey` and crypto-spec-v1.md §2.1.2.
+ */
+export interface PrekeyRotateRequest {
+    device_id: string;
+    signed_prekey_public: string;
+    signed_prekey_signature: string;
+    encrypted_private_bundle: string;
+    kdf_params: Record<string, unknown>;
+}
+
 export interface ChannelPostPayload {
     v: number;
     alg: string;

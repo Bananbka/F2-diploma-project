@@ -55,6 +55,7 @@ class AuditEvent(str, enum.Enum):
     # substitution looks like from the outside, so it has to leave a trace independent of the
     # client that noticed the safety number change.
     IDENTITY_PUBLISHED = "identity_published"
+    PREKEY_ROTATED = "prekey_rotated"
     DEVICE_REVOKED = "device_revoked"
     DEVICES_REVOKED_BULK = "devices_revoked_bulk"
 

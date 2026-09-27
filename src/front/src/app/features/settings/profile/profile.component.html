@@ -150,8 +150,29 @@
                             </span>
                             <span class="device-sub">
                                 Key v{{ device.version }} · added {{ device.created_at | date: 'd MMM y' }}
+                                @if (device.signed_prekey_created_at) {
+                                    · prekey rotated {{ device.signed_prekey_created_at | date: 'd MMM y' }}
+                                } @else {
+                                    · no signed prekey yet
+                                }
                             </span>
                         </span>
+
+                        <!-- Rotation re-seals the private bundle with the in-memory KEK from unlock,
+                             which only the device that unlocked it holds — so this is only offered
+                             for the current device, never for another one in the list. -->
+                        @if (device.isThis) {
+                            <button
+                                type="button"
+                                class="device-action is-neutral"
+                                [disabled]="rotatingPrekey()"
+                                aria-label="Rotate this device's signed prekey"
+                                (click)="rotatePrekey()"
+                            >
+                                <lucide-icon [img]="rotateIcon" />
+                                {{ rotatingPrekey() ? 'Rotating…' : 'Rotate prekey' }}
+                            </button>
+                        }
 
                         <!-- Revoking your own device would lock this session out of its keys with no
                              way back, so it is not offered. The last remaining device is likewise
@@ -201,9 +222,34 @@
             </p>
         }
 
+        @if (prekeyError()) {
+            <p
+                class="error-line"
+                role="alert"
+            >
+                {{ prekeyError() }}
+            </p>
+        }
+
+        @if (prekeyRotated()) {
+            <p
+                class="saved-line"
+                role="status"
+            >
+                Signed prekey rotated.
+            </p>
+        }
+
         <p class="muted small">
             Revoke a device you no longer have. Your encrypted chats re-key immediately, so nothing sent afterwards can
             be read with the keys it holds — but it keeps whatever it already received, which no server can take back.
+        </p>
+
+        <p class="muted small">
+            Rotating your signed prekey gives forward secrecy to future messages: after one further rotation, someone
+            who steals this device's keys can no longer use them to open messages sent under an older prekey. (The most
+            recently retired prekey is kept for one extra rotation, so a message already in flight when you rotate still
+            arrives.) It does not change your identity key or re-key any chat.
         </p>
     </section>
 </div>

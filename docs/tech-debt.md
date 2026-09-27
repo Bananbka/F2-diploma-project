@@ -46,23 +46,42 @@ feature, not a fix.
 
 ---
 
-## 3. Signed-prekey rotation is disabled
+## 3. Signed-prekey rotation — resolved server-side, client fallback still pending
 
-`PUT /crypto/identity/prekey` returns 410. See *Known broken areas* in `CLAUDE.md` for the full
-account.
+`PUT /crypto/identity/prekey` used to return 410 unconditionally. See *Known broken areas* in
+`CLAUDE.md` for the incident this closes.
 
-**Short version.** Grants are wrapped to `signed_prekey_public ?? identity_public_key`, but the
-prekey's private half has nowhere to live: the bundle is sealed under an Argon2id key derived from
-the password, and the password is not retained after unlock. A device that publishes a prekey
-makes every grant addressed to it unopenable.
+**Short version of the original problem.** Grants are wrapped to
+`signed_prekey_public ?? identity_public_key`, but the prekey's private half had nowhere to live:
+the bundle was sealed under an Argon2id key derived from the password, and the password is not
+retained after unlock. A device that published a prekey made every grant addressed to it
+unopenable.
 
-**What that costs.** Forward secrecy across prekey rotations is not claimed. The identity key is
-the grant recipient, so compromising it exposes every grant wrapped to it, not just recent ones.
+**What changed.** The sealed private bundle now carries an optional `prekey_private` alongside
+`signing_private`/`identity_private` (`docs/crypto-spec-v1.md` §2.2), generated at registration by
+the reference implementation so it is available immediately after unlock with no extra password
+prompt. `PUT /crypto/identity/prekey` (§2.1.2) now actually rotates: it verifies the new prekey's
+signature against the device's on-record signing key, then writes the new public prekey and the
+re-sealed bundle in one transaction — the atomicity is the fix, since the original bug was really
+two writes that could disagree, not a missing check. `identity_service.rotate_prekey` and the
+`test_prekey_rotation.py` suite cover success, both signature-failure shapes, an unknown/foreign
+device, and a bundle sealed before this existed rotating cleanly into the new format. The
+signature machinery (`DS_PREKEY_BIND`, `verify_signed_prekey`, both references, the interop vector,
+the spec section) was already correct before this and is unchanged.
 
-**To close it.** `prekey_private` has to be generated at registration and live inside the sealed
-bundle from the start, with rotation deferred until there is somewhere to put the new half. The
-signature machinery around it (`DS_PREKEY_BIND`, `verify_signed_prekey`, both references, the
-interop vector, the spec section) is already correct and should be kept.
+**What is not yet done.** The frontend still wraps every sender-key grant to
+`signed_prekey_public ?? identity_public_key` via `ensureSenderChain`, but `ingestDistributions`
+only ever unwraps with `identityPrivate` — it has no path to `prekey_private` yet. Until the client
+is updated to read the new bundle field (falling back to `identityPrivate` when it is absent, for
+bundles sealed before this change) and to actually call the rotation endpoint on its own schedule,
+publishing a prekey from the client is still effectively unsafe in practice, even though the
+server-side and reference-implementation halves of the fix are in place and tested. That client
+work is tracked separately, not here.
+
+**What this still doesn't claim.** Forward secrecy across prekey rotations is a property of the
+*wrapping*, not of storage — rotating the prekey only helps once new grants are actually wrapped to
+the new key and old ones are allowed to age out. That is unchanged by this fix and remains future
+work.
 
 ---
 
