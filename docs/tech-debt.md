@@ -113,9 +113,11 @@ test-only allowlisted address, would let the suite run with limits on.
 
 - **`is_pinned` exists on `MessageDocument` and no endpoint sets it.** Either implement pinning or
   drop the field; a field that is always false invites UI built on it.
-- **Per-user read receipts are unimplementable as designed.** `is_read` is a single shared boolean,
-  so one member reading marks a group message read for everyone. This is why only a sent tick is
-  shown. Fixing it means a per-participant read table.
+- **Per-user read receipts are now implemented.** `GET /chats/{id}/read-state` returns each
+  participant's own `last_read_message_id`, so the client derives per-message read status (and a
+  group's "read by N of M") itself instead of relying on the old shared `is_read` boolean, which is
+  kept only for backward compat. This closes the item that used to be here — see
+  `docs/ui-states.md`.
 - **The `presence:{user_id}` refcount can drift** if a process is killed between `incr` and the
   `finally` that decrements. It self-heals after the 24h TTL. A heartbeat, or deriving presence
   from live pubsub subscriptions rather than a counter, would remove the failure mode.

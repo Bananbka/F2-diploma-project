@@ -3,7 +3,7 @@ import { computed, effect, inject, Injectable, signal, untracked } from '@angula
 import { Router } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
 
-import { Chat } from '../models/chat.model';
+import { Chat, ParticipantReadState } from '../models/chat.model';
 import { ChatKeys, MessageAttachment, MessageResponse } from '../models/crypto.model';
 import { ChatApiService } from './chat-api.service';
 import { CryptoApiService } from './crypto-api.service';
@@ -60,6 +60,19 @@ export interface ChatPreview {
 }
 
 /**
+ * How many of the *other* participants have read up to a given message, derived from the active
+ * chat's read-state map.
+ *
+ * `total` is the chat's other-participant count, not the whole roster — a private chat has one
+ * counterpart, and a group's own sender never needs to read their own message. `readCount` never
+ * includes the sender.
+ */
+export interface MessageReadReceipt {
+    readCount: number;
+    total: number;
+}
+
+/**
  * The conversation state the UI reads.
  *
  * Most of this service exists to keep the states in `docs/ui-states.md` distinguishable. The
@@ -93,6 +106,17 @@ export class ChatStoreService {
      * refreshed on `message_pinned`/`message_unpinned` for whichever chat is active.
      */
     readonly pinnedMessages = signal<DecryptedMessage[]>([]);
+
+    /**
+     * Every participant's own read high-water mark for the open chat, keyed by user id.
+     *
+     * Loaded alongside the conversation and refreshed on `message_read` broadcasts for whichever
+     * chat is active — the same "refetch/patch on the WS event, scoped to the active chat" pattern
+     * `loadPinned` follows. A missing entry means we have not fetched read-state for that user yet;
+     * `null` means they have genuinely never marked anything read, which `readReceipt` treats the
+     * same way (nothing counts as read).
+     */
+    readonly readState = signal<Map<string, string | null>>(new Map());
 
     /**
      * Whether the current user could pin a message in the active chat.
@@ -277,6 +301,9 @@ export class ChatStoreService {
                         void this.loadPinned(event.chat_id);
                     }
                     break;
+                case 'message_read':
+                    this.onReadReceipt(event.chat_id, event.user_id, event.payload);
+                    break;
                 case 'typing_start':
                     this.setTyping(event.chat_id, event.user_id, true);
                     break;
@@ -331,13 +358,40 @@ export class ChatStoreService {
 
         try {
             const chats = await firstValueFrom(this.chatApi.getChats());
-            this.chats.set(chats);
+            const merged = this.preserveKnownParticipants(chats);
+            this.chats.set(merged);
             this.warmDirectoryFromChats(chats);
         } catch {
             this.chatsError.set('Could not load your chats.');
         } finally {
             this.chatsLoading.set(false);
         }
+    }
+
+    /**
+     * `GET /chats/` always returns `participants: []` (see the doc comment on `Chat.participants`) —
+     * `enrich_chats_with_mongo_data` builds plain dicts with no participants key, so Pydantic falls
+     * back to the field default. A prior `hydrateChat`/`openChat` may have already populated the real
+     * roster for a chat via `GET /chats/{id}`; without this, any `loadChats()` refresh — including the
+     * one triggered by `participants_added`/`participants_removed` — would clobber that roster back to
+     * empty, silently breaking read receipts (and anything else keyed on `activeChat().participants`)
+     * for the currently open chat.
+     */
+    private preserveKnownParticipants(chats: Chat[]): Chat[] {
+        const known = this.chats();
+
+        return chats.map((chat) => {
+            if (chat.participants.length > 0) {
+                return chat;
+            }
+
+            const existing = known.find((c) => c.id === chat.id);
+            if (existing && existing.participants.length > 0) {
+                return { ...chat, participants: existing.participants };
+            }
+
+            return chat;
+        });
     }
 
     /**
@@ -368,6 +422,7 @@ export class ChatStoreService {
         this.messages.set([]);
         this.pending.set([]);
         this.pinnedMessages.set([]);
+        this.readState.set(new Map());
         this.realtimeError.set(null);
         this.clearSelection();
         this.chatKeys.set(null);
@@ -400,6 +455,7 @@ export class ChatStoreService {
             this.cachePreview(chatId, decrypted);
             this.scheduleGrantRetry(chatId);
             void this.loadPinned(chatId);
+            void this.loadReadState(chatId);
 
             await this.markRead(chatId, decrypted);
         } catch {
@@ -785,6 +841,69 @@ export class ChatStoreService {
         } catch {
             this.pinnedMessages.set([]);
         }
+    }
+
+    /** Refresh the read-state map for one chat. */
+    private async loadReadState(chatId: string): Promise<void> {
+        try {
+            const rows = await firstValueFrom(this.chatApi.getReadState(chatId));
+            this.readState.set(
+                new Map(rows.map((row: ParticipantReadState) => [row.user_id, row.last_read_message_id]))
+            );
+        } catch {
+            this.readState.set(new Map());
+        }
+    }
+
+    /**
+     * A participant's own read mark genuinely advanced — the server gates this broadcast on that,
+     * so every arrival here is real progress, never a no-op re-announcement.
+     */
+    private onReadReceipt(chatId: string | null, userId: string | null, payload: Record<string, unknown>): void {
+        if (!chatId || !userId || chatId !== this.activeChatId()) {
+            return;
+        }
+
+        const lastReadId = payload['last_read_message_id'];
+        if (typeof lastReadId !== 'string') {
+            return;
+        }
+
+        this.readState.update((map) => {
+            const next = new Map(map);
+            next.set(userId, lastReadId);
+            return next;
+        });
+    }
+
+    /**
+     * How many of the chat's other participants have read up to `message`, derived from
+     * `readState`.
+     *
+     * ObjectId strings sort correctly under plain `>=` only when both sides are the same case and
+     * length — `GET /chats/{id}/read-state` and the `message_read` broadcast both carry the
+     * canonical lowercase-hex form the server now guarantees, and message ids come from the same
+     * Mongo documents, so the comparison is safe here without re-canonicalizing.
+     */
+    readReceipt(message: DecryptedMessage): MessageReadReceipt | null {
+        const chat = this.activeChat();
+        const me = this.session.user()?.id;
+        if (!chat || !me) {
+            return null;
+        }
+
+        const others = chat.participants.filter((p) => p.user_id !== me);
+        if (others.length === 0) {
+            return null;
+        }
+
+        const state = this.readState();
+        const readCount = others.filter((p) => {
+            const lastRead = state.get(p.user_id);
+            return lastRead != null && lastRead >= message.id;
+        }).length;
+
+        return { readCount, total: others.length };
     }
 
     /**

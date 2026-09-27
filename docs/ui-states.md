@@ -33,6 +33,12 @@ actually checked and passed — never as a default.
 - **Send blocked** — the server rejected a send with `409 EPOCH_STALE` because the chat re-keyed
   mid-compose. The client re-encrypts from plaintext and retries automatically; surface it only if
   the retry also fails.
+- **Read receipts** are per-participant, derived from `GET /chats/{id}/read-state` plus the
+  `message_read` broadcast, and shown only on the current user's own sent messages. A private chat
+  gets an ordinary single/double tick; a group gets a double tick once every other member has read
+  up to that message, or a compact "N/M" count while some have not. `MessageDocument.is_read` — a
+  single boolean per message — is not the source for any of this: one member reading a group
+  message used to flip it for everyone, which is why this used to be sent-tick-only.
 
 ## Security-critical states
 

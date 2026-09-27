@@ -193,4 +193,83 @@ describe('MessageBubbleComponent', () => {
         fixture.detectChanges();
         expect(fixture.componentInstance.canEdit()).toBeFalse();
     });
+
+    describe('read receipts', () => {
+        /**
+         * Read-receipt UI is scoped to the current user's own sent messages — a bubble for someone
+         * else's message has nothing useful to say about who has read it.
+         */
+        it("shows no receipt on someone else's message, even if one is supplied", () => {
+            fixture.componentRef.setInput('message', message());
+            fixture.componentRef.setInput('readReceipt', { readCount: 1, total: 1 });
+            fixture.detectChanges();
+
+            expect((fixture.nativeElement as HTMLElement).querySelector('.receipt')).toBeNull();
+        });
+
+        function ownMessage(): void {
+            (TestBed.inject(DirectoryService) as jasmine.SpyObj<DirectoryService>).isMe.and.returnValue(true);
+        }
+
+        it('shows a single, unread tick with no receipt at all', () => {
+            ownMessage();
+            fixture.componentRef.setInput('message', message());
+            fixture.componentRef.setInput('delivery', 'sent');
+            fixture.detectChanges();
+
+            const host = fixture.nativeElement as HTMLElement;
+            expect(host.querySelector('.receipt')).not.toBeNull();
+            expect(host.querySelector('.mark.is-sent.is-read')).toBeNull();
+            expect(host.querySelector('.receipt-count')).toBeNull();
+        });
+
+        /** A private chat has one "other" — read means the tick turns into the read colour. */
+        it('marks a private-chat message read once the one other participant has read it', () => {
+            ownMessage();
+            fixture.componentRef.setInput('message', message());
+            fixture.componentRef.setInput('delivery', 'sent');
+            fixture.componentRef.setInput('readReceipt', { readCount: 1, total: 1 });
+            fixture.detectChanges();
+
+            const host = fixture.nativeElement as HTMLElement;
+            expect(host.querySelector('.mark.is-sent.is-read')).not.toBeNull();
+            expect(host.querySelector('.receipt-count')).toBeNull();
+        });
+
+        /** A group not yet fully read gets a compact "read by N of M" rather than a full avatar stack. */
+        it('shows a compact "read by N of M" for a partially read group message', () => {
+            ownMessage();
+            fixture.componentRef.setInput('message', message());
+            fixture.componentRef.setInput('delivery', 'sent');
+            fixture.componentRef.setInput('readReceipt', { readCount: 1, total: 3 });
+            fixture.detectChanges();
+
+            const host = fixture.nativeElement as HTMLElement;
+            expect(host.querySelector('.mark.is-sent.is-read')).toBeNull();
+            expect(host.querySelector('.receipt-count')?.textContent).toContain('1/3');
+        });
+
+        it('drops the count and shows the read tick once every group member has read it', () => {
+            ownMessage();
+            fixture.componentRef.setInput('message', message());
+            fixture.componentRef.setInput('delivery', 'sent');
+            fixture.componentRef.setInput('readReceipt', { readCount: 3, total: 3 });
+            fixture.detectChanges();
+
+            const host = fixture.nativeElement as HTMLElement;
+            expect(host.querySelector('.mark.is-sent.is-read')).not.toBeNull();
+            expect(host.querySelector('.receipt-count')).toBeNull();
+        });
+
+        /** A message still sending or that failed must not claim any read progress. */
+        it('never shows read progress on a pending or failed send', () => {
+            ownMessage();
+            fixture.componentRef.setInput('message', message());
+            fixture.componentRef.setInput('delivery', 'sending');
+            fixture.componentRef.setInput('readReceipt', { readCount: 1, total: 1 });
+            fixture.detectChanges();
+
+            expect((fixture.nativeElement as HTMLElement).querySelector('.mark.is-sent.is-read')).toBeNull();
+        });
+    });
 });

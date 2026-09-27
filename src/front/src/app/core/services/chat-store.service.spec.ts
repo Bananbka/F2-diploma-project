@@ -92,6 +92,7 @@ describe('ChatStoreService', () => {
                         'unpinMessage',
                         'getPinnedMessages',
                         'muteChat',
+                        'getReadState',
                     ]),
                 },
                 {
@@ -380,6 +381,129 @@ describe('ChatStoreService', () => {
 
             expect(store.chats()[0].is_muted).toBeTrue();
             expect(store.chats()[0].muted_until).toBe(future);
+        });
+    });
+
+    describe('read receipts', () => {
+        const ME = 'me';
+        const PEER = 'peer';
+        const OTHER = 'other';
+
+        beforeEach(() => {
+            const session = TestBed.inject(SessionService) as unknown as { user: () => { id: string } | null };
+            session.user = () => ({ id: ME });
+        });
+
+        it('reports an unread private-chat message as read by no one', () => {
+            store.chats.set([
+                chat({
+                    chat_type: 'private',
+                    participants: [
+                        { user_id: ME, role: 'member', joined_at: '' },
+                        { user_id: PEER, role: 'member', joined_at: '' },
+                    ],
+                }),
+            ]);
+            store.activeChatId.set(CHAT);
+            store.readState.set(new Map([[PEER, null]]));
+
+            expect(store.readReceipt(decrypted('b', 'ok'))).toEqual({ readCount: 0, total: 1 });
+        });
+
+        /** ObjectId strings sort lexicographically in creation order, so `>=` is the read test. */
+        it('reports a private-chat message as read once the peer catches up to it', () => {
+            store.chats.set([
+                chat({
+                    chat_type: 'private',
+                    participants: [
+                        { user_id: ME, role: 'member', joined_at: '' },
+                        { user_id: PEER, role: 'member', joined_at: '' },
+                    ],
+                }),
+            ]);
+            store.activeChatId.set(CHAT);
+            store.readState.set(new Map([[PEER, 'b']]));
+
+            expect(store.readReceipt(decrypted('a', 'ok'))).toEqual({ readCount: 1, total: 1 });
+            expect(store.readReceipt(decrypted('c', 'ok'))).toEqual({ readCount: 0, total: 1 });
+        });
+
+        it('counts "read by N of M" across a group, excluding the sender', () => {
+            store.chats.set([
+                chat({
+                    chat_type: 'group',
+                    participants: [
+                        { user_id: ME, role: 'member', joined_at: '' },
+                        { user_id: PEER, role: 'member', joined_at: '' },
+                        { user_id: OTHER, role: 'member', joined_at: '' },
+                    ],
+                }),
+            ]);
+            store.activeChatId.set(CHAT);
+            store.readState.set(
+                new Map([
+                    [PEER, 'b'],
+                    [OTHER, null],
+                ])
+            );
+
+            expect(store.readReceipt(decrypted('b', 'ok'))).toEqual({ readCount: 1, total: 2 });
+        });
+
+        it('advances the read map only for the active chat on a message_read broadcast', () => {
+            const ws = TestBed.inject(WebSocketService) as unknown as { messages: Subject<unknown> };
+            store.chats.set([chat({ chat_type: 'private' })]);
+            store.activeChatId.set(CHAT);
+            store.bindRealtime();
+
+            ws.messages.next({
+                event_type: 'message_read',
+                chat_id: 'some-other-chat',
+                user_id: PEER,
+                payload: { last_read_message_id: 'z' },
+            });
+            expect(store.readState().get(PEER)).toBeUndefined();
+
+            ws.messages.next({
+                event_type: 'message_read',
+                chat_id: CHAT,
+                user_id: PEER,
+                payload: { last_read_message_id: 'z' },
+            });
+            expect(store.readState().get(PEER)).toBe('z');
+        });
+
+        /**
+         * `GET /chats/` always returns `participants: []` (`enrich_chats_with_mongo_data` has no
+         * participants key to give). Refreshing the list after a membership change must not clobber
+         * the roster a prior `GET /chats/{id}` already hydrated for the open chat — otherwise
+         * `readReceipt` loses its "other participants" and read receipts go dark until the chat is
+         * reopened.
+         */
+        it('preserves a hydrated roster across a loadChats() refresh triggered by participants_added', async () => {
+            const chatApi = TestBed.inject(ChatApiService) as jasmine.SpyObj<ChatApiService>;
+            const ws = TestBed.inject(WebSocketService) as unknown as { messages: Subject<unknown> };
+
+            const hydrated = chat({
+                chat_type: 'private',
+                participants: [
+                    { user_id: ME, role: 'member', joined_at: '' },
+                    { user_id: PEER, role: 'member', joined_at: '' },
+                ],
+            });
+            store.chats.set([hydrated]);
+            store.activeChatId.set(CHAT);
+            store.readState.set(new Map([[PEER, 'b']]));
+            store.bindRealtime();
+
+            // The list endpoint's shape: same chat, but with the roster the endpoint never populates.
+            chatApi.getChats.and.returnValue(of([chat({ chat_type: 'private', participants: [] })]));
+
+            ws.messages.next({ event_type: 'participants_added', chat_id: CHAT });
+            await Promise.resolve();
+
+            expect(store.activeChat()?.participants).toEqual(hydrated.participants);
+            expect(store.readReceipt(decrypted('a', 'ok'))).toEqual({ readCount: 1, total: 1 });
         });
     });
 });

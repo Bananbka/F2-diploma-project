@@ -340,6 +340,23 @@
     &.is-sent {
         color: var(--muted-foreground);
     }
+
+    /* Read, not merely sent — the same colour the verified mark uses, so both read as "this claim
+       is confirmed" rather than introducing a third accent colour. */
+    &.is-sent.is-read {
+        color: var(--primary);
+    }
+}
+
+.receipt {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.1875rem;
+}
+
+.receipt-count {
+    font-size: 0.625rem;
+    line-height: 1;
 }
 
 /* A send that did not land must not read like one that did. Everything else about the bubble stays

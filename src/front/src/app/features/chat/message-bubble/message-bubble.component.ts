@@ -36,6 +36,7 @@ import {
 
 import { MessageAttachment } from '../../../core/models/crypto.model';
 import { ChatApiService } from '../../../core/services/chat-api.service';
+import { MessageReadReceipt } from '../../../core/services/chat-store.service';
 import { DirectoryService } from '../../../core/services/directory.service';
 import { DecryptedMessage, DecryptStatus } from '../../../core/services/message.service';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
@@ -167,6 +168,15 @@ export class MessageBubbleComponent {
      */
     readonly delivery = input<'sent' | 'sending' | 'failed'>('sent');
 
+    /**
+     * How many of the chat's other participants have read up to this message — `null` when there
+     * is nothing to report (a channel, or a message not yet accepted by the server).
+     *
+     * Rendered only for the current user's own sent messages: a bubble for someone else's message
+     * has nothing useful to say about who has read it.
+     */
+    readonly readReceipt = input<MessageReadReceipt | null>(null);
+
     readonly deleteRequested = output<string>();
     readonly editRequested = output<DecryptedMessage>();
     readonly replyRequested = output<DecryptedMessage>();
@@ -255,6 +265,43 @@ export class MessageBubbleComponent {
         this.destroyRef.onDestroy(() => document.removeEventListener('mousedown', onPointerDown, true));
     }
 
+    /**
+     * Every other participant has read up to this message.
+     *
+     * A private chat has exactly one "other", so this is the ordinary read/unread tick. A group's
+     * `total` is every other member, so this is only true once the whole roster has caught up —
+     * `showReadCount` covers the more common partial case.
+     */
+    readonly isFullyRead = computed(() => {
+        const receipt = this.readReceipt();
+        return (
+            this.delivery() === 'sent' && receipt !== null && receipt.total > 0 && receipt.readCount >= receipt.total
+        );
+    });
+
+    /** A group chat, not yet fully read: worth a compact "N/M" next to the tick. */
+    readonly showReadCount = computed(() => {
+        const receipt = this.readReceipt();
+        return this.delivery() === 'sent' && receipt !== null && receipt.total > 1 && receipt.readCount < receipt.total;
+    });
+
+    readonly deliveryTitle = computed(() => {
+        if (this.delivery() === 'sending') {
+            return 'Sending';
+        }
+        if (this.delivery() === 'failed') {
+            return 'Not sent';
+        }
+        if (this.isFullyRead()) {
+            return 'Read';
+        }
+        const receipt = this.readReceipt();
+        if (receipt && receipt.readCount > 0) {
+            return `Read by ${receipt.readCount} of ${receipt.total}`;
+        }
+        return 'Sent';
+    });
+
     /** The status glyph for our own message: pending, delivered, or rejected. */
     readonly deliveryIcon = computed(() => {
         switch (this.delivery()) {
@@ -263,7 +310,7 @@ export class MessageBubbleComponent {
             case 'failed':
                 return AlertTriangle;
             default:
-                return Check;
+                return this.isFullyRead() ? this.checkCheckIcon : this.checkIcon;
         }
     });
 

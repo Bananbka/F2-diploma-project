@@ -4,7 +4,7 @@ import { map, Observable } from 'rxjs';
 
 import { MessageEnvelope } from '../crypto/envelope';
 import { SuccessResponse } from '../models/api.model';
-import { Chat, ChatParticipant, ParticipantRole, UserSearchResult } from '../models/chat.model';
+import { Chat, ChatParticipant, ParticipantReadState, ParticipantRole, UserSearchResult } from '../models/chat.model';
 import { ChannelPostPayload, ForwardOrigin, MessageAttachment, MessageResponse } from '../models/crypto.model';
 import { ConfigService } from './config.service';
 
@@ -27,6 +27,19 @@ export class ChatApiService {
 
     getChat(chatId: string): Observable<Chat> {
         return this.http.get<SuccessResponse<Chat>>(`${this.chatsUrl}${chatId}`).pipe(map((r) => r.data));
+    }
+
+    /**
+     * Every participant's own read high-water mark for this chat, in one payload.
+     *
+     * Refetched on `openChat` and on a `message_read` broadcast for the active chat, rather than
+     * queried per message — the client already holds every rendered message's id, so it derives
+     * read status (and a group's "read by N of M") locally by comparing ids.
+     */
+    getReadState(chatId: string): Observable<ParticipantReadState[]> {
+        return this.http
+            .get<SuccessResponse<ParticipantReadState[]>>(`${this.chatsUrl}${chatId}/read-state`)
+            .pipe(map((r) => r.data));
     }
 
     createPrivateChat(targetUserId: string): Observable<Chat> {

@@ -214,6 +214,7 @@
                         [replyTo]="quotedFor(item.message)"
                         [selecting]="isSelecting()"
                         [selected]="selectedIds().has(item.message.id)"
+                        [readReceipt]="readReceipt(item.message)"
                         (selectionToggled)="toggleSelected($event)"
                         (deleteRequested)="deleteMessage($event)"
                         (replyRequested)="startReply($event)"

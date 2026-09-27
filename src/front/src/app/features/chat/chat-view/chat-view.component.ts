@@ -35,7 +35,12 @@ import {
 } from 'lucide-angular';
 
 import { Chat } from '../../../core/models/chat.model';
-import { ChatStoreService, ConversationItem, PendingMessage } from '../../../core/services/chat-store.service';
+import {
+    ChatStoreService,
+    ConversationItem,
+    MessageReadReceipt,
+    PendingMessage,
+} from '../../../core/services/chat-store.service';
 import { DirectoryService } from '../../../core/services/directory.service';
 import { DecryptedMessage } from '../../../core/services/message.service';
 import { SessionService } from '../../../core/services/session.service';
@@ -311,6 +316,11 @@ export class ChatViewComponent {
                 }
             });
         }
+    }
+
+    /** How many other participants have read up to this message. Only meaningful on our own sends. */
+    readReceipt(message: DecryptedMessage): MessageReadReceipt | null {
+        return this.store.readReceipt(message);
     }
 
     /** The message a reply quotes, if it is among the ones we have loaded and opened. */

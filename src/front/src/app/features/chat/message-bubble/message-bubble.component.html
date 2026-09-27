@@ -204,11 +204,17 @@
         }
 
         @if (isOwn()) {
-            <lucide-icon
-                [img]="deliveryIcon()"
-                class="mark is-sent"
-                [title]="delivery() === 'sending' ? 'Sending' : delivery() === 'failed' ? 'Not sent' : 'Sent'"
-            />
+            <span class="receipt">
+                <lucide-icon
+                    [img]="deliveryIcon()"
+                    class="mark is-sent"
+                    [class.is-read]="isFullyRead()"
+                    [title]="deliveryTitle()"
+                />
+                @if (showReadCount()) {
+                    <span class="receipt-count">{{ readReceipt()!.readCount }}/{{ readReceipt()!.total }}</span>
+                }
+            </span>
         }
 
         <!-- Actions live in the right-click menu rather than here. Hover buttons on every row compete
