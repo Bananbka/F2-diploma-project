@@ -299,3 +299,132 @@ async def test_files_require_authentication():
             files={"file": ("a.enc", b"x", "application/octet-stream")},
         )
         assert r.status_code == 401, r.text
+
+
+async def test_only_the_sender_may_delete_their_message_and_its_attachment():
+    """`get_and_validate_message` checks `sender_id`, not chat membership or role — a fellow member,
+    even in a group, has no delete rights over someone else's message."""
+    alice, alice_id = await _register_user()
+    bob, bob_id = await _register_user()
+
+    try:
+        chat_id = await _group_with(alice, bob_id)
+
+        r = await _upload(alice)
+        attachment = r.json()["data"]
+        key = await _object_key(attachment["url"])
+
+        r = await alice.post(
+            "/messages/",
+            json={
+                "chat_id": str(chat_id),
+                "encrypted_content": "x",
+                "attachments": [attachment],
+            },
+        )
+        assert r.status_code == 200, r.text
+        message_id = r.json()["data"]["_id"]
+
+        # Bob is a member of the same chat but did not send the message.
+        r = await bob.delete(f"/messages/{message_id}")
+        assert r.status_code == 403, r.text
+
+        # The message and its attachment must still be there.
+        r = await alice.get(f"/files/attachments/{chat_id}/{key}")
+        assert r.status_code == 200, r.text
+
+        r = await alice.delete(f"/messages/{message_id}")
+        assert r.status_code == 200, r.text
+
+        # Gone, and no longer downloadable through the chat that used to reference it.
+        r = await alice.get(f"/files/attachments/{chat_id}/{key}")
+        assert r.status_code == 404, r.text
+    finally:
+        await alice.aclose()
+        await bob.aclose()
+
+
+async def test_deleting_one_forward_does_not_reap_a_still_referenced_attachment():
+    """`delete_message` only reaps the MinIO blob once no surviving message references its url.
+
+    Forward the same attachment into a second chat, delete the original, and the object must
+    still be fetchable through the chat that still names it — proving the still-referenced guard
+    actually runs, not just that a single, unshared attachment can be deleted.
+    """
+    alice, alice_id = await _register_user()
+    bob, bob_id = await _register_user()
+    carol, carol_id = await _register_user()
+
+    try:
+        shared = await _group_with(alice, bob_id)
+        bobs_other = await _group_with(bob, carol_id, title="Bob and Carol")
+
+        r = await _upload(alice)
+        attachment = r.json()["data"]
+        key = await _object_key(attachment["url"])
+
+        r = await alice.post(
+            "/messages/",
+            json={
+                "chat_id": str(shared),
+                "encrypted_content": "x",
+                "attachments": [attachment],
+            },
+        )
+        assert r.status_code == 200, r.text
+        original_id = r.json()["data"]["_id"]
+
+        r = await bob.post(
+            "/messages/",
+            json={
+                "chat_id": str(bobs_other),
+                "encrypted_content": "x",
+                "attachments": [attachment],
+            },
+        )
+        assert r.status_code == 200, r.text
+
+        r = await alice.delete(f"/messages/{original_id}")
+        assert r.status_code == 200, r.text
+
+        # Still referenced by Bob's forward, so the blob must survive.
+        r = await bob.get(f"/files/attachments/{bobs_other}/{key}")
+        assert r.status_code == 200, r.text
+        assert r.content == b"ciphertext-bytes"
+
+        # But no longer reachable through the chat whose only reference was just deleted.
+        r = await bob.get(f"/files/attachments/{shared}/{key}")
+        assert r.status_code == 404, r.text
+    finally:
+        await alice.aclose()
+        await bob.aclose()
+        await carol.aclose()
+
+
+async def test_oversized_message_attachment_is_rejected():
+    """`_read_bounded` enforces the 50MB message cap while streaming, not after buffering it all."""
+    alice, alice_id = await _register_user()
+
+    try:
+        oversized = b"\x00" * (50 * 1024 * 1024 + 1)
+        r = await _upload(alice, content=oversized)
+        assert r.status_code == 413, r.text
+        assert r.json()["error_code"] == "FILE_SIZE_TOO_LARGE"
+    finally:
+        await alice.aclose()
+
+
+async def test_oversized_avatar_is_rejected_at_the_lower_avatar_cap():
+    alice, alice_id = await _register_user()
+
+    try:
+        oversized = PNG + b"\x00" * (5 * 1024 * 1024)
+        r = await alice.post(
+            "/files/upload",
+            files={"file": ("big.png", oversized, "image/png")},
+            data={"category": "avatar"},
+        )
+        assert r.status_code == 413, r.text
+        assert r.json()["error_code"] == "FILE_SIZE_TOO_LARGE"
+    finally:
+        await alice.aclose()
