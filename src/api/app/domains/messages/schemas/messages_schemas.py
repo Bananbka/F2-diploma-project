@@ -84,6 +84,44 @@ class ChannelPost(BaseModel):
     sig: str = Field(..., max_length=128)
 
 
+class Reaction(BaseModel):
+    """One user's reaction to a message.
+
+    A user may hold at most one reaction per emoji on a message (adding the same emoji twice is a
+    toggle-off, handled in `messages_service.toggle_reaction`), but may hold several *different*
+    emojis on the same message at once — matching the common messenger convention (Telegram,
+    Discord) rather than the single-reaction-slot model some clients use.
+    """
+    user_id: uuid.UUID
+    emoji: str
+    created_at: datetime.datetime
+
+
+def validate_emoji(v: str) -> str:
+    """Basic emoji sanity check, not a full grapheme-cluster validator.
+
+    Rejects the empty string and anything ASCII-only (plain text such as "lol" or ":)"), which
+    catches the obvious misuse without trying to enumerate every valid emoji code point — Unicode
+    keycap sequences, skin-tone modifiers and ZWJ sequences all contain at least one non-ASCII
+    code point, so the heuristic does not reject them.
+    """
+    v = v.strip()
+    if not v:
+        raise ValueError("emoji must not be empty")
+    if v.isascii():
+        raise ValueError("emoji must be an actual emoji, not plain text")
+    return v
+
+
+class ReactionRequest(BaseModel):
+    emoji: str = Field(..., min_length=1, max_length=8)
+
+    @field_validator("emoji")
+    @classmethod
+    def _validate_emoji(cls, v: str) -> str:
+        return validate_emoji(v)
+
+
 class ForwardOrigin(BaseModel):
     """Who wrote a forwarded message originally, and when.
 
@@ -115,8 +153,12 @@ class MessageDocument(BaseModel):
 
     attachments: list[dict] | None = None
 
+    reactions: list[Reaction] = Field(default_factory=list)
+
     is_read: bool = False
     is_pinned: bool = False
+    pinned_at: datetime.datetime | None = None
+    pinned_by: uuid.UUID | None = None
     is_edited: bool = False
 
     created_at: datetime.datetime
@@ -138,8 +180,12 @@ class MessageResponse(BaseModel):
 
     attachments: list[dict] | None = None
 
+    reactions: list[Reaction] = Field(default_factory=list)
+
     is_read: bool = False
     is_pinned: bool = False
+    pinned_at: datetime.datetime | None = None
+    pinned_by: uuid.UUID | None = None
     is_edited: bool = False
 
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)

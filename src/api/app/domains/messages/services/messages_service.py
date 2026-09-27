@@ -25,6 +25,10 @@ from app.domains.messages.schemas.messages_schemas import (
 )
 from app.infrastructure.minio import minio_manager
 
+# Many messengers cap simultaneous pins (Telegram allows unlimited but most others bound it); a
+# small cap keeps the pinned list actually skimmable and bounds the size of the listing query.
+MAX_PINNED_MESSAGES_PER_CHAT = 5
+
 
 async def is_user_in_chat(
     db: AsyncSession,
@@ -98,6 +102,44 @@ async def get_and_validate_message(
         raise AppException(403, "FORBIDDEN", "You are not sender of this message.")
 
     return msg
+
+
+async def get_message_for_participant(
+    db: AsyncSession, collection, msg_id: str, user_id: uuid.UUID
+) -> tuple[dict, Chat]:
+    """Look up a message and authorise the caller as a chat participant, not necessarily its sender.
+
+    Reactions and pins are actions any member may take on any message in a chat they belong to,
+    unlike edit/delete which `get_and_validate_message` restricts to the sender. This still goes
+    through the mandatory `get_chat_or_403` chokepoint before anything in Mongo is written.
+    """
+    obj_id = objectify_id(msg_id)
+    msg = await get_message_by_id(collection, obj_id)
+
+    chat = await get_chat_or_403(db, msg["chat_id"], user_id)
+    return msg, chat
+
+
+async def _authorize_pin_action(db: AsyncSession, chat: Chat, user_id: uuid.UUID) -> None:
+    """Gate pin/unpin on role, except in private chats.
+
+    A private chat has exactly two participants, both stored with role MEMBER — there is no admin
+    to defer to, and both sides are equal parties to the conversation, so either may pin. In groups
+    and channels, pinning is a moderation action visible to everyone in a shared space, so it is
+    restricted to admins and the owner, matching the convention most messengers use.
+    """
+    if chat.chat_type == ChatType.PRIVATE:
+        return
+
+    participant = await is_user_in_chat(db, user_id, chat.id)
+    if participant is None or chat_services.role_rank(
+        participant.role
+    ) < chat_services.role_rank(ParticipantRole.ADMIN):
+        raise AppException(
+            403,
+            "PIN_FORBIDDEN",
+            "Only admins and the owner can pin messages in this chat.",
+        )
 
 
 def resolve_content_format(doc: dict, chat: Chat) -> ContentFormat:
@@ -543,3 +585,188 @@ async def mark_messages_as_read(
     )
 
     return result.modified_count
+
+
+async def toggle_reaction(
+    db: AsyncSession,
+    mongo_db: AsyncIOMotorDatabase,
+    user_id: uuid.UUID,
+    msg_id: str,
+    emoji: str,
+) -> tuple[MessageResponse, bool]:
+    """Add or remove the caller's reaction with this emoji on a message.
+
+    One reaction per (user, message, emoji): reacting with an emoji you already placed on that
+    message removes it again — a toggle, the behaviour Telegram and Discord both use — while
+    reacting with a *different* emoji adds an additional, independent reaction rather than
+    replacing the first. Returns whether the reaction was added (True) or removed (False), so the
+    caller can pick the right WS event.
+
+    Atomic by construction rather than read-then-decide-then-write: a `$pull` is attempted first,
+    and only if it removed nothing (`modified_count == 0`, meaning the caller had not reacted with
+    this emoji) does a `$push` follow — and that `$push`'s own filter re-checks non-existence of the
+    same `(user_id, emoji)` pair in the same round trip, so it cannot land twice even if two
+    identical requests both fall through to it concurrently. This closes the double-tap race where
+    two near-simultaneous toggles could otherwise both read "not reacted yet" and both append,
+    leaving a duplicate entry that only a later toggle's `$pull` (which removes every match) would
+    clean up.
+    """
+    collection = mongo_db["messages"]
+    msg, chat = await get_message_for_participant(db, collection, msg_id, user_id)
+
+    pull_result = await collection.update_one(
+        {"_id": msg["_id"]},
+        {"$pull": {"reactions": {"user_id": user_id, "emoji": emoji}}},
+    )
+
+    if pull_result.modified_count > 0:
+        added = False
+    else:
+        await collection.update_one(
+            {
+                "_id": msg["_id"],
+                "reactions": {"$not": {"$elemMatch": {"user_id": user_id, "emoji": emoji}}},
+            },
+            {
+                "$push": {
+                    "reactions": {
+                        "user_id": user_id,
+                        "emoji": emoji,
+                        "created_at": datetime.now(timezone.utc),
+                    }
+                }
+            },
+        )
+        # If the filter matched nothing, a concurrent request already added this exact
+        # (user_id, emoji) pair between our `$pull` and this `$push` — the reaction is present
+        # either way, so this call still reports it as added rather than erroring or no-op'ing
+        # into a stale "removed" state.
+        added = True
+
+    updated = await collection.find_one({"_id": msg["_id"]})
+    updated["_id"] = str(updated["_id"])
+    updated["content_format"] = resolve_content_format(updated, chat)
+
+    return MessageResponse(**updated), added
+
+
+async def remove_reaction(
+    db: AsyncSession,
+    mongo_db: AsyncIOMotorDatabase,
+    user_id: uuid.UUID,
+    msg_id: str,
+    emoji: str,
+) -> MessageResponse:
+    """Explicit removal, distinct from the toggle above. Idempotent: a no-op if the caller had not
+    reacted with that emoji, so a client retrying a request that already succeeded is not punished
+    with an error."""
+    collection = mongo_db["messages"]
+    msg, chat = await get_message_for_participant(db, collection, msg_id, user_id)
+
+    await collection.update_one(
+        {"_id": msg["_id"]},
+        {"$pull": {"reactions": {"user_id": user_id, "emoji": emoji}}},
+    )
+
+    updated = await collection.find_one({"_id": msg["_id"]})
+    updated["_id"] = str(updated["_id"])
+    updated["content_format"] = resolve_content_format(updated, chat)
+
+    return MessageResponse(**updated)
+
+
+async def pin_message(
+    db: AsyncSession,
+    mongo_db: AsyncIOMotorDatabase,
+    user_id: uuid.UUID,
+    msg_id: str,
+) -> MessageResponse:
+    """Pin a message, subject to role (see `_authorize_pin_action`) and the per-chat pin cap.
+
+    Idempotent if already pinned — pinning an already-pinned message does not touch `pinned_at` or
+    `pinned_by` again and does not count against the cap a second time.
+    """
+    collection = mongo_db["messages"]
+    msg, chat = await get_message_for_participant(db, collection, msg_id, user_id)
+    await _authorize_pin_action(db, chat, user_id)
+
+    if not msg.get("is_pinned"):
+        pinned_count = await collection.count_documents(
+            {"chat_id": chat.id, "is_pinned": True}
+        )
+        if pinned_count >= MAX_PINNED_MESSAGES_PER_CHAT:
+            raise AppException(
+                400,
+                "PIN_LIMIT_REACHED",
+                f"At most {MAX_PINNED_MESSAGES_PER_CHAT} messages may be pinned in a chat at "
+                f"once; unpin one before pinning another.",
+            )
+
+        await collection.update_one(
+            {"_id": msg["_id"]},
+            {
+                "$set": {
+                    "is_pinned": True,
+                    "pinned_at": datetime.now(timezone.utc),
+                    "pinned_by": user_id,
+                }
+            },
+        )
+
+    updated = await collection.find_one({"_id": msg["_id"]})
+    updated["_id"] = str(updated["_id"])
+    updated["content_format"] = resolve_content_format(updated, chat)
+
+    return MessageResponse(**updated)
+
+
+async def unpin_message(
+    db: AsyncSession,
+    mongo_db: AsyncIOMotorDatabase,
+    user_id: uuid.UUID,
+    msg_id: str,
+) -> MessageResponse:
+    """Unpin a message. Idempotent: unpinning an unpinned message is a no-op, not an error."""
+    collection = mongo_db["messages"]
+    msg, chat = await get_message_for_participant(db, collection, msg_id, user_id)
+    await _authorize_pin_action(db, chat, user_id)
+
+    await collection.update_one(
+        {"_id": msg["_id"]},
+        {"$set": {"is_pinned": False, "pinned_at": None, "pinned_by": None}},
+    )
+
+    updated = await collection.find_one({"_id": msg["_id"]})
+    updated["_id"] = str(updated["_id"])
+    updated["content_format"] = resolve_content_format(updated, chat)
+
+    return MessageResponse(**updated)
+
+
+async def get_pinned_messages(
+    db: AsyncSession,
+    mongo_db: AsyncIOMotorDatabase,
+    user_id: uuid.UUID,
+    chat_id: uuid.UUID,
+) -> list[MessageResponse]:
+    chat = await get_chat_or_403(db, chat_id, user_id)
+
+    collection = mongo_db["messages"]
+    query: dict = {"chat_id": chat_id, "is_pinned": True}
+
+    # Same history floor as `get_chat_messages`: a member holds no keys for messages pinned before
+    # they joined, so those must not surface even as an unreadable pinned entry.
+    participant = await is_user_in_chat(db, user_id, chat_id)
+    if participant is not None and participant.history_start_message_id:
+        query["_id"] = {"$gt": objectify_id(participant.history_start_message_id)}
+
+    crs = collection.find(query).sort("_id", -1).limit(MAX_PINNED_MESSAGES_PER_CHAT)
+    messages = await crs.to_list(length=MAX_PINNED_MESSAGES_PER_CHAT)
+
+    res = []
+    for msg in messages:
+        msg["_id"] = str(msg["_id"])
+        msg["content_format"] = resolve_content_format(msg, chat)
+        res.append(MessageResponse(**msg))
+
+    return res

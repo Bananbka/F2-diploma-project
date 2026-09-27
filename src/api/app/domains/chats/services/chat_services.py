@@ -161,7 +161,12 @@ async def get_user_chats(
     other = aliased(ChatParticipant)
 
     stmt = (
-        select(Chat, me.last_read_message_id, Contact.alias_name.label("partner_alias"))
+        select(
+            Chat,
+            me.last_read_message_id,
+            me.muted_until,
+            Contact.alias_name.label("partner_alias"),
+        )
         .join(me, and_(Chat.id == me.chat_id, me.user_id == user_id))
         # Restricted to PRIVATE. The counterpart join exists only to resolve the other party in a
         # two-person chat, but it was unrestricted, so a group of N produced N-1 rows for the same
@@ -193,6 +198,7 @@ async def get_user_chats(
     for row in res.all():
         chat = row.Chat
         chat.last_read_message_id = row.last_read_message_id
+        chat.muted_until = row.muted_until
         chat.partner_alias = row.partner_alias
         chats.append(chat)
 
@@ -237,6 +243,34 @@ async def update_participant_last_read(
 
     await db.execute(stmt)
     await db.commit()
+
+
+async def set_chat_mute(
+    db: AsyncSession,
+    chat_id: uuid.UUID,
+    user_id: uuid.UUID,
+    muted_until,
+) -> ChatParticipant:
+    """Mute or unmute a chat for one user only. Purely local state: no WebSocket event fires,
+    because muting a chat is not something any other participant needs to learn about."""
+    stmt = (
+        update(ChatParticipant)
+        .where(
+            ChatParticipant.chat_id == chat_id,
+            ChatParticipant.user_id == user_id,
+        )
+        .values(muted_until=muted_until)
+        .returning(ChatParticipant)
+    )
+
+    res = await db.execute(stmt)
+    participant = res.scalar_one_or_none()
+
+    if participant is None:
+        raise AppException(403, "ACCESS_DENIED", "You are not a participant of this chat.")
+
+    await db.commit()
+    return participant
 
 
 async def get_chat_participants_by_user(db: AsyncSession, user_id: uuid.UUID):
@@ -311,6 +345,7 @@ async def enrich_chats_with_mongo_data(
                 "chat_type": chat.chat_type,
                 "unread_count": stats["unread_count"],
                 "last_message": last_msg,
+                "muted_until": getattr(chat, "muted_until", None),
                 "created_at": chat.created_at,
                 "updated_at": chat.updated_at,
             }

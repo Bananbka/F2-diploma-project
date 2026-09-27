@@ -16,6 +16,8 @@ from app.domains.chats.schemas.chat_schemas import (
     ChatParticipantResponse,
     ChatResponse,
     GroupChatCreateRequest,
+    MuteChatRequest,
+    MuteChatResponse,
     PrivateChatCreateRequest,
     TransferOwnershipRequest,
     UserListRequest,
@@ -147,7 +149,8 @@ async def get_chat(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    if await messages_service.is_user_in_chat(db, user.id, chat_id) is None:
+    participant = await messages_service.is_user_in_chat(db, user.id, chat_id)
+    if participant is None:
         raise AppException(
             403, "ACCESS_DENIED", "You dont have permission to access this chat."
         )
@@ -156,7 +159,44 @@ async def get_chat(
     if chat is None:
         raise AppException(404, "NOT_FOUND", "Chat doesn't exist.")
 
+    # Not populated by `get_chat_by_id` itself, since mute is per-participant, not a chat-level
+    # column — the list endpoint gets it from the join in `get_user_chats` instead.
+    chat.muted_until = participant.muted_until
+
     return SuccessResponse(data=chat)
+
+
+@router.get(
+    "/{chat_id}/pinned-messages", response_model=SuccessResponse[list[MessageResponse]]
+)
+async def get_pinned_messages(
+    chat_id: uuid.UUID = Path(..., description="Chat ID"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
+):
+    messages = await messages_service.get_pinned_messages(db, mongo_db, user.id, chat_id)
+    return SuccessResponse(data=messages)
+
+
+@router.patch("/{chat_id}/mute", response_model=SuccessResponse[MuteChatResponse])
+async def mute_chat(
+    data: MuteChatRequest,
+    chat_id: uuid.UUID = Path(..., description="Chat ID"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Mute or unmute this chat for the calling user only.
+
+    Purely local, per-user state — see `MuteChatRequest` for why a single nullable timestamp is
+    enough, and `chat_services.set_chat_mute` for why this never publishes a WebSocket event.
+    """
+    participant = await chat_services.set_chat_mute(
+        db, chat_id, user.id, data.muted_until
+    )
+    return SuccessResponse(
+        data=MuteChatResponse(chat_id=chat_id, muted_until=participant.muted_until)
+    )
 
 
 @router.get(
