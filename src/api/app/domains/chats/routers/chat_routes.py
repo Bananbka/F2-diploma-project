@@ -18,6 +18,7 @@ from app.domains.chats.schemas.chat_schemas import (
     GroupChatCreateRequest,
     MuteChatRequest,
     MuteChatResponse,
+    ParticipantReadState,
     PrivateChatCreateRequest,
     TransferOwnershipRequest,
     UserListRequest,
@@ -164,6 +165,36 @@ async def get_chat(
     chat.muted_until = participant.muted_until
 
     return SuccessResponse(data=chat)
+
+
+@router.get(
+    "/{chat_id}/read-state", response_model=SuccessResponse[list[ParticipantReadState]]
+)
+async def get_read_state(
+    chat_id: uuid.UUID = Path(..., description="Chat ID"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-participant read high-water marks for this chat.
+
+    One small payload per chat rather than a per-message endpoint: the client already holds every
+    rendered message's ObjectId, so it derives read status for its whole message list (and, for a
+    group, a "read by N of M" count and the exact roster) by comparing each participant's
+    `last_read_message_id` against those ids locally, refreshing this on the `message_read`
+    broadcast rather than polling per message.
+    """
+    if await messages_service.is_user_in_chat(db, user.id, chat_id) is None:
+        raise AppException(
+            403, "ACCESS_DENIED", "You dont have permission to access this chat."
+        )
+
+    rows = await chat_services.get_chat_read_state(db, chat_id)
+    return SuccessResponse(
+        data=[
+            ParticipantReadState(user_id=row.user_id, last_read_message_id=row.last_read_message_id)
+            for row in rows
+        ]
+    )
 
 
 @router.get(

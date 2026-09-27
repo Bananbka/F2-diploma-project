@@ -134,6 +134,25 @@ class MuteChatRequest(BaseModel):
     muted_until: datetime | None = None
 
 
+class ParticipantReadState(BaseModel):
+    """One participant's read high-water mark for a chat.
+
+    `last_read_message_id` is the newest Mongo ObjectId this user has acknowledged, or `None` if
+    they have never marked anything read. It is deliberately per-user rather than a single
+    chat-level value: `MessageDocument.is_read` is one shared boolean per message, so any one
+    member reading a group message flipped it for every other member too. The client derives
+    "has user X read message Y" itself by comparing `last_read_message_id >= Y._id` — the same
+    ObjectId-monotonicity comparison `mark_messages_as_read` already performs server-side — so one
+    small per-chat payload is enough to compute read status for an entire rendered message list,
+    for however many participants a private chat or group has.
+    """
+
+    user_id: uuid.UUID
+    last_read_message_id: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class MuteChatResponse(BaseModel):
     chat_id: uuid.UUID
     muted_until: datetime | None = None

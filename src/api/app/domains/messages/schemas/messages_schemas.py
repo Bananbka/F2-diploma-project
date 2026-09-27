@@ -155,6 +155,12 @@ class MessageDocument(BaseModel):
 
     reactions: list[Reaction] = Field(default_factory=list)
 
+    # DEPRECATED: a single shared boolean, so one member reading a group message marks it read for
+    # every other member too. Kept (and still written by `mark_messages_as_read`) only for
+    # backward compatibility with any client still reading it; per-user read state is now the
+    # `last_read_message_id` on each `ChatParticipant`, exposed via `GET /chats/{id}/read-state`
+    # and `chat_services.get_chat_read_state`. Do not add new logic that treats this as
+    # authoritative.
     is_read: bool = False
     is_pinned: bool = False
     pinned_at: datetime.datetime | None = None
@@ -182,6 +188,8 @@ class MessageResponse(BaseModel):
 
     reactions: list[Reaction] = Field(default_factory=list)
 
+    # DEPRECATED: see the identical note on `MessageDocument.is_read`. Retained for API
+    # compatibility; not the source of truth for read state any more.
     is_read: bool = False
     is_pinned: bool = False
     pinned_at: datetime.datetime | None = None

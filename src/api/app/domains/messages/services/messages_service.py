@@ -566,6 +566,13 @@ async def mark_messages_as_read(
     Takes `db` purely to authorise. Mongo carries no ownership information of its own, so a write
     that reaches it without a Postgres membership check is unauthorised by construction — and this
     one is reachable from the WebSocket, where `chat_id` arrives straight from the client.
+
+    The `is_read` flip below is DEPRECATED — it is one boolean shared by every participant, so the
+    first member to read a group message marks it read for everyone else too. It is left in place
+    (rather than migrated away in one step, which would mean a write against a schema-less Mongo
+    collection with no rollback) purely for whatever still reads it; the caller
+    (`ws_router.websocket_endpoint`) separately calls `chat_services.update_participant_last_read`,
+    which is the per-user source of truth surfaced by `GET /chats/{id}/read-state`.
     """
     if await is_user_in_chat(db, user_id, chat_id) is None:
         raise AppException(403, "FORBIDDEN", "You are not a participant of this chat.")
