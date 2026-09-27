@@ -36,6 +36,13 @@ def setup_logging(is_production: bool = False):
             level="DEBUG"
         )
 
-    logging.getLogger("uvicorn.access").handlers = [InterceptHandler()]
+    # Deliberately does NOT touch "uvicorn.access". `app.main`'s own `log_requests` middleware
+    # already logs every request/response through loguru and redacts the invite-link token from
+    # the path before doing so (see `_loggable_path` there); uvicorn is started with
+    # `--no-access-log`, which works by clearing "uvicorn.access"'s handlers so
+    # `logger.hasHandlers()` is False and the per-request access-log call never fires
+    # (`h11_impl.py`). Attaching a handler here — even one that routes through loguru — would
+    # make `hasHandlers()` true again and silently re-enable that *unredacted* access log
+    # alongside ours, which is exactly the leak this was meant to close.
     logging.getLogger("uvicorn.error").handlers = [InterceptHandler()]
     logging.getLogger("fastapi").handlers = [InterceptHandler()]

@@ -96,7 +96,12 @@ services:
         condition: service_started
       minio:
         condition: service_started
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    # --no-access-log: uvicorn's default access logger writes the full request path — including
+    # the invite-link token in `/invite-links/{token}` — verbatim to stdout, which `docker compose
+    # logs` captures. `app.main`'s own `log_requests` middleware already logs every
+    # request/response with loguru and redacts that token, so uvicorn's separate, unredacted
+    # access log is disabled here rather than patched.
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --no-access-log
 
   frontend:
     build:

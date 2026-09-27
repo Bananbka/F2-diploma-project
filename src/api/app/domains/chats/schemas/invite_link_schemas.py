@@ -6,6 +6,16 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field
 from app.domains.chats.models import ChatType
 
 
+class InviteLinkTokenRequest(BaseModel):
+    """Body shape for the join/revoke endpoints, both of which take the token as a credential
+    rather than as an address. Unlike preview (a link meant to be clicked, so the token has to be
+    in the URL), these are authenticated mutating actions — keeping the token in the body keeps it
+    out of URL-based logging (uvicorn/nginx access logs) entirely, without needing any log
+    suppression for them."""
+
+    token: str = Field(..., min_length=1, max_length=128)
+
+
 class CreateInviteLinkRequest(BaseModel):
     """Both bounds are optional. Omitting both creates a link with no expiry and no use cap —
     allowed, since revocation is always available as the way to close it."""

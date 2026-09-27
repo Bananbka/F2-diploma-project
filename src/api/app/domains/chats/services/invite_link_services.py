@@ -180,8 +180,13 @@ async def join_via_invite_link(
     mongo_db: AsyncIOMotorDatabase,
     token: str,
     user_id: uuid.UUID,
-) -> tuple[uuid.UUID, bool, "ChatKeyEpoch | None"]:
-    """Join the chat an invite link points at. Returns `(chat_id, already_member, epoch)`.
+) -> tuple[uuid.UUID, bool, "ChatKeyEpoch | None", uuid.UUID]:
+    """Join the chat an invite link points at.
+
+    Returns `(chat_id, already_member, epoch, invite_link_id)`. The link id is returned alongside
+    the rest so the caller can put it on the `INVITE_LINK_JOINED` audit record — symmetric with
+    `INVITE_LINK_CREATED`/`INVITE_LINK_REVOKED`, both of which already carry it — so an
+    investigator can tell which specific link a join used when a chat has more than one active.
 
     Already-a-member is checked *before* touching the link at all, so rejoining through a link
     never consumes one of its limited uses and never fails on an expired/revoked/exhausted link —
@@ -203,7 +208,7 @@ async def join_via_invite_link(
         raise AppException(404, "NOT_FOUND", "Invite link not found.")
 
     if await messages_service.is_user_in_chat(db, user_id, chat.id) is not None:
-        return chat.id, True, None
+        return chat.id, True, None, link.id
 
     consumed = await _consume(db, token)
     if consumed is None:
@@ -220,4 +225,4 @@ async def join_via_invite_link(
     _, epoch = await chat_services.add_chat_participants(
         db, chat.id, [user_id], mongo_db=mongo_db
     )
-    return chat.id, False, epoch
+    return chat.id, False, epoch, link.id

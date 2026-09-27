@@ -15,6 +15,7 @@ import uuid
 
 import httpx
 import pytest
+from motor.motor_asyncio import AsyncIOMotorClient
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -78,7 +79,7 @@ async def test_plain_member_cannot_list_or_revoke_invite_links():
         r = await bob.get(f"/chats/{chat_id}/invite-links")
         assert r.status_code == 403, r.text
 
-        r = await bob.post(f"/invite-links/{link['token']}/revoke")
+        r = await bob.post("/invite-links/revoke", json={"token": link["token"]})
         assert r.status_code == 403, r.text
     finally:
         await alice.aclose()
@@ -100,7 +101,7 @@ async def test_owner_can_create_list_and_revoke_invite_link():
         tokens = [entry["token"] for entry in r.json()["data"]]
         assert link["token"] in tokens
 
-        r = await alice.post(f"/invite-links/{link['token']}/revoke")
+        r = await alice.post("/invite-links/revoke", json={"token": link['token']})
         assert r.status_code == 200, r.text
         assert r.json()["data"]["revoked_at"] is not None
 
@@ -123,7 +124,7 @@ async def test_admin_of_another_chat_cannot_revoke_this_chats_link():
 
         chat_b = await _group_with(carol, dave_id, title="Chat B")
         # carol is OWNER of chat_b, but not of chat_a — must not be able to revoke chat_a's link.
-        r = await carol.post(f"/invite-links/{link['token']}/revoke")
+        r = await carol.post("/invite-links/revoke", json={"token": link['token']})
         assert r.status_code == 403, r.text
 
         # The link must still be usable/listable from chat_a's side afterwards.
@@ -193,7 +194,7 @@ async def test_preview_rejects_revoked_token_with_410():
         chat_id = await _group_with(alice, bob_id)
         link = await _create_link(alice, chat_id)
 
-        r = await alice.post(f"/invite-links/{link['token']}/revoke")
+        r = await alice.post("/invite-links/revoke", json={"token": link['token']})
         assert r.status_code == 200, r.text
 
         r = await carol.get(f"/invite-links/{link['token']}")
@@ -217,7 +218,7 @@ async def test_join_adds_participant_and_bumps_use_count():
         chat_id = await _group_with(alice, bob_id)
         link = await _create_link(alice, chat_id)
 
-        r = await carol.post(f"/invite-links/{link['token']}/join")
+        r = await carol.post("/invite-links/join", json={"token": link['token']})
         assert r.status_code == 200, r.text
         body = r.json()["data"]
         assert body["chat_id"] == str(chat_id)
@@ -238,6 +239,41 @@ async def test_join_adds_participant_and_bumps_use_count():
             await c.aclose()
 
 
+async def test_join_audit_event_records_the_invite_link_id():
+    """`INVITE_LINK_JOINED` must carry `invite_link_id`, symmetric with `INVITE_LINK_CREATED` and
+    `INVITE_LINK_REVOKED` — otherwise an investigator looking at a chat with more than one active
+    link cannot tell which one a given join used."""
+    alice, alice_id = await _register_user()
+    bob, bob_id = await _register_user()
+    carol, carol_id = await _register_user()
+    try:
+        chat_id = await _group_with(alice, bob_id)
+        link = await _create_link(alice, chat_id)
+
+        r = await carol.post("/invite-links/join", json={"token": link["token"]})
+        assert r.status_code == 200, r.text
+
+        client = AsyncIOMotorClient(app_settings.MONGO_URL, uuidRepresentation="standard")
+        try:
+            db = client[app_settings.MONGO_DB_NAME]
+            record = await db["security_audit"].find_one(
+                {
+                    "event": "invite_link_joined",
+                    "user_id": carol_id,
+                    "chat_id": chat_id,
+                },
+                sort=[("created_at", -1)],
+            )
+        finally:
+            client.close()
+
+        assert record is not None
+        assert record["details"]["invite_link_id"] == str(link["id"])
+    finally:
+        for c in (alice, bob, carol):
+            await c.aclose()
+
+
 async def test_join_triggers_epoch_rotation_for_encrypted_chats():
     """Joining through a link must open a new epoch exactly like `add-participants` does — the
     invite-link join path calls `chat_services.add_chat_participants` rather than a second,
@@ -253,7 +289,7 @@ async def test_join_triggers_epoch_rotation_for_encrypted_chats():
         epoch_before = r.json()["data"]["epoch"]
 
         link = await _create_link(alice, chat_id)
-        r = await carol.post(f"/invite-links/{link['token']}/join")
+        r = await carol.post("/invite-links/join", json={"token": link['token']})
         assert r.status_code == 200, r.text
 
         r = await alice.get(f"/crypto/chats/{chat_id}/roster")
@@ -272,7 +308,7 @@ async def test_already_member_join_is_a_noop_and_does_not_consume_a_use():
         link = await _create_link(alice, chat_id, max_uses=1)
 
         # bob is already a member — following the link must be a harmless no-op.
-        r = await bob.post(f"/invite-links/{link['token']}/join")
+        r = await bob.post("/invite-links/join", json={"token": link['token']})
         assert r.status_code == 200, r.text
         assert r.json()["data"]["already_member"] is True
 
@@ -293,10 +329,10 @@ async def test_join_rejects_exhausted_link():
         chat_id = await _group_with(alice, bob_id)
         link = await _create_link(alice, chat_id, max_uses=1)
 
-        r = await carol.post(f"/invite-links/{link['token']}/join")
+        r = await carol.post("/invite-links/join", json={"token": link['token']})
         assert r.status_code == 200, r.text
 
-        r = await dave.post(f"/invite-links/{link['token']}/join")
+        r = await dave.post("/invite-links/join", json={"token": link['token']})
         assert r.status_code == 410, r.text
         assert r.json()["error_code"] == "INVITE_LINK_GONE"
 
@@ -318,7 +354,7 @@ async def test_join_rejects_expired_link():
             alice, chat_id, expires_at="2000-01-01T00:00:00Z"
         )
 
-        r = await carol.post(f"/invite-links/{link['token']}/join")
+        r = await carol.post("/invite-links/join", json={"token": link['token']})
         assert r.status_code == 410, r.text
         assert r.json()["error_code"] == "INVITE_LINK_GONE"
     finally:
@@ -334,10 +370,10 @@ async def test_join_rejects_revoked_link():
         chat_id = await _group_with(alice, bob_id)
         link = await _create_link(alice, chat_id)
 
-        r = await alice.post(f"/invite-links/{link['token']}/revoke")
+        r = await alice.post("/invite-links/revoke", json={"token": link['token']})
         assert r.status_code == 200, r.text
 
-        r = await carol.post(f"/invite-links/{link['token']}/join")
+        r = await carol.post("/invite-links/join", json={"token": link['token']})
         assert r.status_code == 410, r.text
     finally:
         for c in (alice, bob, carol):
@@ -347,7 +383,7 @@ async def test_join_rejects_revoked_link():
 async def test_join_rejects_unknown_token():
     alice, alice_id = await _register_user()
     try:
-        r = await alice.post(f"/invite-links/{uuid.uuid4().hex}/join")
+        r = await alice.post("/invite-links/join", json={"token": uuid.uuid4().hex})
         assert r.status_code == 404, r.text
     finally:
         await alice.aclose()
@@ -366,8 +402,8 @@ async def test_concurrent_joins_on_single_use_remaining_link_only_one_succeeds()
         link = await _create_link(alice, chat_id, max_uses=1)
 
         results = await asyncio.gather(
-            carol.post(f"/invite-links/{link['token']}/join"),
-            dave.post(f"/invite-links/{link['token']}/join"),
+            carol.post("/invite-links/join", json={"token": link["token"]}),
+            dave.post("/invite-links/join", json={"token": link["token"]}),
         )
         statuses = sorted(r.status_code for r in results)
         assert statuses == [200, 410]
@@ -496,12 +532,13 @@ async def test_join_below_cap_still_succeeds_via_service(monkeypatch):
             )
 
         async with _session() as db:
-            chat_id_out, already_member, epoch = (
+            chat_id_out, already_member, epoch, link_id_out = (
                 await invite_link_services.join_via_invite_link(
                     db, None, link.token, carol_id
                 )
             )
         assert chat_id_out == chat_id
+        assert link_id_out == link.id
         assert already_member is False
         assert epoch is not None
 

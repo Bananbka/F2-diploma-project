@@ -17,6 +17,7 @@ from app.domains.chats.schemas.invite_link_schemas import (
     InviteLinkJoinResponse,
     InviteLinkPreviewResponse,
     InviteLinkResponse,
+    InviteLinkTokenRequest,
 )
 from app.domains.chats.services import chat_services, invite_link_services
 from app.domains.messages.services import messages_service
@@ -152,9 +153,9 @@ async def list_invite_links(
     return SuccessResponse(data=links)
 
 
-@router.post("/{token}/revoke", response_model=SuccessResponse[InviteLinkResponse])
+@router.post("/revoke", response_model=SuccessResponse[InviteLinkResponse])
 async def revoke_invite_link(
-    token: str = Path(..., min_length=1, max_length=128),
+    body: InviteLinkTokenRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
@@ -162,7 +163,14 @@ async def revoke_invite_link(
 ):
     """Revoke a link. Scoped to the chat it belongs to, not "any admin of any chat" — the caller
     must be ADMIN/OWNER of *that specific* chat, resolved from the link itself rather than trusted
-    from the request."""
+    from the request.
+
+    The token is in the request body, not the URL: unlike preview, this is an authenticated
+    mutating action reached from a UI a caller is already inside (chat-info), never from a
+    clicked link, so there is no reason for the token to appear in a URL path where it would end
+    up in uvicorn/nginx access logs.
+    """
+    token = body.token
     await enforce_rate_limit(
         redis,
         scope="invite-link-revoke",
@@ -224,9 +232,9 @@ async def preview_invite_link(
     )
 
 
-@router.post("/{token}/join", response_model=SuccessResponse[InviteLinkJoinResponse])
+@router.post("/join", response_model=SuccessResponse[InviteLinkJoinResponse])
 async def join_invite_link(
-    token: str = Path(..., min_length=1, max_length=128),
+    body: InviteLinkTokenRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
@@ -234,12 +242,19 @@ async def join_invite_link(
 ):
     """Join the chat an invite link points at.
 
+    The token is in the request body, not the URL. A client that only has a link goes through
+    `preview_invite_link` first — that one genuinely needs the token in the path, since it is
+    meant to be a clickable, shareable URL — and joining is a deliberate follow-up action taken
+    from inside the app, not something reached directly from the link. Keeping it out of the URL
+    here means it never appears in a uvicorn or nginx access log line for this endpoint.
+
     Goes through `chat_services.add_chat_participants` — the same function `POST
     /chats/{id}/add-participants` uses — so the encrypted-group member cap and the mandatory
     epoch rotation on membership change apply identically here. See
     `invite_link_services.join_via_invite_link` for how token consumption and the add are made
     atomic.
     """
+    token = body.token
     await enforce_rate_limit(
         redis,
         scope="invite-link-join",
@@ -249,8 +264,8 @@ async def join_invite_link(
         message="Too many join attempts. Please wait and try again.",
     )
 
-    chat_id, already_member, epoch = await invite_link_services.join_via_invite_link(
-        db, mongo_db, token, user.id
+    chat_id, already_member, epoch, link_id = (
+        await invite_link_services.join_via_invite_link(db, mongo_db, token, user.id)
     )
 
     if not already_member:
@@ -266,14 +281,15 @@ async def join_invite_link(
             recipient_ids=participant_ids,
         )
 
-        # The token itself is never logged (it is a credential) — only the chat and the joining
-        # user, same as `PARTICIPANTS_ADDED`.
+        # The token itself is never logged (it is a credential) — only the chat, the joining
+        # user and the link's id, symmetric with `INVITE_LINK_CREATED`/`INVITE_LINK_REVOKED` so an
+        # investigator can tell which specific link a join used when a chat has more than one.
         await audit.record(
             mongo_db,
             AuditEvent.INVITE_LINK_JOINED,
             user_id=user.id,
             chat_id=chat_id,
-            details={},
+            details={"invite_link_id": str(link_id)},
         )
 
     return SuccessResponse(
