@@ -20,6 +20,8 @@ function message(overrides: Partial<DecryptedMessage> = {}): DecryptedMessage {
         forwardedFrom: null,
         attachments: [],
         senderVerified: false,
+        reactions: [],
+        isPinned: false,
         ...overrides,
     };
 }

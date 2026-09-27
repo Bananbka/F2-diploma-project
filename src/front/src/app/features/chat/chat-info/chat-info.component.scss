@@ -94,16 +94,54 @@
 .tile {
     display: flex;
     align-items: center;
+    width: 100%;
     gap: 0.75rem;
     padding: 0.875rem 1rem;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-2xl);
+    color: inherit;
+    font: inherit;
+    text-align: left;
     text-decoration: none;
     transition: border-color 0.15s ease;
 
     &:hover {
         border-color: rgb(163 88 249 / 30%);
+    }
+}
+
+/* A toggle-style affordance rather than a native checkbox, matching the visual language of the
+   rest of this panel. Mute is a bool client-side (a far-future timestamp, or null) — see
+   `ChatInfoComponent.toggleMute` — so a duration picker would be complexity with no server-side
+   use, not a missing feature. */
+.switch {
+    position: relative;
+    flex-shrink: 0;
+    width: 2.25rem;
+    height: 1.25rem;
+    background: rgb(139 139 154 / 30%);
+    border-radius: 999px;
+    transition: background-color 0.15s ease;
+
+    &::after {
+        position: absolute;
+        top: 0.1875rem;
+        left: 0.1875rem;
+        width: 0.875rem;
+        height: 0.875rem;
+        background: #fff;
+        border-radius: 50%;
+        content: '';
+        transition: transform 0.15s ease;
+    }
+
+    &.is-on {
+        background: var(--primary);
+
+        &::after {
+            transform: translateX(1rem);
+        }
     }
 }
 

@@ -21,6 +21,8 @@ import {
     LucideAngularModule,
     MessageSquare,
     Pencil,
+    Pin,
+    PinOff,
     RefreshCw,
     Reply,
     Shield,
@@ -85,8 +87,13 @@ export class ChatViewComponent {
     readonly memberVerificationError = this.store.memberVerificationError;
     readonly encryptionUnavailable = this.store.encryptionUnavailable;
     readonly sendBlockedReason = this.store.sendBlockedReason;
+    readonly pinnedMessages = this.store.pinnedMessages;
+    readonly canPinMessages = this.store.canPinMessages;
 
     readonly bannerDismissed = signal(false);
+    /** The pinned-messages bar is dismissible per chat visit, not permanently. */
+    readonly pinnedBannerDismissed = signal(false);
+    readonly pinnedPanelOpen = signal(false);
     readonly replyingTo = signal<DecryptedMessage | null>(null);
     readonly editing = signal<DecryptedMessage | null>(null);
 
@@ -186,6 +193,8 @@ export class ChatViewComponent {
     readonly editIcon = Pencil;
     readonly forwardIcon = Forward;
     readonly trashIcon = Trash2;
+    readonly pinIcon = Pin;
+    readonly pinOffIcon = PinOff;
 
     quotedName(message: DecryptedMessage): string {
         return this.directory.isMe(message.senderId) ? 'yourself' : this.directory.lookup(message.senderId).name;
@@ -196,6 +205,8 @@ export class ChatViewComponent {
             const id = this.chatId() ?? null;
             this.store.activeChatId.set(id);
             this.bannerDismissed.set(false);
+            this.pinnedBannerDismissed.set(false);
+            this.pinnedPanelOpen.set(false);
             this.pinToBottom = true;
             this.atNewest = false;
         });
@@ -262,6 +273,8 @@ export class ChatViewComponent {
             forwardedFrom: null,
             attachments: [],
             senderVerified: true,
+            reactions: [],
+            isPinned: false,
         };
     }
 
@@ -333,6 +346,16 @@ export class ChatViewComponent {
         }
 
         items.push({ icon: CheckCheck, label: 'Select', action: () => this.store.toggleSelected(message.id) });
+
+        // Server-enforced role gate — this is UX only, so a member simply does not see the option
+        // rather than seeing it fail.
+        if (this.canPinMessages()) {
+            items.push(
+                message.isPinned
+                    ? { icon: PinOff, label: 'Unpin', action: () => void this.store.unpinMessage(message.id) }
+                    : { icon: Pin, label: 'Pin', action: () => void this.store.pinMessage(message.id) }
+            );
+        }
 
         if (this.canDelete(message.senderId)) {
             items.push({
@@ -540,6 +563,36 @@ export class ChatViewComponent {
 
     canDelete(senderId: string): boolean {
         return this.directory.isMe(senderId);
+    }
+
+    react(messageId: string, emoji: string): void {
+        // The endpoint itself toggles — the same emoji from the same user removes it — so both
+        // "add" and "remove your own" go through this one call.
+        void this.store.react(messageId, emoji);
+    }
+
+    /** The most recently pinned message, for the collapsed banner. */
+    readonly latestPinned = computed(() => this.pinnedMessages().at(-1) ?? null);
+
+    dismissPinnedBanner(): void {
+        this.pinnedBannerDismissed.set(true);
+    }
+
+    openPinnedPanel(): void {
+        this.pinnedPanelOpen.set(true);
+    }
+
+    closePinnedPanel(): void {
+        this.pinnedPanelOpen.set(false);
+    }
+
+    jumpToPinned(messageId: string): void {
+        this.pinnedPanelOpen.set(false);
+        this.jumpToMessage(messageId);
+    }
+
+    async unpinFromPanel(messageId: string): Promise<void> {
+        await this.store.unpinMessage(messageId);
     }
 
     async openSafetyNumber(): Promise<void> {

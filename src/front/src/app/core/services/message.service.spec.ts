@@ -29,10 +29,14 @@ function envelopeMessage(id: string, idx: number): MessageResponse {
         channel_post: null,
         content_format: 'sender_keys_v1',
         reply_to_message_id: null,
+        forwarded_from: null,
         created_at: '2026-01-01T00:00:00Z',
         attachments: null,
+        reactions: [],
         is_read: false,
         is_pinned: false,
+        pinned_at: null,
+        pinned_by: null,
         is_edited: false,
         is_encrypted: true,
     } as MessageResponse;
@@ -151,5 +155,81 @@ describe('MessageService', () => {
         service.recordOutgoing(sent, 'after');
 
         expect((await service.decrypt(CHAT, sent)).text).toBe('after');
+    });
+
+    /** A reaction/pin change on an already-opened message must patch in place, not re-decrypt. */
+    it('patches reactions and pins on an opened message without re-decrypting', async () => {
+        const chain = {
+            messageKeyFor: jasmine.createSpy('messageKeyFor').and.returnValue({ key: new Uint8Array(32) }),
+        };
+        keyStore.getReceiverChain.and.returnValue(chain as never);
+        keyStore.getChainSigningKey.and.returnValue(undefined);
+
+        const raw = envelopeMessage('m-meta', 0);
+        const opened = await service.decrypt(CHAT, raw);
+        // This particular envelope cannot actually be opened (no real ciphertext), so it lands as
+        // `failed` — irrelevant here, since the point is that a meta patch must not disturb it.
+        expect(opened.status).toBe('failed');
+
+        const patched = raw;
+        patched.reactions = [{ user_id: 'u1', emoji: '👍', created_at: '2026-01-01T00:00:01Z' }];
+        patched.is_pinned = true;
+
+        const result = service.patchMeta(patched);
+
+        expect(result).not.toBeNull();
+        expect(result!.text).toBe(opened.text);
+        expect(result!.status).toBe(opened.status);
+        expect(result!.senderVerified).toBe(opened.senderVerified);
+        expect(result!.reactions).toEqual(patched.reactions);
+        expect(result!.isPinned).toBeTrue();
+
+        // No second decrypt attempt: the ratchet was not asked for another key.
+        expect(chain.messageKeyFor).toHaveBeenCalledTimes(1);
+    });
+
+    /**
+     * The regression this guards: a meta update landing while the first `decrypt()` for that
+     * message is still in flight used to be silently dropped, because `patchMeta` found no `opened`
+     * cache entry yet and gave up. The fix records it into a side-map that `decrypt()` consults once
+     * it actually resolves, so the cached result reflects the patch rather than the stale value
+     * baked into the `MessageResponse` that was originally handed to `decrypt()`.
+     */
+    it('applies a meta patch that arrives before the first decrypt resolves', async () => {
+        keyStore.getChainSigningKey.and.returnValue(undefined);
+
+        // `messageKeyFor` itself is called synchronously in `decryptOnce` (never awaited) — the
+        // genuine in-flight window is inside `openMessage`'s real WebCrypto calls, which this test
+        // relies on rather than faking, so it exercises the actual await boundary.
+        const chain = {
+            messageKeyFor: jasmine.createSpy('messageKeyFor').and.returnValue({ key: new Uint8Array(32) }),
+        };
+        keyStore.getReceiverChain.and.returnValue(chain as never);
+
+        const raw = envelopeMessage('m-race', 0);
+        // Stale reactions/pin baked into the object handed to decrypt() — this is what would be
+        // cached if the race were lost.
+        raw.reactions = [];
+        raw.is_pinned = false;
+
+        const decryptPromise = service.decrypt(CHAT, raw);
+
+        // decrypt() has started synchronously and is now paused inside `openMessage`'s real
+        // WebCrypto `await` — nothing has been cached into `opened` for this id yet, so this is
+        // exactly the window the bug lost.
+        const fresh = { ...raw, reactions: [{ user_id: 'u2', emoji: '❤️', created_at: '2026-01-01T00:00:02Z' }] };
+        fresh.is_pinned = true;
+        const patchResult = service.patchMeta(fresh);
+        expect(patchResult).toBeNull(); // nothing cached yet — this is the drop the old code hit
+
+        const result = await decryptPromise;
+
+        expect(result.reactions).toEqual(fresh.reactions);
+        expect(result.isPinned).toBeTrue();
+
+        // And the cache now reflects the patched value too, not the stale one.
+        const second = await service.decrypt(CHAT, raw);
+        expect(second.reactions).toEqual(fresh.reactions);
+        expect(second.isPinned).toBeTrue();
     });
 });

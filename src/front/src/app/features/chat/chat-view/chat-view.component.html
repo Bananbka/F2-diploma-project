@@ -102,6 +102,44 @@
         </div>
     }
 
+    <!-- Pinned messages are chat-scoped, plaintext metadata — visible regardless of decrypt status.
+         The banner shows only the latest pin; "See all" opens the full list. -->
+    @if (latestPinned(); as pinned) {
+        @if (!pinnedBannerDismissed()) {
+            <div
+                class="pinned-bar"
+                role="status"
+            >
+                <lucide-icon [img]="pinIcon" />
+                <button
+                    type="button"
+                    class="pinned-bar-text"
+                    (click)="jumpToPinned(pinned.id)"
+                >
+                    <span class="pinned-bar-label"> Pinned message{{ pinnedMessages().length > 1 ? 's' : '' }} </span>
+                    <span class="pinned-bar-body">{{ pinned.text ?? 'Unreadable message' }}</span>
+                </button>
+                @if (pinnedMessages().length > 1) {
+                    <button
+                        type="button"
+                        class="pinned-bar-action"
+                        (click)="openPinnedPanel()"
+                    >
+                        See all ({{ pinnedMessages().length }})
+                    </button>
+                }
+                <button
+                    type="button"
+                    class="pinned-bar-dismiss"
+                    aria-label="Hide pinned message"
+                    (click)="dismissPinnedBanner()"
+                >
+                    <lucide-icon [img]="closeIcon" />
+                </button>
+            </div>
+        }
+    }
+
     <!-- Readable, but nothing new can be sealed. Distinct from the member-set alarm: no one is
          necessarily lying, the chat simply exceeds what sender-key distribution can carry. -->
     @if (encryptionUnavailable(); as reason) {
@@ -182,6 +220,7 @@
                         (editRequested)="startEdit($event)"
                         (menuRequested)="openMessageMenu($event)"
                         (jumpRequested)="jumpToMessage($event)"
+                        (reactionToggled)="react(item.message.id, $event)"
                     />
                 }
 
@@ -394,6 +433,46 @@
             (typing)="onTyping($event)"
         />
     }
+}
+
+@if (pinnedPanelOpen()) {
+    <div
+        class="picker-backdrop"
+        (click)="closePinnedPanel()"
+    ></div>
+    <div
+        class="picker"
+        role="dialog"
+        aria-label="Pinned messages"
+    >
+        <p class="picker-title">Pinned messages</p>
+
+        <div class="picker-list">
+            @for (pinned of pinnedMessages(); track pinned.id) {
+                <div class="pinned-panel-item">
+                    <button
+                        type="button"
+                        class="pinned-panel-text"
+                        (click)="jumpToPinned(pinned.id)"
+                    >
+                        {{ pinned.text ?? 'Unreadable message' }}
+                    </button>
+                    @if (canPinMessages()) {
+                        <button
+                            type="button"
+                            class="pinned-panel-unpin"
+                            aria-label="Unpin this message"
+                            (click)="unpinFromPanel(pinned.id)"
+                        >
+                            <lucide-icon [img]="pinOffIcon" />
+                        </button>
+                    }
+                </div>
+            } @empty {
+                <p class="picker-empty">No pinned messages.</p>
+            }
+        </div>
+    </div>
 }
 
 @if (menuAnchor(); as anchor) {

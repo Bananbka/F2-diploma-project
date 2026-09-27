@@ -117,6 +117,76 @@
         </div>
     </div>
 
+    <!-- Reactions are plaintext metadata, not sealed content, so they render even for a message we
+         could not decrypt — a reaction says nothing about the content itself. -->
+    @if (reactionGroups().length || !selecting()) {
+        <div class="reactions">
+            @for (group of reactionGroups(); track group.emoji) {
+                <button
+                    type="button"
+                    class="reaction-pill"
+                    [class.is-mine]="group.mine"
+                    [attr.aria-pressed]="group.mine"
+                    [attr.aria-label]="group.emoji + ' reaction, ' + group.count"
+                    (click)="onPillClick(group.emoji)"
+                >
+                    <span class="reaction-emoji">{{ group.emoji }}</span>
+                    <span class="reaction-count">{{ group.count }}</span>
+                </button>
+            }
+
+            @if (!selecting()) {
+                <span class="reaction-add-wrap">
+                    <button
+                        type="button"
+                        class="reaction-add react-trigger"
+                        aria-label="Add a reaction"
+                        aria-haspopup="menu"
+                        [attr.aria-expanded]="pickerOpen()"
+                        (click)="togglePicker($event)"
+                    >
+                        <lucide-icon [img]="smilePlusIcon" />
+                    </button>
+
+                    @if (pickerOpen()) {
+                        <div
+                            class="reactions-picker"
+                            role="menu"
+                        >
+                            @for (emoji of quickReactions; track emoji) {
+                                <button
+                                    type="button"
+                                    role="menuitem"
+                                    class="picker-emoji"
+                                    (click)="pickReaction(emoji)"
+                                >
+                                    {{ emoji }}
+                                </button>
+                            }
+                            <input
+                                type="text"
+                                class="picker-custom"
+                                placeholder="Other…"
+                                maxlength="8"
+                                aria-label="Enter a custom emoji reaction"
+                                [value]="customEmoji()"
+                                (input)="customEmoji.set($any($event.target).value)"
+                                (keydown.enter)="submitCustomEmoji()"
+                            />
+                        </div>
+                    }
+                </span>
+            }
+        </div>
+    }
+
+    @if (message().isPinned) {
+        <p class="pinned-tag">
+            <lucide-icon [img]="pinIcon" />
+            Pinned
+        </p>
+    }
+
     <p class="meta">
         <span class="time">{{ time() }}</span>
 

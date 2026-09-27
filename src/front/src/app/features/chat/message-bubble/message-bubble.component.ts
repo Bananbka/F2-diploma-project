@@ -23,11 +23,14 @@ import {
     MoreVertical,
     Paperclip,
     Pencil,
+    Pin,
     RefreshCw,
     Reply,
     ShieldAlert,
     ShieldCheck,
     ShieldOff,
+    Smile,
+    SmilePlus,
     Trash2,
 } from 'lucide-angular';
 
@@ -37,6 +40,21 @@ import { DirectoryService } from '../../../core/services/directory.service';
 import { DecryptedMessage, DecryptStatus } from '../../../core/services/message.service';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
 import { messageTime } from '../../../shared/utils/display';
+
+/**
+ * The curated quick-react set. Not exhaustive — a full emoji keyboard is out of scope — but this
+ * covers the common messenger reactions (Telegram/Discord/Slack all ship a similar short list),
+ * plus a text input for anything else. The server accepts any non-ASCII emoji
+ * (`validate_emoji`), so "other" is not artificially restricted to this set.
+ */
+export const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
+
+/** One emoji, grouped, for rendering as a pill. */
+export interface ReactionGroup {
+    emoji: string;
+    count: number;
+    mine: boolean;
+}
 
 /**
  * How a status renders.
@@ -157,6 +175,11 @@ export class MessageBubbleComponent {
     /** Tapping a quote asks to be taken to the message it quotes. */
     readonly jumpRequested = output<string>();
     readonly selectionToggled = output<string>();
+    /**
+     * Emitted for both adding and removing: the store's `react` call is itself a toggle, so a pill
+     * we already hold and a fresh pick from the tray both go through the same event.
+     */
+    readonly reactionToggled = output<string>();
 
     /** True while a bulk selection is in progress anywhere in the conversation. */
     readonly selecting = input(false);
@@ -217,6 +240,19 @@ export class MessageBubbleComponent {
                 clearTimeout(timer);
             }
         });
+
+        // Close the reaction tray on any click outside it, the same pattern the context menu uses.
+        const onPointerDown = (event: MouseEvent) => {
+            if (!this.pickerOpen()) {
+                return;
+            }
+            const target = event.target as HTMLElement;
+            if (!target.closest('.reactions-picker') && !target.closest('.react-trigger')) {
+                this.closePicker();
+            }
+        };
+        document.addEventListener('mousedown', onPointerDown, true);
+        this.destroyRef.onDestroy(() => document.removeEventListener('mousedown', onPointerDown, true));
     }
 
     /** The status glyph for our own message: pending, delivered, or rejected. */
@@ -242,6 +278,33 @@ export class MessageBubbleComponent {
     readonly paperclipIcon = Paperclip;
     readonly moreIcon = MoreVertical;
     readonly forwardIcon = Forward;
+    readonly smileIcon = Smile;
+    readonly smilePlusIcon = SmilePlus;
+    readonly pinIcon = Pin;
+
+    readonly quickReactions = QUICK_REACTIONS;
+
+    /** Open while picking a reaction from the tray. */
+    readonly pickerOpen = signal(false);
+    readonly customEmoji = signal('');
+
+    /** Reactions on this message, grouped by emoji so the bubble renders one pill per emoji. */
+    readonly reactionGroups = computed<ReactionGroup[]>(() => {
+        const reactions = this.message().reactions;
+        const groups = new Map<string, ReactionGroup>();
+
+        for (const reaction of reactions) {
+            const existing = groups.get(reaction.emoji);
+            const mine = existing?.mine || this.directory.isMe(reaction.user_id);
+            groups.set(reaction.emoji, {
+                emoji: reaction.emoji,
+                count: (existing?.count ?? 0) + 1,
+                mine,
+            });
+        }
+
+        return [...groups.values()];
+    });
 
     /** The original author of a forwarded copy, resolved like any other sender. */
     readonly forwardedAuthor = computed(() => {
@@ -317,4 +380,39 @@ export class MessageBubbleComponent {
         }
         return this.directory.isMe(quoted.senderId) ? 'You' : this.directory.lookup(quoted.senderId).name;
     });
+
+    togglePicker(event: MouseEvent): void {
+        event.stopPropagation();
+        this.pickerOpen.update((open) => !open);
+        this.customEmoji.set('');
+    }
+
+    closePicker(): void {
+        this.pickerOpen.set(false);
+        this.customEmoji.set('');
+    }
+
+    /** Clicking a pill toggles it: pick it again to remove your own, or add it if it is not yours. */
+    onPillClick(emoji: string): void {
+        this.reactionToggled.emit(emoji);
+    }
+
+    pickReaction(emoji: string): void {
+        this.reactionToggled.emit(emoji);
+        this.closePicker();
+    }
+
+    submitCustomEmoji(): void {
+        const emoji = this.customEmoji().trim();
+        // Mirrors the server's own check (`validate_emoji`): reject plain text so the request is
+        // not sent only to be rejected, without trying to fully validate Unicode grapheme clusters.
+        if (emoji && !this.isAscii(emoji)) {
+            this.reactionToggled.emit(emoji);
+        }
+        this.closePicker();
+    }
+
+    private isAscii(value: string): boolean {
+        return /^[\x00-\x7F]*$/.test(value);
+    }
 }

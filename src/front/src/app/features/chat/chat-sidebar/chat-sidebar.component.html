@@ -183,6 +183,13 @@
                                 Signed
                             </span>
                         }
+                        @if (chat.is_muted) {
+                            <lucide-icon
+                                [img]="bellOffIcon"
+                                class="mute-icon"
+                                aria-label="Muted"
+                            />
+                        }
                     </span>
                     <span class="time">{{ timeOf(chat) }}</span>
                 </span>

@@ -310,6 +310,13 @@
     font-size: 0.6875rem;
 }
 
+.mute-icon {
+    flex-shrink: 0;
+    width: 0.75rem;
+    height: 0.75rem;
+    color: var(--muted-foreground);
+}
+
 .preview {
     display: flex;
     align-items: center;

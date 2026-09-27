@@ -6,7 +6,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { signChannelPost, verifyChannelPost } from '../crypto/channel';
 import { openMessage, sealMessage } from '../crypto/envelope';
 import { b64uDecode, fromUtf8, utf8 } from '../crypto/primitives';
-import { ChatKeys, ForwardOrigin, MessageAttachment, MessageResponse } from '../models/crypto.model';
+import { ChatKeys, ForwardOrigin, MessageAttachment, MessageReaction, MessageResponse } from '../models/crypto.model';
 import { ChatApiService } from './chat-api.service';
 import { CryptoApiService } from './crypto-api.service';
 import { isCryptoNotEnabled } from './crypto-errors';
@@ -36,6 +36,12 @@ export interface DecryptedMessage {
     attachments: MessageAttachment[];
     /** True only when a signature was checked and passed. */
     senderVerified: boolean;
+    /**
+     * Plaintext metadata, not sealed content — reactions and pins are never part of the envelope,
+     * so they are attached here rather than derived from decryption.
+     */
+    reactions: MessageReaction[];
+    isPinned: boolean;
 }
 
 /** A page of history, ciphertext included so undecryptable entries can be retried in place. */
@@ -57,6 +63,21 @@ export class MessageService {
      * give away exactly what the ratchet's forward secrecy is protecting.
      */
     private readonly opened = new Map<string, DecryptedMessage>();
+
+    /**
+     * The freshest known reaction/pin state for a message, keyed by id, independent of whether
+     * `opened` holds a cache entry yet.
+     *
+     * A `message_reaction_added`/`message_pinned` event can land while that message's first
+     * `decrypt()` is still in flight (own just-sent message, or a WS event interleaving with the
+     * sequential decrypt loop in `loadMessages`). `patchMeta` used to no-op on a cache miss, so that
+     * update was lost the moment `decryptOnce` resolved and cached a `DecryptedMessage` built from
+     * its own, older `reactions`/`is_pinned`. Recording every meta update here first — regardless of
+     * cache state — lets `decrypt()` overlay the latest value once `decryptOnce` finally resolves,
+     * right before it caches the result. Cleared alongside `opened` so it never outlives the
+     * plaintext it describes.
+     */
+    private readonly metaOverrides = new Map<string, { reactions: MessageReaction[]; isPinned: boolean }>();
 
     /**
      * Encrypt and send.
@@ -268,15 +289,29 @@ export class MessageService {
         }
 
         const result = await this.decryptOnce(chatId, message);
-        if (result.status !== 'no_key') {
-            this.opened.set(message._id, result);
+
+        // `decryptOnce` awaits real crypto work, so a `patchMeta` call can land on the side-map
+        // at any point during that wait. Overlaying here, right before caching, is the latest
+        // possible read and so the one least likely to lose a concurrent update.
+        const withMeta = this.applyMetaOverride(result);
+        if (withMeta.status !== 'no_key') {
+            this.opened.set(message._id, withMeta);
         }
-        return result;
+        return withMeta;
+    }
+
+    private applyMetaOverride(result: DecryptedMessage): DecryptedMessage {
+        const override = this.metaOverrides.get(result.id);
+        if (!override) {
+            return result;
+        }
+        return { ...result, reactions: override.reactions, isPinned: override.isPinned };
     }
 
     /** Drop retained plaintext. Called when the key store closes; holding it open would outlive it. */
     forgetOpened(): void {
         this.opened.clear();
+        this.metaOverrides.clear();
     }
 
     /**
@@ -287,6 +322,37 @@ export class MessageService {
      */
     forgetOne(messageId: string): void {
         this.opened.delete(messageId);
+        this.metaOverrides.delete(messageId);
+    }
+
+    /**
+     * Apply a reaction/pin change without re-decrypting.
+     *
+     * Reactions and pins are plaintext metadata carried on the same document, but the content
+     * itself has not changed — re-running `decrypt` would either return the stale cached entry (for
+     * a message we already opened) or, worse, attempt to open the envelope again.
+     *
+     * Recorded into `metaOverrides` unconditionally, so an update that arrives before this
+     * message's first `decrypt()` resolves is not lost — `decrypt()` overlays it once `decryptOnce`
+     * finally resolves and it caches the result. If `opened` already holds this message, it is
+     * patched in place too and the caller gets the patched result back immediately; otherwise there
+     * is nothing to render yet and the caller falls back to whatever it already has.
+     */
+    patchMeta(raw: MessageResponse): DecryptedMessage | null {
+        this.metaOverrides.set(raw._id, { reactions: raw.reactions ?? [], isPinned: raw.is_pinned });
+
+        const cached = this.opened.get(raw._id);
+        if (!cached) {
+            return null;
+        }
+
+        const updated: DecryptedMessage = {
+            ...cached,
+            reactions: raw.reactions ?? [],
+            isPinned: raw.is_pinned,
+        };
+        this.opened.set(raw._id, updated);
+        return updated;
     }
 
     /**
@@ -311,6 +377,8 @@ export class MessageService {
             status: sent.content_format === 'channel_signed_v1' ? 'plaintext' : 'ok',
             // We signed it ourselves, so authorship is known rather than merely checked.
             senderVerified: true,
+            reactions: sent.reactions ?? [],
+            isPinned: sent.is_pinned,
         };
 
         this.opened.set(sent._id, message);
@@ -318,6 +386,9 @@ export class MessageService {
     }
 
     private async decryptOnce(chatId: string, message: MessageResponse): Promise<DecryptedMessage> {
+        // `reactions`/`isPinned` here reflect this particular `MessageResponse` instance only.
+        // `decrypt()` overlays `metaOverrides` afterwards, once this (possibly slow, real-crypto)
+        // call has actually resolved, so a `patchMeta` racing this decrypt is not lost.
         const base = {
             id: message._id,
             chatId: message.chat_id,
@@ -327,6 +398,8 @@ export class MessageService {
             replyToId: message.reply_to_message_id,
             forwardedFrom: message.forwarded_from,
             attachments: message.attachments ?? [],
+            reactions: message.reactions ?? [],
+            isPinned: message.is_pinned,
         };
 
         if (message.content_format === 'channel_signed_v1' && message.channel_post) {

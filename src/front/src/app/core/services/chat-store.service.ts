@@ -88,6 +88,32 @@ export class ChatStoreService {
     readonly messagesLoading = signal(false);
     readonly hasMoreHistory = signal(false);
 
+    /**
+     * Pinned messages for the open chat, newest pin last. Loaded alongside the conversation and
+     * refreshed on `message_pinned`/`message_unpinned` for whichever chat is active.
+     */
+    readonly pinnedMessages = signal<DecryptedMessage[]>([]);
+
+    /**
+     * Whether the current user could pin a message in the active chat.
+     *
+     * Private chats have no admin/owner distinction — either participant may pin. Groups and
+     * channels restrict it to admin/owner, matching the server; this is UX only, the real
+     * enforcement is `PIN_FORBIDDEN` from the API.
+     */
+    readonly canPinMessages = computed(() => {
+        const chat = this.activeChat();
+        if (!chat) {
+            return false;
+        }
+        if (chat.chat_type === 'private') {
+            return true;
+        }
+        const me = this.session.user()?.id;
+        const role = chat.participants.find((p) => p.user_id === me)?.role;
+        return role === 'admin' || role === 'owner';
+    });
+
     readonly chatKeys = signal<ChatKeys | null>(null);
 
     /**
@@ -240,6 +266,17 @@ export class ChatStoreService {
                 case 'key_epoch_started':
                     this.onEpochStarted(event.chat_id);
                     break;
+                case 'message_reaction_added':
+                case 'message_reaction_removed':
+                    this.onMessageMetaChanged(event.chat_id, event.payload);
+                    break;
+                case 'message_pinned':
+                case 'message_unpinned':
+                    this.onMessageMetaChanged(event.chat_id, event.payload);
+                    if (event.chat_id && event.chat_id === this.activeChatId()) {
+                        void this.loadPinned(event.chat_id);
+                    }
+                    break;
                 case 'typing_start':
                     this.setTyping(event.chat_id, event.user_id, true);
                     break;
@@ -330,6 +367,7 @@ export class ChatStoreService {
         this.rawMessages.clear();
         this.messages.set([]);
         this.pending.set([]);
+        this.pinnedMessages.set([]);
         this.realtimeError.set(null);
         this.clearSelection();
         this.chatKeys.set(null);
@@ -361,6 +399,7 @@ export class ChatStoreService {
             this.hasMoreHistory.set(decrypted.length === PAGE_SIZE);
             this.cachePreview(chatId, decrypted);
             this.scheduleGrantRetry(chatId);
+            void this.loadPinned(chatId);
 
             await this.markRead(chatId, decrypted);
         } catch {
@@ -654,6 +693,122 @@ export class ChatStoreService {
     async deleteMessage(messageId: string): Promise<void> {
         await firstValueFrom(this.chatApi.deleteMessage(messageId));
         this.messages.update((list) => list.filter((m) => m.id !== messageId));
+    }
+
+    /** Toggle the caller's reaction: the same emoji again removes it, a different one adds another. */
+    async react(messageId: string, emoji: string): Promise<void> {
+        try {
+            const raw = await firstValueFrom(this.chatApi.toggleReaction(messageId, emoji));
+            this.applyMeta(raw);
+        } catch {
+            this.realtimeError.set('Could not react to that message.');
+        }
+    }
+
+    /** Explicit removal — used by the "remove your reaction" affordance rather than the toggle. */
+    async unreact(messageId: string, emoji: string): Promise<void> {
+        try {
+            const raw = await firstValueFrom(this.chatApi.removeReaction(messageId, emoji));
+            this.applyMeta(raw);
+        } catch {
+            this.realtimeError.set('Could not remove that reaction.');
+        }
+    }
+
+    /**
+     * Pin a message. `canPinMessages` is the UX gate; `PIN_FORBIDDEN`/`PIN_LIMIT_REACHED` from the
+     * API are the real one and are surfaced here rather than swallowed.
+     */
+    async pinMessage(messageId: string): Promise<void> {
+        try {
+            const raw = await firstValueFrom(this.chatApi.pinMessage(messageId));
+            this.applyMeta(raw);
+            await this.loadPinned(raw.chat_id);
+        } catch (error) {
+            this.realtimeError.set(this.pinErrorMessage(error));
+        }
+    }
+
+    async unpinMessage(messageId: string): Promise<void> {
+        try {
+            const raw = await firstValueFrom(this.chatApi.unpinMessage(messageId));
+            this.applyMeta(raw);
+            await this.loadPinned(raw.chat_id);
+        } catch {
+            this.realtimeError.set('Could not unpin that message.');
+        }
+    }
+
+    private pinErrorMessage(error: unknown): string {
+        const code =
+            error instanceof HttpErrorResponse && typeof error.error?.error_code === 'string'
+                ? error.error.error_code
+                : null;
+        if (code === 'PIN_LIMIT_REACHED') {
+            return 'This chat already has the maximum number of pinned messages. Unpin one first.';
+        }
+        if (code === 'PIN_FORBIDDEN') {
+            return 'You do not have permission to pin messages in this chat.';
+        }
+        return 'Could not pin that message.';
+    }
+
+    /** Mute this chat until a future timestamp, or unmute by passing `null`. */
+    async setMuted(chatId: string, mutedUntil: string | null): Promise<void> {
+        try {
+            const result = await firstValueFrom(this.chatApi.muteChat(chatId, mutedUntil));
+            this.chats.update((list) =>
+                list.map((c) =>
+                    c.id === chatId
+                        ? {
+                              ...c,
+                              muted_until: result.muted_until,
+                              is_muted: result.muted_until !== null && new Date(result.muted_until) > new Date(),
+                          }
+                        : c
+                )
+            );
+        } catch {
+            this.realtimeError.set('Could not update mute for this chat.');
+        }
+    }
+
+    /** Refresh the pinned-messages list for one chat, decrypting through the usual cache. */
+    private async loadPinned(chatId: string): Promise<void> {
+        try {
+            const raw = await firstValueFrom(this.chatApi.getPinnedMessages(chatId));
+            const decrypted: DecryptedMessage[] = [];
+            for (const message of raw) {
+                decrypted.push(await this.messages_.decrypt(chatId, message));
+            }
+            this.pinnedMessages.set(decrypted);
+        } catch {
+            this.pinnedMessages.set([]);
+        }
+    }
+
+    /**
+     * Apply a reaction/pin change returned by our own request, without re-decrypting the message.
+     *
+     * `MessageService.patchMeta` updates the plaintext cache in place; this mirrors that onto the
+     * signal the conversation renders, and onto the raw cache retries read from.
+     */
+    private applyMeta(raw: MessageResponse): void {
+        this.rawMessages.set(raw._id, raw);
+        const patched = this.messages_.patchMeta(raw);
+        if (patched) {
+            this.messages.update((list) => list.map((m) => (m.id === patched.id ? patched : m)));
+        }
+        this.pinnedMessages.update((list) => list.map((m) => (m.id === raw._id ? (patched ?? m) : m)));
+    }
+
+    /** A reaction or pin changed elsewhere — patch the message in place if we hold it. */
+    private onMessageMetaChanged(chatId: string | null, payload: Record<string, unknown>): void {
+        const raw = payload as unknown as MessageResponse;
+        if (!chatId || !raw?._id || chatId !== this.activeChatId()) {
+            return;
+        }
+        this.applyMeta(raw);
     }
 
     /** Retry key ingestion for a chat — the usual cure for a screen full of `no_key`. */

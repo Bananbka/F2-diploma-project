@@ -2,6 +2,8 @@ import { ChangeDetectionStrategy, Component, computed, effect, inject, input, si
 import { Router, RouterLink } from '@angular/router';
 import {
     ArrowLeft,
+    Bell,
+    BellOff,
     BookmarkPlus,
     Check,
     ChevronRight,
@@ -235,6 +237,25 @@ export class ChatInfoComponent {
     readonly checkIcon = Check;
     readonly crownIcon = Crown;
     readonly xIcon = X;
+    readonly bellIcon = Bell;
+    readonly bellOffIcon = BellOff;
+
+    /**
+     * Indefinite, not a duration picker: the server has no "mute forever" flag, only a nullable
+     * timestamp (`MuteChatRequest`), so an indefinite mute is expressed as a timestamp far enough
+     * in the future. A hundred years is comfortably beyond "forever" for this app's purposes
+     * without touching any date-math edge case a smaller offset might.
+     */
+    private static readonly INDEFINITE_MUTE_MS = 100 * 365 * 24 * 60 * 60 * 1000;
+
+    /**
+     * Read through the store's chat list rather than the local `chat` signal: `setMuted` updates
+     * `store.chats`, and this stays in sync with the sidebar without a second round trip.
+     */
+    readonly isMuted = computed(() => {
+        const fromStore = this.store.chats().find((c) => c.id === this.chatId())?.is_muted;
+        return fromStore ?? false;
+    });
 
     constructor() {
         effect(() => void this.load(this.chatId()));
@@ -457,5 +478,13 @@ export class ChatInfoComponent {
 
     async back(): Promise<void> {
         await this.router.navigate(['/chats', this.chatId()]);
+    }
+
+    /** Mute is purely local, per-user state — no WebSocket event fires, and no one else sees it. */
+    async toggleMute(): Promise<void> {
+        const mutedUntil = this.isMuted()
+            ? null
+            : new Date(Date.now() + ChatInfoComponent.INDEFINITE_MUTE_MS).toISOString();
+        await this.store.setMuted(this.chatId(), mutedUntil);
     }
 }

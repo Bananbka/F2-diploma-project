@@ -1,5 +1,6 @@
+import { HttpErrorResponse } from '@angular/common/http';
 import { TestBed } from '@angular/core/testing';
-import { Subject } from 'rxjs';
+import { of, Subject, throwError } from 'rxjs';
 
 import { Chat } from '../models/chat.model';
 import { ChatKeys, MessageResponse } from '../models/crypto.model';
@@ -27,6 +28,8 @@ function decrypted(id: string, status: DecryptStatus): DecryptedMessage {
         forwardedFrom: null,
         attachments: [],
         senderVerified: false,
+        reactions: [],
+        isPinned: false,
     };
 }
 
@@ -41,6 +44,32 @@ function chat(overrides: Partial<Chat> = {}): Chat {
         created_at: '2026-01-01T00:00:00Z',
         updated_at: null,
         participants: [],
+        muted_until: null,
+        is_muted: false,
+        ...overrides,
+    };
+}
+
+function messageResponse(overrides: Partial<MessageResponse> = {}): MessageResponse {
+    return {
+        _id: 'a',
+        chat_id: CHAT,
+        sender_id: 'peer',
+        encrypted_content: null,
+        envelope: null,
+        channel_post: null,
+        content_format: 'sender_keys_v1',
+        reply_to_message_id: null,
+        forwarded_from: null,
+        created_at: '2026-01-01T00:00:00Z',
+        attachments: null,
+        reactions: [],
+        is_read: false,
+        is_pinned: false,
+        pinned_at: null,
+        pinned_by: null,
+        is_edited: false,
+        is_encrypted: true,
         ...overrides,
     };
 }
@@ -52,7 +81,19 @@ describe('ChatStoreService', () => {
         TestBed.configureTestingModule({
             providers: [
                 ChatStoreService,
-                { provide: ChatApiService, useValue: jasmine.createSpyObj('ChatApiService', ['getChats', 'getChat']) },
+                {
+                    provide: ChatApiService,
+                    useValue: jasmine.createSpyObj('ChatApiService', [
+                        'getChats',
+                        'getChat',
+                        'toggleReaction',
+                        'removeReaction',
+                        'pinMessage',
+                        'unpinMessage',
+                        'getPinnedMessages',
+                        'muteChat',
+                    ]),
+                },
                 {
                     provide: CryptoApiService,
                     useValue: jasmine.createSpyObj('CryptoApiService', ['getChatKeys', 'enableEncryption']),
@@ -66,6 +107,7 @@ describe('ChatStoreService', () => {
                         'sendText',
                         'sendChannelPost',
                         'recordOutgoing',
+                        'patchMeta',
                     ]),
                 },
                 {
@@ -258,6 +300,86 @@ describe('ChatStoreService', () => {
 
         it('says so when a chat has no messages at all', () => {
             expect(store.preview(chat()).text).toBe('No messages yet');
+        });
+    });
+
+    describe('reactions and pins', () => {
+        let chatApi: jasmine.SpyObj<ChatApiService>;
+        let messages: jasmine.SpyObj<MessageService>;
+
+        beforeEach(() => {
+            chatApi = TestBed.inject(ChatApiService) as jasmine.SpyObj<ChatApiService>;
+            messages = TestBed.inject(MessageService) as jasmine.SpyObj<MessageService>;
+
+            store.chats.set([chat()]);
+            store.activeChatId.set(CHAT);
+            store.messages.set([decrypted('a', 'ok')]);
+        });
+
+        /** The endpoint itself toggles, so react() only ever calls the one method. */
+        it('patches the message in place after reacting, without re-decrypting', async () => {
+            const raw = messageResponse({ _id: 'a', reactions: [{ user_id: 'me', emoji: '👍', created_at: 'now' }] });
+            chatApi.toggleReaction.and.returnValue(of(raw));
+            messages.patchMeta.and.returnValue({ ...decrypted('a', 'ok'), reactions: raw.reactions, isPinned: false });
+
+            await store.react('a', '👍');
+
+            expect(chatApi.toggleReaction).toHaveBeenCalledWith('a', '👍');
+            expect(store.messages()[0].reactions).toEqual(raw.reactions);
+        });
+
+        /** A permission refusal must surface, not disappear silently. */
+        it('reports PIN_FORBIDDEN as a readable message', async () => {
+            chatApi.pinMessage.and.returnValue(
+                throwError(
+                    () =>
+                        new HttpErrorResponse({
+                            status: 403,
+                            error: { error_code: 'PIN_FORBIDDEN' },
+                        })
+                )
+            );
+
+            await store.pinMessage('a');
+
+            expect(store.realtimeError()).toContain('permission');
+        });
+
+        it('reports PIN_LIMIT_REACHED as a readable message', async () => {
+            chatApi.pinMessage.and.returnValue(
+                throwError(
+                    () =>
+                        new HttpErrorResponse({
+                            status: 400,
+                            error: { error_code: 'PIN_LIMIT_REACHED' },
+                        })
+                )
+            );
+
+            await store.pinMessage('a');
+
+            expect(store.realtimeError()).toContain('maximum');
+        });
+
+        /** Only an owner/admin may pin in a group; either participant may in a private chat. */
+        it('gates pinning by role in a group but not in a private chat', () => {
+            store.chats.set([
+                chat({ chat_type: 'group', participants: [{ user_id: 'me', role: 'member', joined_at: '' }] }),
+            ]);
+            expect(store.canPinMessages()).toBeFalse();
+
+            store.chats.set([chat({ chat_type: 'private' })]);
+            expect(store.canPinMessages()).toBeTrue();
+        });
+
+        it('updates local mute state from the server response', async () => {
+            const future = new Date(Date.now() + 86_400_000).toISOString();
+            chatApi.muteChat.and.returnValue(of({ chat_id: CHAT, muted_until: future }));
+
+            await store.setMuted(CHAT, future);
+
+            expect(store.chats()[0].is_muted).toBeTrue();
+            expect(store.chats()[0].muted_until).toBe(future);
         });
     });
 });

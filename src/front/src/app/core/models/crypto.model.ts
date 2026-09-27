@@ -170,6 +170,19 @@ export interface ForwardOrigin {
     created_at: string;
 }
 
+/**
+ * One user's reaction to a message. Plaintext metadata, not covered by E2E: reactions and pins are
+ * never part of the sealed envelope, so the server can read and enforce them directly.
+ *
+ * A user may hold several different emoji reactions on the same message at once (Telegram/Discord
+ * convention), but at most one of each — sending the same emoji twice toggles it off.
+ */
+export interface MessageReaction {
+    user_id: string;
+    emoji: string;
+    created_at: string;
+}
+
 export interface MessageResponse {
     _id: string;
     chat_id: string;
@@ -182,8 +195,11 @@ export interface MessageResponse {
     forwarded_from: ForwardOrigin | null;
     created_at: string;
     attachments: MessageAttachment[] | null;
+    reactions: MessageReaction[];
     is_read: boolean;
     is_pinned: boolean;
+    pinned_at: string | null;
+    pinned_by: string | null;
     is_edited: boolean;
     is_encrypted: boolean;
 }

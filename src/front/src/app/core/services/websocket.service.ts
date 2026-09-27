@@ -18,6 +18,10 @@ export type WsEventType =
     | 'participants_added'
     | 'participants_removed'
     | 'key_epoch_started'
+    | 'message_reaction_added'
+    | 'message_reaction_removed'
+    | 'message_pinned'
+    | 'message_unpinned'
     | 'error';
 
 export interface WsEnvelope {

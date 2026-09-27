@@ -102,6 +102,31 @@
         }
 
         <section class="group">
+            <p class="section">Notifications</p>
+            <button
+                type="button"
+                class="tile"
+                [attr.aria-pressed]="isMuted()"
+                (click)="toggleMute()"
+            >
+                <span class="tile-icon">
+                    <lucide-icon [img]="isMuted() ? bellOffIcon : bellIcon" />
+                </span>
+                <span class="tile-text">
+                    <span class="tile-title">Mute notifications</span>
+                    <span class="tile-sub">
+                        {{ isMuted() ? 'Muted — no local notifications for this chat' : 'Not muted' }}
+                    </span>
+                </span>
+                <span
+                    class="switch"
+                    [class.is-on]="isMuted()"
+                    aria-hidden="true"
+                ></span>
+            </button>
+        </section>
+
+        <section class="group">
             <div class="section-row">
                 <p class="section">{{ isChannel() ? 'Subscribers' : 'Members' }} · {{ members().length }}</p>
                 @if (canManage() && !isPrivate()) {

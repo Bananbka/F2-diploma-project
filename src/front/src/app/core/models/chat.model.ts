@@ -27,6 +27,14 @@ export interface Chat {
      * participants key and Pydantic falls back to the default. Only `GET /chats/{id}` populates it.
      */
     participants: ChatParticipant[];
+    /**
+     * Per-user mute state for the calling user only — never a property of the chat itself, and
+     * never broadcast over the socket. `is_muted` is a computed field the server derives from
+     * `muted_until` against the current time, so the client does not need to compare it to `now`
+     * itself (and would otherwise disagree with the server near the expiry instant).
+     */
+    muted_until: string | null;
+    is_muted: boolean;
 }
 
 export interface UserProfile {

@@ -175,4 +175,55 @@ export class ChatApiService {
             })
             .pipe(map((r) => r.data));
     }
+
+    /**
+     * Toggle the caller's reaction with this emoji: the same emoji from the same user removes it,
+     * a different one adds an additional, independent reaction.
+     */
+    toggleReaction(messageId: string, emoji: string): Observable<MessageResponse> {
+        return this.http
+            .post<SuccessResponse<MessageResponse>>(`${this.messagesUrl}${messageId}/reactions`, { emoji })
+            .pipe(map((r) => r.data));
+    }
+
+    /** Explicit removal, distinct from the toggle above and idempotent. */
+    removeReaction(messageId: string, emoji: string): Observable<MessageResponse> {
+        return this.http
+            .delete<SuccessResponse<MessageResponse>>(
+                `${this.messagesUrl}${messageId}/reactions/${encodeURIComponent(emoji)}`
+            )
+            .pipe(map((r) => r.data));
+    }
+
+    /** Role-gated server-side (open in private chats, admin/owner only in groups and channels). */
+    pinMessage(messageId: string): Observable<MessageResponse> {
+        return this.http
+            .post<SuccessResponse<MessageResponse>>(`${this.messagesUrl}${messageId}/pin`, {})
+            .pipe(map((r) => r.data));
+    }
+
+    unpinMessage(messageId: string): Observable<MessageResponse> {
+        return this.http
+            .post<SuccessResponse<MessageResponse>>(`${this.messagesUrl}${messageId}/unpin`, {})
+            .pipe(map((r) => r.data));
+    }
+
+    getPinnedMessages(chatId: string): Observable<MessageResponse[]> {
+        return this.http
+            .get<SuccessResponse<MessageResponse[]>>(`${this.chatsUrl}${chatId}/pinned-messages`)
+            .pipe(map((r) => r.data));
+    }
+
+    /**
+     * Mute or unmute a chat for the calling user only. A future timestamp mutes until then; `null`
+     * unmutes. There is no distinct "forever" flag server-side, so an indefinite mute is expressed
+     * as a timestamp far enough in the future.
+     */
+    muteChat(chatId: string, mutedUntil: string | null): Observable<{ chat_id: string; muted_until: string | null }> {
+        return this.http
+            .patch<SuccessResponse<{ chat_id: string; muted_until: string | null }>>(`${this.chatsUrl}${chatId}/mute`, {
+                muted_until: mutedUntil,
+            })
+            .pipe(map((r) => r.data));
+    }
 }
