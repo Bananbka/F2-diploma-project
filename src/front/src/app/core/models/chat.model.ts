@@ -76,3 +76,41 @@ export interface Contact {
     alias_name: string | null;
     user: UserSearchResult;
 }
+
+/**
+ * `POST/GET /chats/{id}/invite-links`. `is_active` is a computed field the server derives from
+ * `revoked_at`/`expires_at`/`max_uses` vs `use_count` — mirrored here as a plain boolean rather
+ * than re-derived client-side, so this can never disagree with the server about whether a link
+ * near its expiry or use cap is still usable.
+ */
+export interface InviteLink {
+    id: string;
+    chat_id: string;
+    token: string;
+    created_by: string | null;
+    created_at: string;
+    expires_at: string | null;
+    max_uses: number | null;
+    use_count: number;
+    revoked_at: string | null;
+    is_active: boolean;
+}
+
+/**
+ * `GET /invite-links/{token}`. Deliberately narrow — title, avatar, chat type and a member
+ * *count*, never the roster — so previewing a link never discloses more than deciding whether to
+ * join requires.
+ */
+export interface InviteLinkPreview {
+    chat_id: string;
+    chat_type: ChatType;
+    title: string | null;
+    avatar_url: string | null;
+    member_count: number;
+}
+
+/** `POST /invite-links/join`. `already_member` is a clean no-op signal, not an error. */
+export interface InviteLinkJoinResult {
+    chat_id: string;
+    already_member: boolean;
+}

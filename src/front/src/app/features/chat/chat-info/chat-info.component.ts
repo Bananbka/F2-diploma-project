@@ -1,3 +1,4 @@
+import { DatePipe } from '@angular/common';
 import { ChangeDetectionStrategy, Component, computed, effect, inject, input, signal } from '@angular/core';
 import { Router, RouterLink } from '@angular/router';
 import {
@@ -7,7 +8,9 @@ import {
     BookmarkPlus,
     Check,
     ChevronRight,
+    Copy,
     Crown,
+    Link,
     LogOut,
     LucideAngularModule,
     Search,
@@ -25,7 +28,7 @@ import { firstValueFrom } from 'rxjs';
 import { computeMemberSetHash } from '../../../core/crypto/grants';
 import { verifyIdentityBinding, verifySignedPrekey } from '../../../core/crypto/identity';
 import { b64uDecode } from '../../../core/crypto/primitives';
-import { Chat, ParticipantRole, UserSearchResult } from '../../../core/models/chat.model';
+import { Chat, InviteLink, ParticipantRole, UserSearchResult } from '../../../core/models/chat.model';
 import { ChatRoster } from '../../../core/models/crypto.model';
 import { ChatApiService } from '../../../core/services/chat-api.service';
 import { ChatStoreService } from '../../../core/services/chat-store.service';
@@ -50,7 +53,7 @@ interface MemberRow {
 
 @Component({
     selector: 'app-chat-info',
-    imports: [RouterLink, LucideAngularModule, AvatarComponent],
+    imports: [RouterLink, LucideAngularModule, AvatarComponent, DatePipe],
     templateUrl: './chat-info.component.html',
     styleUrl: './chat-info.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
@@ -214,11 +217,11 @@ export class ChatInfoComponent {
     readonly ownerMustTransferFirst = computed(() => this.isOwner() && !this.isPrivate());
 
     /**
-     * Which destructive action is armed, if any: `delete`, or `owner:<userId>`.
+     * Which destructive action is armed, if any: `delete`, `owner:<userId>`, or `revoke:<linkId>`.
      *
      * A two-step press rather than `window.confirm`. The native dialog is unstyled, sits outside
-     * the app's own language, and is suppressible by the browser — a poor fit for the two actions
-     * here that cannot be undone.
+     * the app's own language, and is suppressible by the browser — a poor fit for the actions here
+     * that cannot be undone.
      */
     readonly confirming = signal<string | null>(null);
 
@@ -239,6 +242,30 @@ export class ChatInfoComponent {
     readonly xIcon = X;
     readonly bellIcon = Bell;
     readonly bellOffIcon = BellOff;
+    readonly linkIcon = Link;
+    readonly copyIcon = Copy;
+
+    /**
+     * Active invite links for this chat, ADMIN/OWNER only. `is_active` filters revoked/expired/
+     * used-up links out client-side too, in case the server ever returns a link that just crossed
+     * one of those thresholds between fetch and render.
+     */
+    readonly inviteLinks = signal<InviteLink[]>([]);
+    readonly inviteLinksLoading = signal(false);
+    readonly inviteBusy = signal(false);
+    readonly inviteError = signal<string | null>(null);
+    readonly activeInviteLinks = computed(() => this.inviteLinks().filter((l) => l.is_active));
+
+    /** A couple of presets rather than a raw date/number input — this is a rare, low-stakes action. */
+    readonly expiryPreset = signal<'none' | '1d' | '7d'>('none');
+    readonly maxUsesPreset = signal<'none' | '1' | '10'>('none');
+
+    /** The token just copied, so the button can say "Copied" briefly instead of nothing at all. */
+    readonly copiedToken = signal<string | null>(null);
+    private copiedTimer: ReturnType<typeof setTimeout> | null = null;
+
+    /** Same gate as membership management — ADMIN/OWNER, and private chats have no invite links. */
+    readonly canManageInvites = computed(() => this.canManage() && !this.isPrivate());
 
     /**
      * Indefinite, not a duration picker: the server has no "mute forever" flag, only a nullable
@@ -299,11 +326,98 @@ export class ChatInfoComponent {
                     this.safetyNumber.set(null);
                 }
             }
+
+            if (this.canManageInvites()) {
+                await this.loadInviteLinks(chatId);
+            }
         } catch {
             this.error.set('Could not load this chat.');
         } finally {
             this.loading.set(false);
         }
+    }
+
+    private async loadInviteLinks(chatId: string): Promise<void> {
+        this.inviteLinksLoading.set(true);
+        try {
+            this.inviteLinks.set(await firstValueFrom(this.chatApi.listInviteLinks(chatId)));
+        } catch {
+            this.inviteLinks.set([]);
+        } finally {
+            this.inviteLinksLoading.set(false);
+        }
+    }
+
+    private presetExpiresAt(): string | undefined {
+        const preset = this.expiryPreset();
+        if (preset === 'none') {
+            return undefined;
+        }
+        const days = preset === '1d' ? 1 : 7;
+        return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+    }
+
+    private presetMaxUses(): number | undefined {
+        const preset = this.maxUsesPreset();
+        return preset === 'none' ? undefined : Number(preset);
+    }
+
+    async createInviteLink(): Promise<void> {
+        this.inviteBusy.set(true);
+        this.inviteError.set(null);
+        try {
+            const link = await firstValueFrom(
+                this.chatApi.createInviteLink(this.chatId(), this.presetExpiresAt(), this.presetMaxUses())
+            );
+            this.inviteLinks.update((links) => [link, ...links]);
+        } catch {
+            this.inviteError.set('Could not create an invite link.');
+        } finally {
+            this.inviteBusy.set(false);
+        }
+    }
+
+    /**
+     * Revoke an invite link. Two-step like transferring ownership or deleting the chat: revoking is
+     * irreversible, and unlike those two, a wrong tap here fires on the same row as "copy", right next
+     * to it.
+     */
+    async revokeInviteLink(link: InviteLink): Promise<void> {
+        if (this.confirming() !== `revoke:${link.id}`) {
+            this.confirming.set(`revoke:${link.id}`);
+            return;
+        }
+
+        this.confirming.set(null);
+        this.inviteBusy.set(true);
+        this.inviteError.set(null);
+        try {
+            const revoked = await firstValueFrom(this.chatApi.revokeInviteLink(link.token));
+            this.inviteLinks.update((links) => links.map((l) => (l.id === revoked.id ? revoked : l)));
+        } catch {
+            this.inviteError.set('Could not revoke that invite link.');
+        } finally {
+            this.inviteBusy.set(false);
+        }
+    }
+
+    inviteLinkUrl(link: InviteLink): string {
+        return `${location.origin}/join/${link.token}`;
+    }
+
+    async copyInviteLink(link: InviteLink): Promise<void> {
+        try {
+            await navigator.clipboard.writeText(this.inviteLinkUrl(link));
+        } catch {
+            this.inviteError.set('Could not copy the link.');
+            return;
+        }
+
+        this.copiedToken.set(link.token);
+        if (this.copiedTimer) {
+            clearTimeout(this.copiedTimer);
+        }
+        this.copiedTimer = setTimeout(() => this.copiedToken.set(null), 2000);
     }
 
     /**

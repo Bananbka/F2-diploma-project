@@ -72,6 +72,20 @@ export const routes: Routes = [
         loadComponent: () => import('./features/chat/chat-info/chat-info.component').then((m) => m.ChatInfoComponent),
     },
     {
+        // What a shared invite link actually resolves to client-side. The server's own
+        // `GET /invite-links/{token}` is path-addressed for the same shareable-link reason, but the
+        // SPA never links straight at the API — this route calls it and renders the join decision.
+        //
+        // Guarded like every other route in this app (see CLAUDE.md: no anonymous routes at all),
+        // which means an unauthenticated visitor is bounced to `/login` and the token is dropped —
+        // there is no return-url mechanism anywhere in this app to preserve it through that round
+        // trip. That is a known gap, not specific to this route.
+        path: 'join/:token',
+        canActivate: [authGuard],
+        loadComponent: () =>
+            import('./features/chat/join-invite/join-invite.component').then((m) => m.JoinInviteComponent),
+    },
+    {
         // The safety number is the only defence against the server substituting a public key, so it
         // gets a real route: reachable, linkable and bookmarkable rather than buried in a menu.
         path: 'chats/:chatId/safety/:userId',

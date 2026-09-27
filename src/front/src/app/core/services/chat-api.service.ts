@@ -4,7 +4,16 @@ import { map, Observable } from 'rxjs';
 
 import { MessageEnvelope } from '../crypto/envelope';
 import { SuccessResponse } from '../models/api.model';
-import { Chat, ChatParticipant, ParticipantReadState, ParticipantRole, UserSearchResult } from '../models/chat.model';
+import {
+    Chat,
+    ChatParticipant,
+    InviteLink,
+    InviteLinkJoinResult,
+    InviteLinkPreview,
+    ParticipantReadState,
+    ParticipantRole,
+    UserSearchResult,
+} from '../models/chat.model';
 import { ChannelPostPayload, ForwardOrigin, MessageAttachment, MessageResponse } from '../models/crypto.model';
 import { ConfigService } from './config.service';
 
@@ -19,6 +28,15 @@ export class ChatApiService {
 
     private get messagesUrl(): string {
         return this.configService.apiUrl + 'messages/';
+    }
+
+    /**
+     * The token-scoped invite-link endpoints (`preview`/`join`/`revoke`) are not addressed by chat
+     * id at all — see `invite_link_routes.py`'s `router`, kept deliberately separate from the
+     * chat-scoped create/list pair.
+     */
+    private get inviteLinksUrl(): string {
+        return this.configService.apiUrl + 'invite-links/';
     }
 
     getChats(): Observable<Chat[]> {
@@ -237,6 +255,51 @@ export class ChatApiService {
             .patch<SuccessResponse<{ chat_id: string; muted_until: string | null }>>(`${this.chatsUrl}${chatId}/mute`, {
                 muted_until: mutedUntil,
             })
+            .pipe(map((r) => r.data));
+    }
+
+    /** ADMIN/OWNER only, rejected server-side for PRIVATE chats. Omit both bounds for no limit. */
+    createInviteLink(chatId: string, expiresAt?: string, maxUses?: number): Observable<InviteLink> {
+        return this.http
+            .post<SuccessResponse<InviteLink>>(`${this.chatsUrl}${chatId}/invite-links`, {
+                expires_at: expiresAt ?? null,
+                max_uses: maxUses ?? null,
+            })
+            .pipe(map((r) => r.data));
+    }
+
+    /** Active links for a chat. Same ADMIN/OWNER gate as create. */
+    listInviteLinks(chatId: string): Observable<InviteLink[]> {
+        return this.http
+            .get<SuccessResponse<InviteLink[]>>(`${this.chatsUrl}${chatId}/invite-links`)
+            .pipe(map((r) => r.data));
+    }
+
+    /**
+     * Preview a chat by invite-link token, without membership or roster exposure. The token is in
+     * the URL here — unlike join/revoke — because this is the one meant to be a real clickable,
+     * shareable link.
+     */
+    previewInviteLink(token: string): Observable<InviteLinkPreview> {
+        return this.http
+            .get<SuccessResponse<InviteLinkPreview>>(`${this.inviteLinksUrl}${encodeURIComponent(token)}`)
+            .pipe(map((r) => r.data));
+    }
+
+    /**
+     * Join the chat an invite link points at. The token goes in the body, not the URL — a
+     * deliberate choice on the server so it never appears in an access log line for this endpoint.
+     */
+    joinInviteLink(token: string): Observable<InviteLinkJoinResult> {
+        return this.http
+            .post<SuccessResponse<InviteLinkJoinResult>>(`${this.inviteLinksUrl}join`, { token })
+            .pipe(map((r) => r.data));
+    }
+
+    /** Revoke a link. Scoped server-side to the chat it belongs to, resolved from the token itself. */
+    revokeInviteLink(token: string): Observable<InviteLink> {
+        return this.http
+            .post<SuccessResponse<InviteLink>>(`${this.inviteLinksUrl}revoke`, { token })
             .pipe(map((r) => r.data));
     }
 }

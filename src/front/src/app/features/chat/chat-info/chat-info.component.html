@@ -126,6 +126,122 @@
             </button>
         </section>
 
+        @if (canManageInvites()) {
+            <section class="group">
+                <p class="section">Invite link</p>
+
+                <div class="invite-create">
+                    <label class="invite-field">
+                        <span>Expires</span>
+                        <select
+                            [value]="expiryPreset()"
+                            [disabled]="inviteBusy()"
+                            (change)="expiryPreset.set($any($event.target).value)"
+                        >
+                            <option value="none">Never</option>
+                            <option value="1d">In 1 day</option>
+                            <option value="7d">In 7 days</option>
+                        </select>
+                    </label>
+                    <label class="invite-field">
+                        <span>Uses</span>
+                        <select
+                            [value]="maxUsesPreset()"
+                            [disabled]="inviteBusy()"
+                            (change)="maxUsesPreset.set($any($event.target).value)"
+                        >
+                            <option value="none">No limit</option>
+                            <option value="1">1 use</option>
+                            <option value="10">10 uses</option>
+                        </select>
+                    </label>
+                    <button
+                        type="button"
+                        class="section-action invite-generate"
+                        [disabled]="inviteBusy()"
+                        (click)="createInviteLink()"
+                    >
+                        <lucide-icon [img]="linkIcon" />
+                        Generate link
+                    </button>
+                </div>
+
+                @if (inviteError()) {
+                    <p
+                        class="error"
+                        role="alert"
+                    >
+                        {{ inviteError() }}
+                    </p>
+                }
+
+                @if (inviteLinksLoading()) {
+                    <p class="muted small">Loading invite links…</p>
+                } @else if (activeInviteLinks().length) {
+                    <ul class="invite-list">
+                        @for (link of activeInviteLinks(); track link.id) {
+                            <li class="invite-row">
+                                <span class="invite-text">
+                                    <span class="mono invite-url">{{ inviteLinkUrl(link) }}</span>
+                                    <span class="invite-sub">
+                                        {{ link.use_count }}{{ link.max_uses ? '/' + link.max_uses : '' }} used
+                                        @if (link.expires_at) {
+                                            · expires {{ link.expires_at | date: 'short' }}
+                                        }
+                                    </span>
+                                </span>
+                                <button
+                                    type="button"
+                                    class="member-action"
+                                    [disabled]="inviteBusy()"
+                                    [attr.aria-label]="'Copy invite link'"
+                                    title="Copy link"
+                                    (click)="copyInviteLink(link)"
+                                >
+                                    <lucide-icon [img]="copiedToken() === link.token ? checkIcon : copyIcon" />
+                                </button>
+                                <!-- Armed on first press, like transferring ownership below: revoking
+                                     is irreversible and sits right next to the copy button. -->
+                                @if (confirming() === 'revoke:' + link.id) {
+                                    <button
+                                        type="button"
+                                        class="member-action is-confirm"
+                                        [disabled]="inviteBusy()"
+                                        (click)="revokeInviteLink(link)"
+                                    >
+                                        Revoke?
+                                    </button>
+                                    <button
+                                        type="button"
+                                        class="member-action"
+                                        [disabled]="inviteBusy()"
+                                        aria-label="Cancel"
+                                        title="Cancel"
+                                        (click)="cancelConfirm()"
+                                    >
+                                        <lucide-icon [img]="xIcon" />
+                                    </button>
+                                } @else {
+                                    <button
+                                        type="button"
+                                        class="member-action"
+                                        [disabled]="inviteBusy()"
+                                        aria-label="Revoke invite link"
+                                        title="Revoke"
+                                        (click)="revokeInviteLink(link)"
+                                    >
+                                        <lucide-icon [img]="xIcon" />
+                                    </button>
+                                }
+                            </li>
+                        }
+                    </ul>
+                } @else {
+                    <p class="muted small">No active invite links. Generate one to invite people by link.</p>
+                }
+            </section>
+        }
+
         <section class="group">
             <div class="section-row">
                 <p class="section">{{ isChannel() ? 'Subscribers' : 'Members' }} · {{ members().length }}</p>

@@ -1,0 +1,54 @@
+<div class="wrap">
+    <div class="card">
+        @if (loading()) {
+            <p class="muted">Loading invite…</p>
+        } @else if (error()) {
+            <div class="state is-error">
+                <lucide-icon [img]="alertIcon" />
+                <p>{{ error() }}</p>
+            </div>
+        } @else if (preview()) {
+            <div class="preview">
+                <app-avatar
+                    size="lg"
+                    [name]="title()"
+                    [seed]="preview()!.chat_id"
+                    [imageUrl]="preview()!.avatar_url"
+                />
+                <h1 class="preview-title">{{ title() }}</h1>
+                <p class="preview-meta">
+                    <lucide-icon [img]="usersIcon" />
+                    {{ preview()!.member_count }} {{ preview()!.member_count === 1 ? 'member' : 'members' }}
+                </p>
+
+                @if (preview()!.chat_type === 'channel') {
+                    <p class="preview-tag">
+                        <lucide-icon [img]="hashIcon" />
+                        Channel · signed, not encrypted
+                    </p>
+                }
+
+                @if (alreadyMember()) {
+                    <p class="hint">You're already in this chat.</p>
+                    <button
+                        type="button"
+                        class="submit"
+                        (click)="join()"
+                    >
+                        Open chat
+                    </button>
+                } @else {
+                    <button
+                        type="button"
+                        class="submit"
+                        [disabled]="joining()"
+                        (click)="join()"
+                    >
+                        <lucide-icon [img]="userPlusIcon" />
+                        {{ joining() ? 'Joining…' : 'Join' }}
+                    </button>
+                }
+            </div>
+        }
+    </div>
+</div>
