@@ -1,6 +1,7 @@
 ﻿import datetime
 import enum
 import uuid
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
@@ -18,6 +19,15 @@ class Attachment(BaseModel):
     name: str = Field(..., max_length=255)
     size: int = Field(..., ge=0)
     content_type: str = Field(..., max_length=255)
+
+    # Media metadata, all client-supplied and optional — the server never inspects attachment
+    # bytes (they are opaque, client-encrypted blobs; see docs/crypto-spec-v1.md), so none of
+    # this is verified, only carried through for rendering.
+    kind: Literal['file', 'image', 'video', 'gif', 'audio', 'sticker'] = 'file'
+    duration_ms: int | None = Field(None, ge=0)
+    width: int | None = Field(None, ge=0)
+    height: int | None = Field(None, ge=0)
+    waveform: list[float] | None = Field(None, max_length=64)
 
     @field_validator('url')
     @classmethod
@@ -151,7 +161,7 @@ class MessageDocument(BaseModel):
     reply_to_message_id: str | None = None
     forwarded_from: ForwardOrigin | None = None
 
-    attachments: list[dict] | None = None
+    attachments: list[Attachment] | None = None
 
     reactions: list[Reaction] = Field(default_factory=list)
 
@@ -184,7 +194,7 @@ class MessageResponse(BaseModel):
     forwarded_from: ForwardOrigin | None = None
     created_at: datetime.datetime
 
-    attachments: list[dict] | None = None
+    attachments: list[Attachment] | None = None
 
     reactions: list[Reaction] = Field(default_factory=list)
 

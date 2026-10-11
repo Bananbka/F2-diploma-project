@@ -310,6 +310,25 @@ The original ciphertext is destroyed, so there is no cryptographic edit history.
 | `legacy_rsa` | private chat under the superseded RSA scheme |
 | `legacy_plaintext` | group/channel message from before encryption |
 
+### 4.5 Attachment encryption
+
+Attachments (photos, videos, gifs, voice notes, stickers) are encrypted entirely client-side, on
+top of the mechanisms above rather than as a new one. For each attachment the client generates a
+random 32-byte AES-256-GCM key and a random 12-byte nonce, and uploads `nonce || ciphertext` as an
+opaque blob through the existing `POST /files/upload` — the server stores and serves these bytes
+exactly as it does any other attachment, with no awareness that they are encrypted.
+
+The per-attachment key is not a new wire primitive: it travels to recipients inside the
+`envelope`'s already-sealed, authenticated plaintext, alongside the message text, the same way the
+message body itself does. This needs **no new domain separator** and **no change** to the
+envelope, ratchet or grant mechanisms defined elsewhere in this document — an attachment key is
+just more plaintext under the same seal.
+
+Consequently there is no Python reference counterpart for this, unlike every other primitive in
+this spec: the server never parses or touches this plaintext structure, so there is nothing on the
+server side that needs to be kept byte-identical to the client, and nothing for `npm run interop`
+to check here.
+
 ---
 
 ## 5. Key epochs and grants
