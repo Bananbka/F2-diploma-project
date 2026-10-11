@@ -11,9 +11,18 @@ from app.core.config import settings
 class Attachment(BaseModel):
     """A message attachment.
 
-    `url` is validated to be a single object key inside the message bucket. Without this the
-    value is entirely client-controlled and flows into MinIO deletion in `delete_message`,
-    which would let a user delete arbitrary objects belonging to other users.
+    `url` is validated to be a single object key inside the message bucket, OR inside the
+    sticker bucket when `kind == 'sticker'` — a sticker is a public asset belonging to some pack,
+    never something "uploaded" into the message bucket by the sender. Without this the value is
+    entirely client-controlled and flows into MinIO deletion in `delete_message`, which would let
+    a user delete arbitrary objects belonging to other users.
+
+    `kind` and the matched bucket are cross-checked by `_check_kind_matches_bucket` below so the
+    two fields can never disagree: `kind == 'sticker'` with a message-bucket url (or vice versa)
+    was exactly how a sender could claim `kind: 'sticker'` to skip `_authorize_attachments`'s
+    ownership/visibility check while actually naming a private message-bucket object. The service
+    layer now also derives the sticker exemption from the URL itself rather than trusting `kind`,
+    but this keeps the two fields from being able to lie to each other in the first place.
     """
     url: str
     name: str = Field(..., max_length=255)
@@ -32,15 +41,36 @@ class Attachment(BaseModel):
     @field_validator('url')
     @classmethod
     def validate_url(cls, v: str) -> str:
-        prefix = f"{settings.MINIO_URL}/{settings.MINIO_MESSAGE_BUCKET}/"
-        if not v.startswith(prefix):
-            raise ValueError('Attachment url must point at the message attachments bucket.')
+        message_prefix = f"{settings.MINIO_URL}/{settings.MINIO_MESSAGE_BUCKET}/"
+        sticker_prefix = f"{settings.MINIO_URL}/{settings.MINIO_STICKER_BUCKET}/"
 
-        object_key = v[len(prefix):]
-        if not object_key or "/" in object_key:
-            raise ValueError('Attachment url must reference a single object key.')
+        for prefix in (message_prefix, sticker_prefix):
+            if v.startswith(prefix):
+                object_key = v[len(prefix):]
+                if not object_key or "/" in object_key:
+                    raise ValueError('Attachment url must reference a single object key.')
+                return v
 
-        return v
+        raise ValueError(
+            'Attachment url must point at the message attachments bucket or the sticker bucket.'
+        )
+
+    @model_validator(mode="after")
+    def _check_kind_matches_bucket(self) -> "Attachment":
+        sticker_prefix = f"{settings.MINIO_URL}/{settings.MINIO_STICKER_BUCKET}/"
+        is_sticker_bucket_url = self.url.startswith(sticker_prefix)
+        is_sticker_kind = self.kind == "sticker"
+
+        if is_sticker_kind and not is_sticker_bucket_url:
+            raise ValueError(
+                "An attachment with kind 'sticker' must point at the sticker bucket."
+            )
+        if is_sticker_bucket_url and not is_sticker_kind:
+            raise ValueError(
+                "An attachment pointing at the sticker bucket must have kind 'sticker'."
+            )
+
+        return self
 
 
 class ContentFormat(str, enum.Enum):

@@ -13,7 +13,11 @@ class MinioClient:
         self.endpoint_url = settings.MINIO_URL
         self.access_key = settings.MINIO_USER
         self.secret_key = settings.MINIO_PASSWORD
-        self.buckets = [settings.MINIO_MESSAGE_BUCKET, settings.MINIO_AVATAR_BUCKET]
+        self.buckets = [
+            settings.MINIO_MESSAGE_BUCKET,
+            settings.MINIO_AVATAR_BUCKET,
+            settings.MINIO_STICKER_BUCKET,
+        ]
 
     def get_client(self):
         return self.session.create_client(
@@ -37,7 +41,10 @@ class MinioClient:
                         )
                         await client.create_bucket(Bucket=bucket_name)
 
-                        if bucket_name == settings.MINIO_AVATAR_BUCKET:
+                        if bucket_name in (
+                            settings.MINIO_AVATAR_BUCKET,
+                            settings.MINIO_STICKER_BUCKET,
+                        ):
                             policy = {
                                 "Version": "2012-10-17",
                                 "Statement": [

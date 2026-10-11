@@ -70,29 +70,37 @@ async def upload_file(
     )
 
     is_avatar = category == FileCategory.AVATAR
-    target_bucket = (
-        settings.MINIO_AVATAR_BUCKET if is_avatar else settings.MINIO_MESSAGE_BUCKET
-    )
+    is_sticker = category == FileCategory.STICKER
+    # Stickers get the same validation treatment as avatars: both are public, directly
+    # renderable images served inline, so both are checked against the same allowlist and cap.
+    is_image_upload = is_avatar or is_sticker
+
+    if is_avatar:
+        target_bucket = settings.MINIO_AVATAR_BUCKET
+    elif is_sticker:
+        target_bucket = settings.MINIO_STICKER_BUCKET
+    else:
+        target_bucket = settings.MINIO_MESSAGE_BUCKET
 
     filename = file.filename or "encrypted_file.enc"
     content_type = file.content_type or "application/octet-stream"
 
-    if is_avatar and content_type not in ALLOWED_AVATAR_TYPES:
+    if is_image_upload and content_type not in ALLOWED_AVATAR_TYPES:
         raise AppException(
             415,
             "UNSUPPORTED_MEDIA_TYPE",
-            "Avatars must be a JPEG, PNG, WebP or GIF image.",
+            "Avatars and stickers must be a JPEG, PNG, WebP or GIF image.",
         )
 
     file_bytes = await _read_bounded(
-        file, MAX_AVATAR_SIZE if is_avatar else MAX_FILE_SIZE
+        file, MAX_AVATAR_SIZE if is_image_upload else MAX_FILE_SIZE
     )
     file_size = len(file_bytes)
 
     if file_size == 0:
         raise AppException(400, "EMPTY_FILE", "The uploaded file is empty.")
 
-    if is_avatar and not _looks_like_image(file_bytes):
+    if is_image_upload and not _looks_like_image(file_bytes):
         # The declared Content-Type is client-supplied. Checking the leading bytes stops a file
         # that merely claims to be a PNG from being served as one from a public bucket.
         raise AppException(
@@ -105,7 +113,8 @@ async def upload_file(
         content_type=content_type,
         bucket_name=target_bucket,
         # Message attachments are ciphertext and are served through this API, never inline.
-        force_octet_stream=not is_avatar,
+        # Avatars and stickers are public, directly renderable images, so neither is forced.
+        force_octet_stream=not is_image_upload,
         owner_id=str(user.id),
     )
 

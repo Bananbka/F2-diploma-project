@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     MINIO_PASSWORD: str
     MINIO_MESSAGE_BUCKET: str = "messages-attachments"
     MINIO_AVATAR_BUCKET: str = "user-avatars"
+    MINIO_STICKER_BUCKET: str = "sticker-assets"
 
     # JWT
     SECRET_KEY: str

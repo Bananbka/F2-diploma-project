@@ -4,3 +4,4 @@
 class FileCategory(str, Enum):
     MESSAGE = "message"
     AVATAR = "avatar"
+    STICKER = "sticker"

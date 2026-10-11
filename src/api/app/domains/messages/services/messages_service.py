@@ -23,6 +23,7 @@ from app.domains.messages.schemas.messages_schemas import (
     MessageResponse,
     MessageUpdateRequest,
 )
+from app.domains.stickers.models import Sticker, StickerPack, StickerPackSubscription
 from app.infrastructure.minio import minio_manager
 
 # Many messengers cap simultaneous pins (Telegram allows unlimited but most others bound it); a
@@ -274,6 +275,45 @@ async def _validate_channel_post(db, chat, user_id, post) -> None:
         )
 
 
+async def _authorize_sticker_attachment(
+    db: AsyncSession, user_id: uuid.UUID, url: str
+) -> None:
+    """Verify a sticker-bucket attachment url names a real sticker in a pack the sender may see.
+
+    The server trusts that a URL pointing at the sticker bucket needs no secrecy check, but it
+    must not trust that the URL names anything real: without this, any sticker-shaped URL (one
+    the client simply made up, or one copied from a pack the sender cannot see) would be accepted
+    on the strength of its prefix alone.
+    """
+    stmt = (
+        select(StickerPack)
+        .join(Sticker, Sticker.pack_id == StickerPack.id)
+        .where(Sticker.image_url == url)
+    )
+    pack = (await db.execute(stmt)).scalars().first()
+
+    if pack is None:
+        raise AppException(
+            400, "ATTACHMENT_UNKNOWN", "That sticker does not exist."
+        )
+
+    if pack.owner_id == user_id or pack.is_public:
+        return
+
+    subscribed = await db.execute(
+        select(StickerPackSubscription.pack_id).where(
+            StickerPackSubscription.pack_id == pack.id,
+            StickerPackSubscription.user_id == user_id,
+        )
+    )
+    if subscribed.scalar_one_or_none() is None:
+        raise AppException(
+            403,
+            "ATTACHMENT_FORBIDDEN",
+            "You cannot attach a sticker from a pack you cannot see.",
+        )
+
+
 async def _authorize_attachments(
     db: AsyncSession,
     mongo_db: AsyncIOMotorDatabase,
@@ -295,11 +335,28 @@ async def _authorize_attachments(
         forwarding a message with attachments work — a forward is a re-send of the same object.
 
     A user removed from a chat satisfies neither, which is the case that mattered.
+
+    Attachments actually pointing at the STICKER bucket skip this check entirely: a sticker is a
+    public asset once its pack exists, never something "uploaded" by the sender in the
+    message-bucket sense, so there is no secrecy requirement to enforce and the
+    ownership/visibility question this check answers does not apply to it. Which bucket an
+    attachment points at is derived from its `url` here, never trusted from the client-supplied
+    `kind` field — `kind == 'sticker'` used to be the only gate, which let a sender claim that
+    kind on a URL that actually named a MESSAGE-bucket object and skip the check entirely,
+    reopening the cross-chat attachment leak this function exists to close. `Attachment`'s own
+    model validator also now rejects a `kind`/bucket mismatch at the schema layer, so the two
+    checks are redundant on purpose.
+
+    Even once a URL is confirmed to point at the sticker bucket, it must name a real row in the
+    `stickers` table whose pack is visible to the sender (owned, public, or subscribed) — a
+    sticker-shaped URL with no backing row, or one belonging to a pack the sender cannot see,
+    is rejected rather than silently allowed through.
     """
     if not attachments:
         return
 
-    prefix = f"{settings.MINIO_URL}/{settings.MINIO_MESSAGE_BUCKET}/"
+    message_prefix = f"{settings.MINIO_URL}/{settings.MINIO_MESSAGE_BUCKET}/"
+    sticker_prefix = f"{settings.MINIO_URL}/{settings.MINIO_STICKER_BUCKET}/"
     collection = mongo_db["messages"]
 
     # Resolved at most once, and only if some attachment is not the caller's own upload. Fetching
@@ -308,7 +365,14 @@ async def _authorize_attachments(
 
     for attachment in attachments:
         url = attachment.url
-        object_key = url[len(prefix) :]
+
+        if url.startswith(sticker_prefix):
+            await _authorize_sticker_attachment(db, user_id, url)
+            continue
+
+        # Schema validation (`Attachment.validate_url`) already guarantees every url starts with
+        # one of these two prefixes, so falling through here means the message-bucket prefix.
+        object_key = url[len(message_prefix) :]
 
         exists, owner = await minio_manager.get_object_owner(
             object_key, settings.MINIO_MESSAGE_BUCKET
