@@ -607,7 +607,7 @@ export class ChatStoreService {
             // Bump before recording: bumping clears the preview override, and our own message is one
             // we can always read, so it should end up as the override rather than be wiped by it.
             this.bumpChatPreview(chatId, sent);
-            this.appendDecrypted(this.messages_.recordOutgoing(sent, text));
+            this.appendDecrypted(this.messages_.recordOutgoing(sent, text, attachments));
         } catch (error) {
             if (this.isMemberVerificationFailure(error)) {
                 // Blocking, not retryable: we refused to hand keys to a roster we cannot verify.
@@ -741,7 +741,11 @@ export class ChatStoreService {
             return;
         }
 
-        const edited = await this.messages_.editText(chatId, messageId, text.trim());
+        // `PUT /messages/{id}` has no field to change the stored attachment list, so the message's
+        // current attachments travel unchanged — this only re-seals their keys into the fresh
+        // plaintext, it does not let the edit add or remove one.
+        const existing = this.messages().find((m) => m.id === messageId);
+        const edited = await this.messages_.editText(chatId, messageId, text.trim(), existing?.attachments);
         this.messages.update((list) => list.map((m) => (m.id === edited.id ? edited : m)));
         this.cachePreview(chatId, [edited]);
     }

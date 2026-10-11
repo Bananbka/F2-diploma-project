@@ -1,6 +1,7 @@
 import {
     ChangeDetectionStrategy,
     Component,
+    DestroyRef,
     effect,
     ElementRef,
     inject,
@@ -10,16 +11,40 @@ import {
     untracked,
     viewChild,
 } from '@angular/core';
-import { LucideAngularModule, Paperclip, RefreshCw, Send, ShieldAlert } from 'lucide-angular';
+import { Film, LucideAngularModule, Paperclip, RefreshCw, Send, ShieldAlert, X } from 'lucide-angular';
 import { firstValueFrom } from 'rxjs';
 
-import { MessageAttachment } from '../../../core/models/crypto.model';
+import { encryptAttachment } from '../../../core/crypto/attachment-crypto';
+import { AttachmentKind, MessageAttachment } from '../../../core/models/crypto.model';
 import { ProfileApiService } from '../../../core/services/profile-api.service';
 
 /** What the composer hands over. Attachments travel with the message, not separately. */
 export interface ComposedMessage {
     text: string;
     attachments: MessageAttachment[];
+}
+
+/** A staged attachment plus the local-only preview url, kept apart from the wire shape. */
+interface StagedAttachment {
+    file: MessageAttachment;
+    /** `URL.createObjectURL` on the *original*, unencrypted bytes — revoked on removal/destroy. */
+    previewUrl: string | null;
+}
+
+function inferKind(mimeType: string): AttachmentKind {
+    if (mimeType === 'image/gif') {
+        return 'gif';
+    }
+    if (mimeType.startsWith('image/')) {
+        return 'image';
+    }
+    if (mimeType.startsWith('video/')) {
+        return 'video';
+    }
+    if (mimeType.startsWith('audio/')) {
+        return 'audio';
+    }
+    return 'file';
 }
 
 @Component({
@@ -31,6 +56,7 @@ export interface ComposedMessage {
 })
 export class ComposerComponent {
     private readonly profileApi = inject(ProfileApiService);
+    private readonly destroyRef = inject(DestroyRef);
 
     /** False while the member set cannot be verified — sending is refused, not merely discouraged. */
     readonly canSend = input(true);
@@ -39,16 +65,25 @@ export class ComposerComponent {
     readonly placeholder = input('Message…');
     /** Pre-fills the box when an existing message is being edited. */
     readonly initialText = input('');
+    /**
+     * Pre-populates the staged list when editing an existing message. Read-only: `PUT
+     * /messages/{id}` has no field to change the stored attachment set, so these render for
+     * context but cannot be removed or added to while editing — only the text can change.
+     */
+    readonly initialAttachments = input<MessageAttachment[]>([]);
+    readonly editing = input(false);
 
     readonly submitted = output<ComposedMessage>();
     readonly typing = output<boolean>();
 
     readonly text = signal('');
-    readonly attachments = signal<MessageAttachment[]>([]);
+    readonly staged = signal<StagedAttachment[]>([]);
     readonly uploading = signal(false);
     readonly uploadError = signal<string | null>(null);
+    readonly dragOver = signal(false);
 
     private readonly area = viewChild<ElementRef<HTMLTextAreaElement>>('area');
+    private readonly fileInput = viewChild<ElementRef<HTMLInputElement>>('fileInput');
     private typingActive = false;
     private typingTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -56,6 +91,7 @@ export class ComposerComponent {
         // Only when it actually changes: writing on every render would fight the user's typing.
         effect(() => {
             const text = this.initialText();
+            const attachments = this.initialAttachments();
             untracked(() => {
                 this.text.set(text);
                 const element = this.area()?.nativeElement;
@@ -63,14 +99,21 @@ export class ComposerComponent {
                     element.value = text;
                     element.focus();
                 }
+
+                this.revokeStaged(this.staged());
+                this.staged.set(attachments.map((file) => ({ file, previewUrl: null })));
             });
         });
+
+        this.destroyRef.onDestroy(() => this.revokeStaged(this.staged()));
     }
 
     readonly sendIcon = Send;
     readonly paperclipIcon = Paperclip;
     readonly refreshIcon = RefreshCw;
     readonly shieldAlertIcon = ShieldAlert;
+    readonly filmIcon = Film;
+    readonly closeIcon = X;
 
     onInput(value: string): void {
         this.text.set(value);
@@ -85,50 +128,143 @@ export class ComposerComponent {
         }
     }
 
+    onFilePicked(event: Event): void {
+        const input = event.target as HTMLInputElement;
+        void this.stageFiles(input.files);
+        input.value = '';
+    }
+
+    onDragOver(event: DragEvent): void {
+        event.preventDefault();
+        if (this.editing()) {
+            return;
+        }
+        this.dragOver.set(true);
+    }
+
+    onDragLeave(event: DragEvent): void {
+        event.preventDefault();
+        this.dragOver.set(false);
+    }
+
+    onDrop(event: DragEvent): void {
+        event.preventDefault();
+        this.dragOver.set(false);
+        if (this.editing()) {
+            return;
+        }
+        void this.stageFiles(event.dataTransfer?.files ?? null);
+    }
+
+    onPaste(event: ClipboardEvent): void {
+        if (this.editing()) {
+            return;
+        }
+        const files = event.clipboardData?.files;
+        if (files && files.length > 0) {
+            void this.stageFiles(files);
+        }
+    }
+
     /**
-     * Upload a file so it can travel with the next message.
+     * Encrypt and upload every file, staging it as soon as its own upload resolves.
      *
      * Uploaded ahead of the send because the message references the object by URL. Note the server
      * reaps unreferenced blobs after 24 hours, so a file staged and never sent does not linger.
      */
-    async onFilePicked(event: Event): Promise<void> {
-        const input = event.target as HTMLInputElement;
-        const file = input.files?.[0];
-        if (!file) {
+    async stageFiles(files: FileList | File[] | null): Promise<void> {
+        if (!files || files.length === 0 || this.editing()) {
             return;
         }
 
         this.uploading.set(true);
+        this.uploadError.set(null);
+
         try {
-            const uploaded = await firstValueFrom(this.profileApi.upload(file, 'message'));
-            this.attachments.update((list) => [...list, uploaded]);
+            for (const file of Array.from(files)) {
+                await this.stageOne(file);
+            }
         } catch {
             this.uploadError.set('Could not upload that file.');
         } finally {
             this.uploading.set(false);
-            input.value = '';
         }
     }
 
+    private async stageOne(file: File): Promise<void> {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const { blob, key } = await encryptAttachment(bytes);
+
+        const kind = inferKind(file.type);
+        // The preview is built from the original, unencrypted bytes — never the encrypted blob,
+        // which would just render as noise.
+        const previewUrl = kind === 'image' || kind === 'gif' || kind === 'video' ? URL.createObjectURL(file) : null;
+
+        const uploaded = await firstValueFrom(
+            this.profileApi.upload(new Blob([blob as BufferSource]), 'message', file.name)
+        );
+
+        const staged: StagedAttachment = {
+            file: {
+                ...uploaded,
+                kind,
+                decryptionKey: key,
+            },
+            previewUrl,
+        };
+
+        this.staged.update((list) => [...list, staged]);
+    }
+
     removeAttachment(url: string): void {
-        this.attachments.update((list) => list.filter((file) => file.url !== url));
+        this.staged.update((list) => {
+            const match = list.find((entry) => entry.file.url === url);
+            if (match) {
+                this.revokeStaged([match]);
+            }
+            return list.filter((entry) => entry.file.url !== url);
+        });
     }
 
     send(): void {
         const value = this.text().trim();
-        if ((!value && this.attachments().length === 0) || !this.canSend()) {
+        const attachments = this.staged().map((entry) => entry.file);
+        if ((!value && attachments.length === 0) || !this.canSend()) {
             return;
         }
 
-        this.submitted.emit({ text: value, attachments: this.attachments() });
+        this.submitted.emit({ text: value, attachments });
         this.text.set('');
-        this.attachments.set([]);
+        this.revokeStaged(this.staged());
+        this.staged.set([]);
         this.stopTyping();
 
         const element = this.area()?.nativeElement;
         if (element) {
             element.value = '';
             element.style.height = 'auto';
+        }
+    }
+
+    readableSize(bytes: number): string {
+        if (bytes < 1024) {
+            return `${bytes} B`;
+        }
+        if (bytes < 1024 * 1024) {
+            return `${Math.round(bytes / 1024)} KB`;
+        }
+        return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    }
+
+    openFilePicker(): void {
+        this.fileInput()?.nativeElement.click();
+    }
+
+    private revokeStaged(entries: StagedAttachment[]): void {
+        for (const entry of entries) {
+            if (entry.previewUrl) {
+                URL.revokeObjectURL(entry.previewUrl);
+            }
         }
     }
 

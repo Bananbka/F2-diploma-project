@@ -23,41 +23,91 @@
     </div>
 }
 
-@if (attachments().length || uploading()) {
+@if (uploadError()) {
+    <div
+        class="strip is-danger"
+        role="alert"
+    >
+        <lucide-icon [img]="shieldAlertIcon" />
+        {{ uploadError() }}
+    </div>
+}
+
+@if (staged().length || uploading()) {
     <div class="staged">
-        @for (file of attachments(); track file.url) {
-            <span class="staged-file">
-                <lucide-icon [img]="paperclipIcon" />
-                {{ file.name }}
-                <button
-                    type="button"
-                    [attr.aria-label]="'Remove ' + file.name"
-                    (click)="removeAttachment(file.url)"
-                >
-                    ×
-                </button>
-            </span>
+        @for (entry of staged(); track entry.file.url) {
+            @if (entry.previewUrl) {
+                <div class="staged-tile">
+                    <img
+                        [src]="entry.previewUrl"
+                        [alt]="entry.file.name"
+                    />
+                    @if (entry.file.kind === 'gif') {
+                        <span class="tile-badge">GIF</span>
+                    } @else if (entry.file.kind === 'video') {
+                        <span class="tile-badge">
+                            <lucide-icon [img]="filmIcon" />
+                        </span>
+                    }
+                    @if (!editing()) {
+                        <button
+                            type="button"
+                            class="tile-remove"
+                            [attr.aria-label]="'Remove ' + entry.file.name"
+                            (click)="removeAttachment(entry.file.url)"
+                        >
+                            <lucide-icon [img]="closeIcon" />
+                        </button>
+                    }
+                </div>
+            } @else {
+                <span class="staged-file">
+                    <lucide-icon [img]="paperclipIcon" />
+                    {{ entry.file.name }}
+                    <span class="staged-file-size">{{ readableSize(entry.file.size) }}</span>
+                    @if (!editing()) {
+                        <button
+                            type="button"
+                            [attr.aria-label]="'Remove ' + entry.file.name"
+                            (click)="removeAttachment(entry.file.url)"
+                        >
+                            <lucide-icon [img]="closeIcon" />
+                        </button>
+                    }
+                </span>
+            }
         }
         @if (uploading()) {
-            <span class="staged-file is-busy">Uploading…</span>
+            <span class="staged-file is-busy">Encrypting and uploading…</span>
         }
     </div>
 }
 
-<div class="row">
-    <label
+<div
+    class="row"
+    [class.is-drag-over]="dragOver()"
+    (dragover)="onDragOver($event)"
+    (dragleave)="onDragLeave($event)"
+    (drop)="onDrop($event)"
+>
+    <button
+        type="button"
         class="side"
         title="Attach a file"
+        [disabled]="!canSend() || uploading() || editing()"
+        (click)="openFilePicker()"
     >
         <lucide-icon [img]="paperclipIcon" />
         <input
+            #fileInput
             type="file"
+            multiple
             class="sr-only"
-            [disabled]="!canSend() || uploading()"
+            [disabled]="!canSend() || uploading() || editing()"
             (change)="onFilePicked($event)"
         />
         <span class="sr-only">Attach a file</span>
-    </label>
+    </button>
 
     <div class="input">
         <textarea
@@ -68,6 +118,7 @@
             [value]="text()"
             (input)="onInput($any($event.target).value)"
             (keydown)="onKeydown($event)"
+            (paste)="onPaste($event)"
         ></textarea>
     </div>
 
@@ -75,7 +126,7 @@
         type="button"
         class="send"
         aria-label="Send message"
-        [disabled]="!text().trim() || !canSend()"
+        [disabled]="(!text().trim() && staged().length === 0) || !canSend()"
         (click)="send()"
     >
         <lucide-icon [img]="sendIcon" />

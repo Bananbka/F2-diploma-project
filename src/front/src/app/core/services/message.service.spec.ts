@@ -1,6 +1,8 @@
 import { TestBed } from '@angular/core/testing';
 import { of } from 'rxjs';
 
+import { sealMessage } from '../crypto/envelope';
+import { b64uEncode, utf8 } from '../crypto/primitives';
 import { MessageResponse } from '../models/crypto.model';
 import { ChatApiService } from './chat-api.service';
 import { CryptoApiService } from './crypto-api.service';
@@ -186,6 +188,84 @@ describe('MessageService', () => {
 
         // No second decrypt attempt: the ratchet was not asked for another key.
         expect(chain.messageKeyFor).toHaveBeenCalledTimes(1);
+    });
+
+    /**
+     * The actual shape sealed into an envelope's plaintext is now JSON, `{text, attachmentKeys}`,
+     * not bare text — and the matching attachment gets its key attached by URL after decrypt. A
+     * real `sealMessage`/`openMessage` round trip, not a hand-built ciphertext, so the AAD binding
+     * is exercised too.
+     */
+    it('parses the JSON plaintext and attaches the matching attachment key by url', async () => {
+        const attachmentKey = crypto.getRandomValues(new Uint8Array(32));
+        const messageKey = crypto.getRandomValues(new Uint8Array(32));
+        const nonce = crypto.getRandomValues(new Uint8Array(12));
+        const signingPrivate = crypto.getRandomValues(new Uint8Array(32));
+        const skid = 'c0000000-0000-4000-8000-000000000003';
+
+        const envelope = await sealMessage({
+            messageKey,
+            nonce,
+            signingPrivate,
+            chatId: CHAT,
+            epoch: 1,
+            senderId: SENDER,
+            senderKeyId: skid,
+            chainIndex: 0,
+            plaintext: utf8(
+                JSON.stringify({
+                    text: 'see the photo',
+                    attachmentKeys: [{ url: 'files/a.png', key: b64uEncode(attachmentKey) }],
+                })
+            ),
+        });
+
+        const raw = envelopeMessage('m-attach', 0);
+        raw.envelope = envelope;
+        raw.attachments = [{ url: 'files/a.png', name: 'a.png', size: 10, content_type: 'image/png' }];
+
+        const chain = { messageKeyFor: jasmine.createSpy('messageKeyFor').and.returnValue({ key: messageKey }) };
+        keyStore.getReceiverChain.and.returnValue(chain as never);
+        keyStore.getChainSigningKey.and.returnValue(undefined);
+
+        const result = await service.decrypt(CHAT, raw);
+
+        expect(result.status).toBe('ok');
+        expect(result.text).toBe('see the photo');
+        expect(result.attachments[0].decryptionKey).toEqual(attachmentKey);
+    });
+
+    /** Real message history sealed before this feature existed is raw UTF-8, not JSON. */
+    it('falls back to legacy plaintext when the decrypted bytes are not the JSON shape', async () => {
+        const messageKey = crypto.getRandomValues(new Uint8Array(32));
+        const nonce = crypto.getRandomValues(new Uint8Array(12));
+        const signingPrivate = crypto.getRandomValues(new Uint8Array(32));
+        const skid = 'c0000000-0000-4000-8000-000000000003';
+
+        const envelope = await sealMessage({
+            messageKey,
+            nonce,
+            signingPrivate,
+            chatId: CHAT,
+            epoch: 1,
+            senderId: SENDER,
+            senderKeyId: skid,
+            chainIndex: 0,
+            plaintext: utf8('plain old text, not json'),
+        });
+
+        const raw = envelopeMessage('m-legacy', 0);
+        raw.envelope = envelope;
+
+        const chain = { messageKeyFor: jasmine.createSpy('messageKeyFor').and.returnValue({ key: messageKey }) };
+        keyStore.getReceiverChain.and.returnValue(chain as never);
+        keyStore.getChainSigningKey.and.returnValue(undefined);
+
+        const result = await service.decrypt(CHAT, raw);
+
+        expect(result.status).toBe('ok');
+        expect(result.text).toBe('plain old text, not json');
+        expect(result.attachments).toEqual([]);
     });
 
     /**

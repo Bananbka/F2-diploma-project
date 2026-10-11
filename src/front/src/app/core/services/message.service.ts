@@ -5,7 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 
 import { signChannelPost, verifyChannelPost } from '../crypto/channel';
 import { openMessage, sealMessage } from '../crypto/envelope';
-import { b64uDecode, fromUtf8, utf8 } from '../crypto/primitives';
+import { b64uDecode, b64uEncode, fromUtf8, utf8 } from '../crypto/primitives';
 import { ChatKeys, ForwardOrigin, MessageAttachment, MessageReaction, MessageResponse } from '../models/crypto.model';
 import { ChatApiService } from './chat-api.service';
 import { CryptoApiService } from './crypto-api.service';
@@ -48,6 +48,82 @@ export interface DecryptedMessage {
 export interface LoadedMessages {
     raw: MessageResponse[];
     messages: DecryptedMessage[];
+}
+
+/**
+ * The envelope's plaintext, as JSON rather than bare text.
+ *
+ * Carrying attachment keys inside the already-sealed envelope (rather than a new wire primitive)
+ * means a recipient can only ever learn a key by first passing every check that gates opening the
+ * message itself — member-set verification, signature, epoch binding. See
+ * `docs/crypto-spec-v1.md` §4.5.
+ */
+interface MessagePlaintext {
+    text: string;
+    attachmentKeys: { url: string; key: string }[];
+}
+
+/** Build the JSON plaintext payload sealed inside a message envelope. */
+function buildPlaintext(text: string, attachments: MessageAttachment[] | undefined): Uint8Array {
+    const attachmentKeys = (attachments ?? [])
+        .filter((file): file is MessageAttachment & { decryptionKey: Uint8Array } => file.decryptionKey !== undefined)
+        .map((file) => ({ url: file.url, key: b64uEncode(file.decryptionKey) }));
+
+    const payload: MessagePlaintext = { text, attachmentKeys };
+    return utf8(JSON.stringify(payload));
+}
+
+/**
+ * Parse a decrypted envelope's plaintext.
+ *
+ * Message history sealed before this feature existed is raw UTF-8 text, not JSON — attempting to
+ * `JSON.parse` it either throws or (worse, for a plaintext that happens to look numeric or
+ * boolean) succeeds as the wrong shape. Either case falls back to treating the bytes as legacy
+ * plain text with no attachment keys, so old history keeps decrypting exactly as it always has.
+ */
+function parsePlaintext(plaintext: Uint8Array): MessagePlaintext {
+    const raw = fromUtf8(plaintext);
+
+    try {
+        const parsed = JSON.parse(raw);
+        if (
+            parsed &&
+            typeof parsed === 'object' &&
+            typeof parsed.text === 'string' &&
+            Array.isArray(parsed.attachmentKeys)
+        ) {
+            return parsed as MessagePlaintext;
+        }
+    } catch {
+        // Not JSON at all — legacy plaintext. Fall through.
+    }
+
+    return { text: raw, attachmentKeys: [] };
+}
+
+/** Strip `decryptionKey` before an attachment list is sent over HTTP — it never belongs there. */
+function stripDecryptionKeys(attachments: MessageAttachment[]): MessageAttachment[] {
+    return attachments.map((file) => {
+        const copy = { ...file };
+        delete copy.decryptionKey;
+        return copy;
+    });
+}
+
+/** Attach each decrypted key to the matching attachment by URL, leaving the rest untouched. */
+function withAttachmentKeys(
+    attachments: MessageAttachment[],
+    attachmentKeys: MessagePlaintext['attachmentKeys']
+): MessageAttachment[] {
+    if (attachmentKeys.length === 0) {
+        return attachments;
+    }
+
+    const keysByUrl = new Map(attachmentKeys.map((entry) => [entry.url, b64uDecode(entry.key)]));
+    return attachments.map((file) => {
+        const key = keysByUrl.get(file.url);
+        return key ? { ...file, decryptionKey: key } : file;
+    });
 }
 
 @Injectable({ providedIn: 'root' })
@@ -136,10 +212,13 @@ export class MessageService {
             senderId: identity.userId,
             senderKeyId: own.senderKeyId,
             chainIndex: index,
-            plaintext: utf8(text),
+            plaintext: buildPlaintext(text, attachments),
         });
 
-        return firstValueFrom(this.chatApi.sendEnvelope(chatId, envelope, replyTo, attachments, forwardedFrom));
+        // The key only ever belongs inside the sealed plaintext above — it must never reach the
+        // wire as part of the ordinary HTTP attachment metadata.
+        const wireAttachments = attachments ? stripDecryptionKeys(attachments) : undefined;
+        return firstValueFrom(this.chatApi.sendEnvelope(chatId, envelope, replyTo, wireAttachments, forwardedFrom));
     }
 
     /**
@@ -149,8 +228,18 @@ export class MessageService {
      * it would repeat a (key, nonce) pair under AES-GCM — which leaks the XOR of both plaintexts and
      * can expose the authentication subkey. The server enforces `idx > stored idx` for exactly that
      * reason; taking the next index from our own sending chain satisfies it naturally.
+     *
+     * `attachments` is the message's current attachment list (with whatever `decryptionKey`s we
+     * already hold for them) rather than a user-editable set: `PUT /messages/{id}` has no field to
+     * change the stored `attachments` array, so the set itself cannot be added to or removed from
+     * here — only re-sealed into the fresh plaintext so the keys survive the edit.
      */
-    async editText(chatId: string, messageId: string, text: string): Promise<DecryptedMessage> {
+    async editText(
+        chatId: string,
+        messageId: string,
+        text: string,
+        attachments?: MessageAttachment[]
+    ): Promise<DecryptedMessage> {
         const keys = await firstValueFrom(this.cryptoApi.getChatKeys(chatId));
         const identity = this.keyStore.currentIdentity;
         if (!identity) {
@@ -169,14 +258,14 @@ export class MessageService {
             senderId: identity.userId,
             senderKeyId: own.senderKeyId,
             chainIndex: index,
-            plaintext: utf8(text),
+            plaintext: buildPlaintext(text, attachments),
         });
 
         const updated = await firstValueFrom(this.chatApi.editMessage(messageId, envelope));
 
         // The stored plaintext is now the previous version; replace rather than leave it stale.
         this.opened.delete(messageId);
-        return this.recordOutgoing(updated, text);
+        return this.recordOutgoing(updated, text, attachments);
     }
 
     /** Post to a channel: signed with the identity key, not encrypted. */
@@ -362,8 +451,23 @@ export class MessageService {
      * have to open with a separate `ReceiverChain` built from the grant we wrapped for ourselves —
      * consuming an index there for no reason, and reporting `no_key` in the window before that grant
      * has been fetched back. Both are avoidable: the plaintext never left this process.
+     *
+     * `sentAttachments` is the locally-held list carrying each attachment's `decryptionKey` — the
+     * keys never travel over HTTP, so `sent.attachments` (the server's echo) never has them. Matched
+     * back onto the server's copy by URL so the rendered attachments carry the fields the server
+     * knows (size, kind, etc.) *and* the key only this process ever held.
      */
-    recordOutgoing(sent: MessageResponse, plaintext: string): DecryptedMessage {
+    recordOutgoing(sent: MessageResponse, plaintext: string, sentAttachments?: MessageAttachment[]): DecryptedMessage {
+        const keysByUrl = new Map(
+            (sentAttachments ?? [])
+                .filter((f): f is MessageAttachment & { decryptionKey: Uint8Array } => f.decryptionKey !== undefined)
+                .map((f) => [f.url, f.decryptionKey] as const)
+        );
+        const attachments = (sent.attachments ?? []).map((file) => {
+            const key = keysByUrl.get(file.url);
+            return key ? { ...file, decryptionKey: key } : file;
+        });
+
         const message: DecryptedMessage = {
             id: sent._id,
             chatId: sent.chat_id,
@@ -372,7 +476,7 @@ export class MessageService {
             isEdited: sent.is_edited,
             replyToId: sent.reply_to_message_id,
             forwardedFrom: sent.forwarded_from,
-            attachments: sent.attachments ?? [],
+            attachments,
             text: plaintext,
             status: sent.content_format === 'channel_signed_v1' ? 'plaintext' : 'ok',
             // We signed it ourselves, so authorship is known rather than merely checked.
@@ -455,7 +559,14 @@ export class MessageService {
                 signingPublic,
             });
 
-            return { ...base, text: fromUtf8(plaintext), status: 'ok', senderVerified: Boolean(signingPublic) };
+            const parsed = parsePlaintext(plaintext);
+            return {
+                ...base,
+                attachments: withAttachmentKeys(base.attachments, parsed.attachmentKeys),
+                text: parsed.text,
+                status: 'ok',
+                senderVerified: Boolean(signingPublic),
+            };
         } catch {
             // Could be a consumed index, a stale grant, or genuine tampering. The UI must not
             // present any of those as ordinary text.

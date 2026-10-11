@@ -49,10 +49,14 @@ export class ProfileApiService {
      *
      * The avatar bucket carries a public-read policy, so its URL works directly in an `<img src>`.
      * The message bucket does not — those need the authorised download endpoint.
+     *
+     * Accepts a bare `Blob` as well as a `File` — an encrypted attachment blob has no filename of
+     * its own, so a message upload supplies one explicitly rather than relying on the object
+     * carrying it.
      */
-    upload(file: File, category: 'avatar' | 'message'): Observable<UploadedFile> {
+    upload(file: Blob | File, category: 'avatar' | 'message', filename?: string): Observable<UploadedFile> {
         const body = new FormData();
-        body.append('file', file);
+        body.append('file', file, filename ?? (file instanceof File ? file.name : 'file'));
         body.append('category', category);
 
         return this.http

@@ -1,3 +1,5 @@
+import { provideHttpClient } from '@angular/common/http';
+import { provideHttpClientTesting } from '@angular/common/http/testing';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 
 import { ChatApiService } from '../../../core/services/chat-api.service';
@@ -43,6 +45,8 @@ describe('MessageBubbleComponent', () => {
         await TestBed.configureTestingModule({
             imports: [MessageBubbleComponent],
             providers: [
+                provideHttpClient(),
+                provideHttpClientTesting(),
                 { provide: DirectoryService, useValue: directory },
                 {
                     provide: ChatApiService,

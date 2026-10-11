@@ -241,6 +241,180 @@
     opacity: 0.7;
 }
 
+/* ── Media attachments ───────────────────────────────────────────────────────────────────────── */
+
+.media-tile {
+    position: relative;
+    display: block;
+    width: 100%;
+    max-width: 18rem;
+    min-height: 6rem;
+    overflow: hidden;
+    border-radius: var(--radius-lg);
+}
+
+.media-image {
+    display: block;
+    width: 100%;
+    max-height: 22rem;
+    object-fit: cover;
+}
+
+.media-skeleton {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 6rem;
+    background: rgb(255 255 255 / 6%);
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+    font-style: italic;
+}
+
+.media-error {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.625rem;
+    background: var(--danger-surface);
+    color: var(--danger);
+    font-size: 0.75rem;
+
+    lucide-icon {
+        flex-shrink: 0;
+        width: 0.875rem;
+        height: 0.875rem;
+    }
+}
+
+.tile-badge {
+    position: absolute;
+    bottom: 0.375rem;
+    left: 0.375rem;
+    padding: 0.0625rem 0.375rem;
+    background: rgb(0 0 0 / 60%);
+    border-radius: var(--radius-sm);
+    color: #fff;
+    font-size: 0.625rem;
+    font-weight: 600;
+}
+
+.media-video {
+    display: block;
+    width: 100%;
+    max-height: 22rem;
+    background: #000;
+}
+
+.video-placeholder {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 10rem;
+    background: #0b0b0f;
+}
+
+.play-overlay {
+    width: 2.5rem;
+    height: 2.5rem;
+    color: #fff;
+    opacity: 0.9;
+}
+
+.duration-badge {
+    position: absolute;
+    bottom: 0.5rem;
+    right: 0.5rem;
+    padding: 0.0625rem 0.375rem;
+    background: rgb(0 0 0 / 60%);
+    border-radius: var(--radius-sm);
+    color: #fff;
+    font-size: 0.6875rem;
+}
+
+.audio-row {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    min-width: 14rem;
+    padding: 0.375rem 0.125rem;
+}
+
+.audio-play {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 2rem;
+    height: 2rem;
+    background: var(--primary);
+    border: none;
+    border-radius: 50%;
+    color: #fff;
+
+    lucide-icon {
+        width: 1rem;
+        height: 1rem;
+    }
+
+    &:disabled {
+        opacity: 0.5;
+    }
+}
+
+.audio-waveform {
+    display: flex;
+    flex: 1;
+    align-items: center;
+    gap: 0.125rem;
+    height: 1.5rem;
+}
+
+.wave-bar {
+    flex: 1;
+    min-width: 0.125rem;
+    max-width: 0.1875rem;
+    background: currentColor;
+    border-radius: 999px;
+    opacity: 0.55;
+}
+
+.audio-time {
+    flex-shrink: 0;
+    font-size: 0.6875rem;
+    opacity: 0.8;
+}
+
+.audio-error {
+    flex-shrink: 0;
+    width: 0.875rem;
+    height: 0.875rem;
+    color: var(--danger);
+}
+
+.sticker-tile {
+    width: 8rem;
+}
+
+.sticker-image {
+    display: block;
+    width: 100%;
+    height: auto;
+}
+
+/* A sticker-only message is a bare image — the surrounding bubble chrome would just frame empty
+   padding around it. */
+.bubble.is-sticker-only {
+    padding: 0;
+    background: transparent;
+    border: none;
+}
+
+:host(.is-outgoing) .bubble.is-sticker-only {
+    background: transparent;
+}
+
 /* ── Status tones ────────────────────────────────────────────────────────────────────────────
    Each unreadable state is visually distinct. `pending` reads as waiting rather than broken;
    `warn` and `danger` escalate; `inert` reads as archived, not as loading. */
