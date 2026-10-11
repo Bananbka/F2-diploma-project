@@ -1,0 +1,9 @@
+<ng-content />
+
+@if (!disabled()) {
+    <div
+        class="handle"
+        [class.is-dragging]="isDragging()"
+        (pointerdown)="onHandlePointerDown($event)"
+    ></div>
+}
