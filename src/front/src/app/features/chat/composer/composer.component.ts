@@ -66,9 +66,9 @@ export class ComposerComponent {
     /** Pre-fills the box when an existing message is being edited. */
     readonly initialText = input('');
     /**
-     * Pre-populates the staged list when editing an existing message. Read-only: `PUT
-     * /messages/{id}` has no field to change the stored attachment set, so these render for
-     * context but cannot be removed or added to while editing — only the text can change.
+     * Pre-populates the staged list when editing an existing message. `PUT /messages/{id}` now
+     * accepts an `attachments` field, so these behave exactly like freshly staged attachments:
+     * removable, and more can be added alongside them before the edit is submitted.
      */
     readonly initialAttachments = input<MessageAttachment[]>([]);
     readonly editing = input(false);
@@ -136,9 +136,6 @@ export class ComposerComponent {
 
     onDragOver(event: DragEvent): void {
         event.preventDefault();
-        if (this.editing()) {
-            return;
-        }
         this.dragOver.set(true);
     }
 
@@ -150,16 +147,10 @@ export class ComposerComponent {
     onDrop(event: DragEvent): void {
         event.preventDefault();
         this.dragOver.set(false);
-        if (this.editing()) {
-            return;
-        }
         void this.stageFiles(event.dataTransfer?.files ?? null);
     }
 
     onPaste(event: ClipboardEvent): void {
-        if (this.editing()) {
-            return;
-        }
         const files = event.clipboardData?.files;
         if (files && files.length > 0) {
             void this.stageFiles(files);
@@ -173,7 +164,7 @@ export class ComposerComponent {
      * reaps unreferenced blobs after 24 hours, so a file staged and never sent does not linger.
      */
     async stageFiles(files: FileList | File[] | null): Promise<void> {
-        if (!files || files.length === 0 || this.editing()) {
+        if (!files || files.length === 0) {
             return;
         }
 

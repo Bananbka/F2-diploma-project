@@ -192,10 +192,28 @@ export class ChatApiService {
         return this.http.delete<SuccessResponse<unknown>>(`${this.chatsUrl}${chatId}`).pipe(map((r) => r.data));
     }
 
-    /** Edit a message. The envelope must carry a FRESH chain index; reuse is rejected. */
-    editMessage(messageId: string, envelope: MessageEnvelope): Observable<MessageResponse> {
+    /**
+     * Edit a message. The envelope must carry a FRESH chain index; reuse is rejected.
+     *
+     * `attachments` follows the same omit/replace convention as `PATCH /chat-folder/{id}`:
+     * `undefined` (the parameter not passed at all) omits the key from the body entirely, which
+     * the server reads as "leave the stored attachment list untouched" — the common, text-only
+     * edit. Passing `[]` explicitly clears every attachment. Callers must have already stripped
+     * each attachment's `decryptionKey` (see `stripDecryptionKeys` in `message.service.ts`) — that
+     * field is in-memory-only and must never reach the wire.
+     */
+    editMessage(
+        messageId: string,
+        envelope: MessageEnvelope,
+        attachments?: MessageAttachment[]
+    ): Observable<MessageResponse> {
+        const body: { envelope: MessageEnvelope; attachments?: MessageAttachment[] } = { envelope };
+        if (attachments !== undefined) {
+            body.attachments = attachments;
+        }
+
         return this.http
-            .put<SuccessResponse<MessageResponse>>(`${this.messagesUrl}${messageId}`, { envelope })
+            .put<SuccessResponse<MessageResponse>>(`${this.messagesUrl}${messageId}`, body)
             .pipe(map((r) => r.data));
     }
 

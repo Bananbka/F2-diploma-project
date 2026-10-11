@@ -541,7 +541,7 @@ export class ChatViewComponent {
 
         if (editing) {
             try {
-                await this.store.editMessage(editing.id, composed.text);
+                await this.store.editMessage(editing.id, composed.text, composed.attachments);
             } catch {
                 this.store.realtimeError.set('Could not edit that message.');
             }

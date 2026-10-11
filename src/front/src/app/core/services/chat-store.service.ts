@@ -734,18 +734,28 @@ export class ChatStoreService {
         return sent;
     }
 
-    /** Edit one of our own messages. Only the sender may, and only in an encrypted chat. */
-    async editMessage(messageId: string, text: string): Promise<void> {
+    /**
+     * Edit one of our own messages. Only the sender may, and only in an encrypted chat.
+     *
+     * `attachments`, when passed, is the composer's current attachment list for this edit session
+     * — reflecting whatever was added or removed while editing — and replaces the stored list
+     * wholesale. When omitted, the message's existing attachments travel unchanged, which keeps
+     * callers that only ever change text (there are none left, but the parameter stays optional)
+     * from having to resupply a list they never touched.
+     */
+    async editMessage(messageId: string, text: string, attachments?: MessageAttachment[]): Promise<void> {
         const chatId = this.activeChatId();
         if (!chatId || !text.trim()) {
             return;
         }
 
-        // `PUT /messages/{id}` has no field to change the stored attachment list, so the message's
-        // current attachments travel unchanged — this only re-seals their keys into the fresh
-        // plaintext, it does not let the edit add or remove one.
         const existing = this.messages().find((m) => m.id === messageId);
-        const edited = await this.messages_.editText(chatId, messageId, text.trim(), existing?.attachments);
+        const edited = await this.messages_.editText(
+            chatId,
+            messageId,
+            text.trim(),
+            attachments ?? existing?.attachments
+        );
         this.messages.update((list) => list.map((m) => (m.id === edited.id ? edited : m)));
         this.cachePreview(chatId, [edited]);
     }

@@ -101,6 +101,25 @@ function parsePlaintext(plaintext: Uint8Array): MessagePlaintext {
     return { text: raw, attachmentKeys: [] };
 }
 
+/**
+ * Refuse to seal an edit that would silently orphan an attachment.
+ *
+ * `buildPlaintext` filters out any attachment missing a `decryptionKey` when it builds
+ * `attachmentKeys` — but the wire-bound attachment list (via `stripDecryptionKeys`) still lists
+ * that same attachment by url/metadata. If such an attachment is kept across an edit, the edit
+ * would re-persist it with no key anywhere: the key only ever travels inside the sealed envelope
+ * plaintext, and this edit would overwrite that plaintext without one, permanently. The caller
+ * must drop the attachment (or recover its key) before editing, not silently lose it.
+ */
+function assertAttachmentsKeyed(attachments: MessageAttachment[] | undefined): void {
+    const unkeyed = (attachments ?? []).find((file) => file.decryptionKey === undefined);
+    if (unkeyed) {
+        throw new Error(
+            `Cannot edit: attachment "${unkeyed.name}" has no decryption key and would become permanently unreadable`
+        );
+    }
+}
+
 /** Strip `decryptionKey` before an attachment list is sent over HTTP — it never belongs there. */
 function stripDecryptionKeys(attachments: MessageAttachment[]): MessageAttachment[] {
     return attachments.map((file) => {
@@ -229,10 +248,20 @@ export class MessageService {
      * can expose the authentication subkey. The server enforces `idx > stored idx` for exactly that
      * reason; taking the next index from our own sending chain satisfies it naturally.
      *
-     * `attachments` is the message's current attachment list (with whatever `decryptionKey`s we
-     * already hold for them) rather than a user-editable set: `PUT /messages/{id}` has no field to
-     * change the stored `attachments` array, so the set itself cannot be added to or removed from
-     * here — only re-sealed into the fresh plaintext so the keys survive the edit.
+     * `attachments` is the caller's CURRENT attachment list for this message, after any add/remove
+     * made during this edit session — not necessarily the original, unchanged list. `PUT
+     * /messages/{id}` now accepts an `attachments` field (omit it to leave the stored list
+     * untouched, supply a list — possibly `[]` — to replace it wholesale), so this method both
+     * re-seals the plaintext under a fresh chain index *and* asks the server to persist the new
+     * attachment list.
+     *
+     * Each attachment here must already carry the key a recipient needs: an attachment that
+     * survived from before the edit keeps the `decryptionKey` it was decrypted with, and one added
+     * during this edit session carries the fresh key it was encrypted under (`encryptAttachment`,
+     * same as a brand-new send). Those keys are folded into the envelope's own sealed plaintext via
+     * `buildPlaintext`, then stripped before the attachment list is sent over HTTP — the key must
+     * never appear as ordinary attachment metadata. Enforced by `assertAttachmentsKeyed`: an
+     * attachment missing its `decryptionKey` throws rather than being silently sealed without one.
      */
     async editText(
         chatId: string,
@@ -245,6 +274,11 @@ export class MessageService {
         if (!identity) {
             throw new Error('key store is locked');
         }
+
+        // Every kept attachment must carry the key a recipient needs before we seal — see
+        // `assertAttachmentsKeyed`. Checked before building the plaintext, not after, so a missing
+        // key is a loud, recoverable failure rather than a silent, permanent one.
+        assertAttachmentsKeyed(attachments);
 
         const own = await this.keyStore.ensureSenderChain(chatId, keys.current_epoch);
         const { key, nonce, index } = own.chain.nextMessageKey();
@@ -261,7 +295,10 @@ export class MessageService {
             plaintext: buildPlaintext(text, attachments),
         });
 
-        const updated = await firstValueFrom(this.chatApi.editMessage(messageId, envelope));
+        // The key only ever belongs inside the sealed plaintext above — it must never reach the
+        // wire as part of the ordinary HTTP attachment metadata.
+        const wireAttachments = attachments ? stripDecryptionKeys(attachments) : undefined;
+        const updated = await firstValueFrom(this.chatApi.editMessage(messageId, envelope, wireAttachments));
 
         // The stored plaintext is now the previous version; replace rather than leave it stale.
         this.opened.delete(messageId);

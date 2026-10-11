@@ -1,9 +1,10 @@
 import { TestBed } from '@angular/core/testing';
 import { of } from 'rxjs';
 
-import { sealMessage } from '../crypto/envelope';
+import { openMessage, sealMessage } from '../crypto/envelope';
 import { b64uEncode, utf8 } from '../crypto/primitives';
-import { MessageResponse } from '../models/crypto.model';
+import { SenderChain } from '../crypto/ratchet';
+import { MessageAttachment, MessageResponse } from '../models/crypto.model';
 import { ChatApiService } from './chat-api.service';
 import { CryptoApiService } from './crypto-api.service';
 import { KeyStoreService } from './key-store.service';
@@ -50,12 +51,12 @@ describe('MessageService', () => {
     let chatApi: jasmine.SpyObj<ChatApiService>;
 
     beforeEach(() => {
-        keyStore = jasmine.createSpyObj<KeyStoreService>('KeyStoreService', [
-            'getReceiverChain',
-            'getChainSigningKey',
-            'ingestDistributions',
-        ]);
-        chatApi = jasmine.createSpyObj<ChatApiService>('ChatApiService', ['getMessages']);
+        keyStore = jasmine.createSpyObj<KeyStoreService>(
+            'KeyStoreService',
+            ['getReceiverChain', 'getChainSigningKey', 'ingestDistributions', 'ensureSenderChain'],
+            ['currentIdentity']
+        );
+        chatApi = jasmine.createSpyObj<ChatApiService>('ChatApiService', ['getMessages', 'editMessage']);
 
         const cryptoApi = jasmine.createSpyObj<CryptoApiService>('CryptoApiService', ['getChatKeys']);
         cryptoApi.getChatKeys.and.returnValue(
@@ -311,5 +312,113 @@ describe('MessageService', () => {
         const second = await service.decrypt(CHAT, raw);
         expect(second.reactions).toEqual(fresh.reactions);
         expect(second.isPinned).toBeTrue();
+    });
+
+    describe('editText', () => {
+        /**
+         * The replacement list may mix an attachment that survived the edit (carrying the key it
+         * was already decrypted with) and one freshly added during this edit session (carrying the
+         * key it was just encrypted under). Both keys belong in the fresh plaintext's
+         * `attachmentKeys`, and neither may reach `ChatApiService.editMessage` on the wire.
+         */
+        it('builds {text, attachmentKeys} from a mix of kept and newly added attachments, and sends the stripped list', async () => {
+            const chainKey = crypto.getRandomValues(new Uint8Array(32));
+            const signingPrivate = crypto.getRandomValues(new Uint8Array(32));
+            const senderKeyId = 'c0000000-0000-4000-8000-000000000003';
+
+            keyStore.ensureSenderChain.and.resolveTo({
+                senderKeyId,
+                chain: new SenderChain(chainKey),
+                chainSigningPrivate: signingPrivate,
+            } as never);
+            Object.defineProperty(keyStore, 'currentIdentity', {
+                value: { userId: SENDER, deviceId: 'device-1' },
+            });
+
+            const keptKey = crypto.getRandomValues(new Uint8Array(32));
+            const newKey = crypto.getRandomValues(new Uint8Array(32));
+            const kept: MessageAttachment = {
+                url: 'files/kept.png',
+                name: 'kept.png',
+                size: 10,
+                content_type: 'image/png',
+                decryptionKey: keptKey,
+            };
+            const added: MessageAttachment = {
+                url: 'files/added.png',
+                name: 'added.png',
+                size: 20,
+                content_type: 'image/png',
+                decryptionKey: newKey,
+            };
+
+            const updated = envelopeMessage('m-edit', 1);
+            updated.attachments = [kept, added].map((file) => {
+                const copy = { ...file };
+                delete copy.decryptionKey;
+                return copy;
+            });
+            chatApi.editMessage.and.returnValue(of(updated));
+
+            const result = await service.editText(CHAT, 'm-edit', 'updated text', [kept, added]);
+
+            expect(chatApi.editMessage).toHaveBeenCalledTimes(1);
+            const [, envelope, wireAttachments] = chatApi.editMessage.calls.mostRecent().args;
+            expect(wireAttachments).toEqual([
+                { url: kept.url, name: kept.name, size: kept.size, content_type: kept.content_type },
+                { url: added.url, name: added.name, size: added.size, content_type: added.content_type },
+            ]);
+
+            // The keys travelled inside the sealed plaintext, not on the wire attachment list.
+            const chain = new SenderChain(chainKey);
+            const { key } = chain.nextMessageKey();
+            const plaintext = await openMessage({
+                messageKey: key,
+                envelope,
+                chatId: CHAT,
+                senderId: SENDER,
+                signingPublic: undefined,
+            });
+            const parsed = JSON.parse(new TextDecoder().decode(plaintext));
+            expect(parsed.text).toBe('updated text');
+            expect(parsed.attachmentKeys).toEqual(
+                jasmine.arrayContaining([
+                    { url: kept.url, key: b64uEncode(keptKey) },
+                    { url: added.url, key: b64uEncode(newKey) },
+                ])
+            );
+
+            expect(result.text).toBe('updated text');
+            expect(result.attachments.find((f) => f.url === kept.url)?.decryptionKey).toEqual(keptKey);
+            expect(result.attachments.find((f) => f.url === added.url)?.decryptionKey).toEqual(newKey);
+        });
+
+        /**
+         * An attachment with no `decryptionKey` (stale/corrupted sender, or added by some other
+         * client that never sealed a key for it) must never be carried into an edit's fresh
+         * plaintext — `buildPlaintext` would silently drop it from `attachmentKeys` while
+         * `stripDecryptionKeys` keeps it in the wire-bound attachment list, permanently orphaning
+         * the file. `editText` must refuse outright, before the server is ever contacted.
+         */
+        it('throws and never calls editMessage when a kept attachment has no decryption key', async () => {
+            Object.defineProperty(keyStore, 'currentIdentity', {
+                value: { userId: SENDER, deviceId: 'device-1' },
+            });
+
+            const unkeyed: MessageAttachment = {
+                url: 'files/unkeyed.png',
+                name: 'unkeyed.png',
+                size: 10,
+                content_type: 'image/png',
+                // no decryptionKey
+            };
+
+            await expectAsync(service.editText(CHAT, 'm-edit', 'updated text', [unkeyed])).toBeRejectedWithError(
+                /unkeyed\.png.*no decryption key/
+            );
+
+            expect(chatApi.editMessage).not.toHaveBeenCalled();
+            expect(keyStore.ensureSenderChain).not.toHaveBeenCalled();
+        });
     });
 });

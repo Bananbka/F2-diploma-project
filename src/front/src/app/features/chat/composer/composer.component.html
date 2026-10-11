@@ -49,31 +49,27 @@
                             <lucide-icon [img]="filmIcon" />
                         </span>
                     }
-                    @if (!editing()) {
-                        <button
-                            type="button"
-                            class="tile-remove"
-                            [attr.aria-label]="'Remove ' + entry.file.name"
-                            (click)="removeAttachment(entry.file.url)"
-                        >
-                            <lucide-icon [img]="closeIcon" />
-                        </button>
-                    }
+                    <button
+                        type="button"
+                        class="tile-remove"
+                        [attr.aria-label]="'Remove ' + entry.file.name"
+                        (click)="removeAttachment(entry.file.url)"
+                    >
+                        <lucide-icon [img]="closeIcon" />
+                    </button>
                 </div>
             } @else {
                 <span class="staged-file">
                     <lucide-icon [img]="paperclipIcon" />
                     {{ entry.file.name }}
                     <span class="staged-file-size">{{ readableSize(entry.file.size) }}</span>
-                    @if (!editing()) {
-                        <button
-                            type="button"
-                            [attr.aria-label]="'Remove ' + entry.file.name"
-                            (click)="removeAttachment(entry.file.url)"
-                        >
-                            <lucide-icon [img]="closeIcon" />
-                        </button>
-                    }
+                    <button
+                        type="button"
+                        [attr.aria-label]="'Remove ' + entry.file.name"
+                        (click)="removeAttachment(entry.file.url)"
+                    >
+                        <lucide-icon [img]="closeIcon" />
+                    </button>
                 </span>
             }
         }
@@ -94,7 +90,7 @@
         type="button"
         class="side"
         title="Attach a file"
-        [disabled]="!canSend() || uploading() || editing()"
+        [disabled]="!canSend() || uploading()"
         (click)="openFilePicker()"
     >
         <lucide-icon [img]="paperclipIcon" />
@@ -103,7 +99,7 @@
             type="file"
             multiple
             class="sr-only"
-            [disabled]="!canSend() || uploading() || editing()"
+            [disabled]="!canSend() || uploading()"
             (change)="onFilePicked($event)"
         />
         <span class="sr-only">Attach a file</span>
