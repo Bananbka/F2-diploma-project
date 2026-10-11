@@ -55,6 +55,22 @@ export const routes: Routes = [
     // leaving them below it would rely on the router backtracking out of a parent whose children all
     // failed — which works, but is a subtle thing to depend on.
     {
+        path: 'stickers/manage',
+        canActivate: [authGuard],
+        loadComponent: () =>
+            import('./features/chat/stickers/sticker-pack-manager/sticker-pack-manager.component').then(
+                (m) => m.StickerPackManagerComponent
+            ),
+    },
+    {
+        path: 'stickers/discover',
+        canActivate: [authGuard],
+        loadComponent: () =>
+            import('./features/chat/stickers/sticker-discovery/sticker-discovery.component').then(
+                (m) => m.StickerDiscoveryComponent
+            ),
+    },
+    {
         path: 'new/group',
         canActivate: [authGuard],
         loadComponent: () =>

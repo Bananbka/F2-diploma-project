@@ -78,4 +78,80 @@ describe('ComposerComponent', () => {
         expect(emitted?.text).toBe('edited text');
         expect(emitted?.attachments).toEqual([attachment()]);
     });
+
+    /**
+     * A sticker sends immediately, with no staging step and no `decryptionKey` — stickers are
+     * public images, never sealed under the attachment-encryption scheme.
+     */
+    it('sends a sticker immediately as a sticker-kind attachment with no decryption key', () => {
+        fixture.detectChanges();
+
+        let emitted: { text: string; attachments: MessageAttachment[] } | undefined;
+        component.submitted.subscribe((value) => (emitted = value));
+
+        component.onStickerPicked({
+            id: 's1',
+            pack_id: 'p1',
+            image_url: 'https://files.test/s1.png',
+            emoji: '😀',
+            position: 0,
+        });
+
+        expect(emitted).toEqual({
+            text: '',
+            attachments: [
+                { url: 'https://files.test/s1.png', name: '😀', size: 0, content_type: 'image/webp', kind: 'sticker' },
+            ],
+        });
+        expect(component.stickerPickerOpen()).toBeFalse();
+    });
+
+    it('does not send a sticker while sending is blocked', () => {
+        fixture.componentRef.setInput('canSend', false);
+        fixture.detectChanges();
+
+        let emitted = false;
+        component.submitted.subscribe(() => (emitted = true));
+
+        component.onStickerPicked({
+            id: 's1',
+            pack_id: 'p1',
+            image_url: 'https://files.test/s1.png',
+            emoji: '😀',
+            position: 0,
+        });
+
+        expect(emitted).toBeFalse();
+    });
+
+    /**
+     * A sticker has no `decryptionKey`, and `editMessage` rejects attachments without one. The
+     * trigger must be disabled while editing so the picker can never emit into an edit and discard
+     * the user's in-progress draft.
+     */
+    it('disables the sticker-trigger button while editing', () => {
+        fixture.componentRef.setInput('editing', true);
+        fixture.detectChanges();
+
+        const stickerButton: HTMLButtonElement = fixture.nativeElement.querySelector('.sticker-trigger');
+        expect(stickerButton.disabled).toBeTrue();
+    });
+
+    it('does not send a sticker while editing, even if picked directly', () => {
+        fixture.componentRef.setInput('editing', true);
+        fixture.detectChanges();
+
+        let emitted = false;
+        component.submitted.subscribe(() => (emitted = true));
+
+        component.onStickerPicked({
+            id: 's1',
+            pack_id: 'p1',
+            image_url: 'https://files.test/s1.png',
+            emoji: '😀',
+            position: 0,
+        });
+
+        expect(emitted).toBeFalse();
+    });
 });

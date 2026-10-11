@@ -1,0 +1,247 @@
+<header class="head">
+    <button
+        type="button"
+        class="back"
+        aria-label="Back"
+        (click)="close()"
+    >
+        <lucide-icon [img]="arrowLeftIcon" />
+    </button>
+    <h2>Your sticker packs</h2>
+</header>
+
+<div class="body">
+    <div class="field create">
+        <label for="newTitle">New pack</label>
+        <div class="create-row">
+            <input
+                id="newTitle"
+                type="text"
+                placeholder="Pack name"
+                [value]="newTitle()"
+                (input)="newTitle.set($any($event.target).value)"
+                (keydown.enter)="createPack()"
+            />
+            <button
+                type="button"
+                class="create-btn"
+                [disabled]="!canCreatePack()"
+                (click)="createPack()"
+            >
+                <lucide-icon [img]="plusIcon" />
+                {{ creating() ? 'Creating…' : 'Create' }}
+            </button>
+        </div>
+        @if (ownedPacks().length >= maxPacks) {
+            <p class="hint is-error">You have reached the limit of {{ maxPacks }} packs.</p>
+        }
+    </div>
+
+    @if (loading()) {
+        <p class="muted">Loading your packs…</p>
+    } @else if (ownedPacks().length === 0) {
+        <p class="muted">You have not created a sticker pack yet.</p>
+    } @else {
+        <ul class="packs">
+            @for (pack of ownedPacks(); track pack.id) {
+                <li class="pack">
+                    <button
+                        type="button"
+                        class="pack-row"
+                        [attr.aria-expanded]="expandedPackId() === pack.id"
+                        (click)="toggleExpand(pack)"
+                    >
+                        @if (pack.cover_image_url) {
+                            <img
+                                class="pack-cover"
+                                [src]="pack.cover_image_url"
+                                [alt]="pack.title"
+                            />
+                        } @else {
+                            <span class="pack-cover is-empty"></span>
+                        }
+                        <span class="pack-text">
+                            <span class="pack-title">{{ pack.title }}</span>
+                            <span class="pack-sub">
+                                {{ pack.sticker_count }} {{ pack.sticker_count === 1 ? 'sticker' : 'stickers' }} ·
+                                {{ pack.is_public ? 'Public' : 'Private' }}
+                            </span>
+                        </span>
+                        <lucide-icon [img]="pack.is_public ? globeIcon : lockIcon" />
+                    </button>
+
+                    @if (expandedPackId() === pack.id) {
+                        <div class="pack-detail">
+                            @if (loadingDetail()) {
+                                <p class="muted small">Loading…</p>
+                            } @else if (packDetail()) {
+                                <div class="field">
+                                    <label [for]="'title-' + pack.id">Title</label>
+                                    <div class="create-row">
+                                        <input
+                                            [id]="'title-' + pack.id"
+                                            type="text"
+                                            [value]="titleDraft()"
+                                            (input)="titleDraft.set($any($event.target).value)"
+                                            (keydown.enter)="saveTitle()"
+                                        />
+                                        <button
+                                            type="button"
+                                            class="create-btn"
+                                            [disabled]="savingTitle() || !titleDraft().trim()"
+                                            (click)="saveTitle()"
+                                        >
+                                            {{ savingTitle() ? 'Saving…' : 'Save' }}
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <button
+                                    type="button"
+                                    class="visibility-toggle"
+                                    [disabled]="togglingPublic()"
+                                    (click)="togglePublic()"
+                                >
+                                    <lucide-icon [img]="packDetail()!.is_public ? globeIcon : lockIcon" />
+                                    {{
+                                        packDetail()!.is_public
+                                            ? 'Public — anyone can find and subscribe to it'
+                                            : 'Private — only visible to you'
+                                    }}
+                                </button>
+
+                                <p class="section">Stickers</p>
+
+                                <ul class="stickers">
+                                    @for (sticker of packDetail()!.stickers; track sticker.id; let i = $index) {
+                                        <li class="sticker-row">
+                                            <img
+                                                [src]="sticker.image_url"
+                                                [alt]="sticker.emoji"
+                                            />
+                                            <span class="sticker-emoji">{{ sticker.emoji }}</span>
+                                            <button
+                                                type="button"
+                                                class="sticker-action"
+                                                aria-label="Move up"
+                                                [disabled]="i === 0 || busyStickerId() === sticker.id"
+                                                (click)="move(sticker, -1)"
+                                            >
+                                                <lucide-icon [img]="arrowUpIcon" />
+                                            </button>
+                                            <button
+                                                type="button"
+                                                class="sticker-action"
+                                                aria-label="Move down"
+                                                [disabled]="
+                                                    i === packDetail()!.stickers.length - 1 ||
+                                                    busyStickerId() === sticker.id
+                                                "
+                                                (click)="move(sticker, 1)"
+                                            >
+                                                <lucide-icon [img]="arrowDownIcon" />
+                                            </button>
+                                            <button
+                                                type="button"
+                                                class="sticker-action is-danger"
+                                                aria-label="Delete sticker"
+                                                [disabled]="busyStickerId() === sticker.id"
+                                                (click)="deleteSticker(sticker)"
+                                            >
+                                                <lucide-icon [img]="trashIcon" />
+                                            </button>
+                                        </li>
+                                    }
+                                    @if (packDetail()!.stickers.length === 0) {
+                                        <p class="muted small">No stickers in this pack yet.</p>
+                                    }
+                                </ul>
+
+                                @if (canAddSticker()) {
+                                    <div class="add-sticker">
+                                        <input
+                                            type="text"
+                                            class="emoji-input"
+                                            placeholder="Emoji"
+                                            maxlength="8"
+                                            aria-label="Emoji tag for the next sticker"
+                                            [value]="uploadEmoji()"
+                                            (input)="uploadEmoji.set($any($event.target).value)"
+                                        />
+                                        <label class="upload-btn">
+                                            <lucide-icon [img]="uploadIcon" />
+                                            {{ uploading() ? 'Uploading…' : 'Add sticker' }}
+                                            <input
+                                                type="file"
+                                                accept="image/*"
+                                                class="sr-only"
+                                                [disabled]="uploading()"
+                                                (change)="onFilePicked($event)"
+                                            />
+                                        </label>
+                                    </div>
+                                } @else {
+                                    <p class="hint is-error">
+                                        This pack has reached the limit of {{ maxStickersPerPack }} stickers.
+                                    </p>
+                                }
+
+                                @if (uploadError()) {
+                                    <p class="hint is-error">{{ uploadError() }}</p>
+                                }
+
+                                <div class="delete-pack">
+                                    @if (confirmingDeletePack()) {
+                                        <button
+                                            type="button"
+                                            class="danger-row is-confirm"
+                                            [disabled]="deletingPack()"
+                                            (click)="deletePack()"
+                                        >
+                                            <lucide-icon [img]="trashIcon" />
+                                            Delete this pack permanently
+                                        </button>
+                                        <button
+                                            type="button"
+                                            class="danger-row is-cancel"
+                                            [disabled]="deletingPack()"
+                                            (click)="cancelDeletePack()"
+                                        >
+                                            Cancel
+                                        </button>
+                                    } @else {
+                                        <button
+                                            type="button"
+                                            class="danger-row"
+                                            (click)="requestDeletePack()"
+                                        >
+                                            <lucide-icon [img]="trashIcon" />
+                                            Delete pack
+                                        </button>
+                                    }
+                                </div>
+                            }
+                        </div>
+                    }
+                </li>
+            }
+        </ul>
+    }
+
+    @if (error()) {
+        <p
+            class="error"
+            role="alert"
+        >
+            {{ error() }}
+        </p>
+    }
+
+    <button
+        type="button"
+        class="discover-link"
+        (click)="goToDiscovery()"
+    >
+        Discover public packs →
+    </button>
+</div>

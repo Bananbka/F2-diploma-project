@@ -11,12 +11,14 @@ import {
     untracked,
     viewChild,
 } from '@angular/core';
-import { Film, LucideAngularModule, Paperclip, RefreshCw, Send, ShieldAlert, X } from 'lucide-angular';
+import { Film, LucideAngularModule, Paperclip, RefreshCw, Send, ShieldAlert, Sticker, X } from 'lucide-angular';
 import { firstValueFrom } from 'rxjs';
 
 import { encryptAttachment } from '../../../core/crypto/attachment-crypto';
 import { AttachmentKind, MessageAttachment } from '../../../core/models/crypto.model';
+import { Sticker as StickerModel } from '../../../core/models/sticker.model';
 import { ProfileApiService } from '../../../core/services/profile-api.service';
+import { StickerPickerComponent } from '../stickers/sticker-picker/sticker-picker.component';
 
 /** What the composer hands over. Attachments travel with the message, not separately. */
 export interface ComposedMessage {
@@ -49,7 +51,7 @@ function inferKind(mimeType: string): AttachmentKind {
 
 @Component({
     selector: 'app-composer',
-    imports: [LucideAngularModule],
+    imports: [LucideAngularModule, StickerPickerComponent],
     templateUrl: './composer.component.html',
     styleUrl: './composer.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
@@ -57,6 +59,8 @@ function inferKind(mimeType: string): AttachmentKind {
 export class ComposerComponent {
     private readonly profileApi = inject(ProfileApiService);
     private readonly destroyRef = inject(DestroyRef);
+
+    readonly stickerPickerOpen = signal(false);
 
     /** False while the member set cannot be verified — sending is refused, not merely discouraged. */
     readonly canSend = input(true);
@@ -114,6 +118,7 @@ export class ComposerComponent {
     readonly shieldAlertIcon = ShieldAlert;
     readonly filmIcon = Film;
     readonly closeIcon = X;
+    readonly stickerIcon = Sticker;
 
     onInput(value: string): void {
         this.text.set(value);
@@ -249,6 +254,38 @@ export class ComposerComponent {
 
     openFilePicker(): void {
         this.fileInput()?.nativeElement.click();
+    }
+
+    toggleStickerPicker(): void {
+        this.stickerPickerOpen.update((open) => !open);
+    }
+
+    /**
+     * A sticker sends immediately on pick, with no staging step — unlike a file attachment, which
+     * waits in the composer until Enter/Send. It carries no `decryptionKey`: stickers are public
+     * images in the sticker bucket, never sealed, so nothing downstream needs to decrypt them.
+     */
+    onStickerPicked(sticker: StickerModel): void {
+        this.stickerPickerOpen.set(false);
+        // A sticker carries no `decryptionKey` by design, and `editMessage` rejects attachments
+        // without one. The trigger button is disabled while editing, but guard here too: nothing
+        // should route a sticker into an edit and lose the user's in-progress draft.
+        if (!this.canSend() || this.editing()) {
+            return;
+        }
+
+        this.submitted.emit({
+            text: '',
+            attachments: [
+                {
+                    url: sticker.image_url,
+                    name: sticker.emoji || 'sticker',
+                    size: 0,
+                    content_type: 'image/webp',
+                    kind: 'sticker',
+                },
+            ],
+        });
     }
 
     private revokeStaged(entries: StagedAttachment[]): void {

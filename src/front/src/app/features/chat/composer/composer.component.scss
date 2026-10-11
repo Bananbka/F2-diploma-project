@@ -77,6 +77,11 @@
     cursor: pointer;
 }
 
+.sticker-trigger-wrap {
+    position: relative;
+    flex-shrink: 0;
+}
+
 .staged {
     display: flex;
     flex-wrap: wrap;

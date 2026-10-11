@@ -105,6 +105,28 @@
         <span class="sr-only">Attach a file</span>
     </button>
 
+    <div class="sticker-trigger-wrap">
+        <button
+            type="button"
+            class="side sticker-trigger"
+            title="Send a sticker"
+            aria-haspopup="dialog"
+            [attr.aria-expanded]="stickerPickerOpen()"
+            [disabled]="!canSend() || editing()"
+            (click)="toggleStickerPicker()"
+        >
+            <lucide-icon [img]="stickerIcon" />
+            <span class="sr-only">Send a sticker</span>
+        </button>
+
+        @if (stickerPickerOpen()) {
+            <app-sticker-picker
+                (closeRequested)="stickerPickerOpen.set(false)"
+                (stickerPicked)="onStickerPicked($event)"
+            />
+        }
+    </div>
+
     <div class="input">
         <textarea
             #area

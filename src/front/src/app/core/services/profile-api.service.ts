@@ -54,7 +54,7 @@ export class ProfileApiService {
      * its own, so a message upload supplies one explicitly rather than relying on the object
      * carrying it.
      */
-    upload(file: Blob | File, category: 'avatar' | 'message', filename?: string): Observable<UploadedFile> {
+    upload(file: Blob | File, category: 'avatar' | 'message' | 'sticker', filename?: string): Observable<UploadedFile> {
         const body = new FormData();
         body.append('file', file, filename ?? (file instanceof File ? file.name : 'file'));
         body.append('category', category);

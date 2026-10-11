@@ -1,0 +1,105 @@
+<div
+    class="picker"
+    role="dialog"
+    aria-label="Stickers"
+>
+    @if (loadingTray()) {
+        <p class="muted">Loading your stickers…</p>
+    } @else if (tray().length === 0) {
+        <div class="empty">
+            <lucide-icon [img]="emptyIcon" />
+            <p>You have no sticker packs yet.</p>
+            <a
+                routerLink="/stickers/manage"
+                (click)="closeRequested.emit()"
+            >
+                Create one
+            </a>
+        </div>
+    } @else {
+        <div
+            class="tabs"
+            role="tablist"
+        >
+            @for (pack of tray(); track pack.id) {
+                <button
+                    type="button"
+                    role="tab"
+                    class="tab"
+                    [class.is-active]="activePackId() === pack.id"
+                    [attr.aria-selected]="activePackId() === pack.id"
+                    [title]="pack.title"
+                    (click)="selectPack(pack.id)"
+                >
+                    @if (pack.cover_image_url) {
+                        <img
+                            [src]="pack.cover_image_url"
+                            [alt]="pack.title"
+                        />
+                    } @else {
+                        <span class="tab-fallback">{{ pack.title.charAt(0) }}</span>
+                    }
+                </button>
+            }
+        </div>
+
+        <div class="search">
+            <lucide-icon [img]="searchIcon" />
+            <input
+                type="search"
+                placeholder="Filter by emoji…"
+                aria-label="Filter stickers by emoji"
+                [value]="query()"
+                (input)="query.set($any($event.target).value)"
+            />
+        </div>
+
+        <div class="grid">
+            @if (loadingPack()) {
+                <p class="muted">Loading…</p>
+            } @else if (filteredStickers().length === 0) {
+                <p class="muted">No stickers match.</p>
+            } @else {
+                @for (sticker of filteredStickers(); track sticker.id) {
+                    <button
+                        type="button"
+                        class="sticker"
+                        [attr.aria-label]="sticker.emoji || 'Sticker'"
+                        (click)="pick(sticker)"
+                    >
+                        <img
+                            [src]="sticker.image_url"
+                            [alt]="sticker.emoji"
+                        />
+                    </button>
+                }
+            }
+        </div>
+    }
+
+    @if (error()) {
+        <p
+            class="error"
+            role="alert"
+        >
+            {{ error() }}
+        </p>
+    }
+
+    <div class="foot">
+        <a
+            routerLink="/stickers/manage"
+            (click)="closeRequested.emit()"
+        >
+            <lucide-icon [img]="manageIcon" />
+            Manage packs
+        </a>
+        <a
+            routerLink="/stickers/discover"
+            (click)="closeRequested.emit()"
+        >
+            <lucide-icon [img]="discoverIcon" />
+            Discover
+        </a>
+    </div>
+</div>
