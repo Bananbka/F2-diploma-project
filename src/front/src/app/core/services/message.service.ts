@@ -110,9 +110,14 @@ function parsePlaintext(plaintext: Uint8Array): MessagePlaintext {
  * would re-persist it with no key anywhere: the key only ever travels inside the sealed envelope
  * plaintext, and this edit would overwrite that plaintext without one, permanently. The caller
  * must drop the attachment (or recover its key) before editing, not silently lose it.
+ *
+ * Stickers are exempt, matching `buildPlaintext`'s own filter: they are public, unencrypted
+ * images from the sticker-packs bucket and never carry a `decryptionKey` by design (see
+ * `onStickerPicked()` in `composer.component.ts`), so requiring one here would make editing any
+ * message that happens to carry a sticker impossible — even a pure text-only edit.
  */
 function assertAttachmentsKeyed(attachments: MessageAttachment[] | undefined): void {
-    const unkeyed = (attachments ?? []).find((file) => file.decryptionKey === undefined);
+    const unkeyed = (attachments ?? []).find((file) => file.kind !== 'sticker' && file.decryptionKey === undefined);
     if (unkeyed) {
         throw new Error(
             `Cannot edit: attachment "${unkeyed.name}" has no decryption key and would become permanently unreadable`

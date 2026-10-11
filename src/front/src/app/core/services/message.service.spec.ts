@@ -420,5 +420,71 @@ describe('MessageService', () => {
             expect(chatApi.editMessage).not.toHaveBeenCalled();
             expect(keyStore.ensureSenderChain).not.toHaveBeenCalled();
         });
+
+        /**
+         * Stickers are deliberately unkeyed — public, unencrypted images from the sticker-packs
+         * bucket, never sealed (see `onStickerPicked()` in `composer.component.ts`). A sticker
+         * attachment with no `decryptionKey` must not trip the same guard that catches a
+         * genuinely-orphaned keyed attachment above: `assertAttachmentsKeyed` must exempt
+         * `kind: 'sticker'`, exactly as `buildPlaintext` already excludes it from
+         * `attachmentKeys`. Regression test for editing any message that carries a sticker.
+         */
+        it('does not throw when the only attachment is an unkeyed sticker', async () => {
+            const chainKey = crypto.getRandomValues(new Uint8Array(32));
+            const signingPrivate = crypto.getRandomValues(new Uint8Array(32));
+            const senderKeyId = 'c0000000-0000-4000-8000-000000000004';
+
+            keyStore.ensureSenderChain.and.resolveTo({
+                senderKeyId,
+                chain: new SenderChain(chainKey),
+                chainSigningPrivate: signingPrivate,
+            } as never);
+            Object.defineProperty(keyStore, 'currentIdentity', {
+                value: { userId: SENDER, deviceId: 'device-1' },
+            });
+
+            const sticker: MessageAttachment = {
+                url: 'stickers/pack/wave.webp',
+                name: 'wave.webp',
+                size: 5,
+                content_type: 'image/webp',
+                kind: 'sticker',
+                // no decryptionKey — stickers are never sealed.
+            };
+
+            const updated = envelopeMessage('m-edit', 1);
+            updated.attachments = [{ ...sticker }];
+            chatApi.editMessage.and.returnValue(of(updated));
+
+            const result = await service.editText(CHAT, 'm-edit', 'updated text', [sticker]);
+
+            expect(chatApi.editMessage).toHaveBeenCalledTimes(1);
+            const [, envelope, wireAttachments] = chatApi.editMessage.calls.mostRecent().args;
+            expect(wireAttachments).toEqual([
+                {
+                    url: sticker.url,
+                    name: sticker.name,
+                    size: sticker.size,
+                    content_type: sticker.content_type,
+                    kind: sticker.kind,
+                },
+            ]);
+
+            // The sticker is excluded from attachmentKeys, same as buildPlaintext does for sends.
+            const chain = new SenderChain(chainKey);
+            const { key } = chain.nextMessageKey();
+            const plaintext = await openMessage({
+                messageKey: key,
+                envelope,
+                chatId: CHAT,
+                senderId: SENDER,
+                signingPublic: undefined,
+            });
+            const parsed = JSON.parse(new TextDecoder().decode(plaintext));
+            expect(parsed.text).toBe('updated text');
+            expect(parsed.attachmentKeys).toEqual([]);
+
+            expect(result.text).toBe('updated text');
+        });
     });
 });

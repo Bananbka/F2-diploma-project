@@ -312,17 +312,21 @@ The original ciphertext is destroyed, so there is no cryptographic edit history.
 
 ### 4.5 Attachment encryption
 
-Attachments (photos, videos, gifs, voice notes, stickers) are encrypted entirely client-side, on
-top of the mechanisms above rather than as a new one. For each attachment the client generates a
-random 32-byte AES-256-GCM key and a random 12-byte nonce, and uploads `nonce || ciphertext` as an
-opaque blob through the existing `POST /files/upload` — the server stores and serves these bytes
-exactly as it does any other attachment, with no awareness that they are encrypted.
+Attachments (photos, videos, gifs, voice notes) are encrypted entirely client-side, on top of the
+mechanisms above rather than as a new one. For each attachment the client generates a random
+32-byte AES-256-GCM key and a random 12-byte nonce, and uploads `nonce || ciphertext` as an opaque
+blob through the existing `POST /files/upload` — the server stores and serves these bytes exactly
+as it does any other attachment, with no awareness that they are encrypted.
 
 The per-attachment key is not a new wire primitive: it travels to recipients inside the
 `envelope`'s already-sealed, authenticated plaintext, alongside the message text, the same way the
 message body itself does. This needs **no new domain separator** and **no change** to the
 envelope, ratchet or grant mechanisms defined elsewhere in this document — an attachment key is
 just more plaintext under the same seal.
+
+Stickers are the one attachment kind exempt from this — they're public, unencrypted images served
+from the sticker-packs bucket (see `_authorize_sticker_attachment` in `messages_service.py`), so
+they carry no key and never appear in `attachmentKeys`.
 
 Consequently there is no Python reference counterpart for this, unlike every other primitive in
 this spec: the server never parses or touches this plaintext structure, so there is nothing on the
@@ -348,7 +352,9 @@ key never reaches the wire except inside that authenticated plaintext, so there 
 it to come from. `MessageService.editText` maintains this by construction: it builds the fresh
 plaintext's `attachmentKeys` from the same attachment list it sends to `PUT /messages/{id}` in the
 same call, and refuses to proceed if any kept attachment is missing its decryption key, rather than
-silently persisting an unreadable attachment.
+silently persisting an unreadable attachment. This check correctly exempts sticker-kind attachments
+— they never carried a key to begin with, so requiring one would make editing any message that
+happens to carry a sticker impossible, including a pure text-only edit.
 
 ---
 
