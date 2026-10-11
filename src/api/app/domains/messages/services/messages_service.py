@@ -370,7 +370,11 @@ async def send_message(
         await _validate_envelope(db, chat, user_id, settings, message_in.envelope)
         content_format = ContentFormat.SENDER_KEYS_V1
     elif message_in.envelope is not None:
-        content_format = ContentFormat.SENDER_KEYS_V1
+        raise AppException(
+            400,
+            "ENVELOPE_NOT_ALLOWED",
+            "This chat is not end-to-end encrypted; an envelope cannot be verified here.",
+        )
     elif chat.chat_type == ChatType.PRIVATE:
         content_format = ContentFormat.LEGACY_RSA
     else:
@@ -475,7 +479,7 @@ async def update_message(
     # member's chain, or attach a signature that verifies against nothing.
     if is_encrypted_chat:
         await _validate_envelope(db, chat, user_id, chat_settings, message_in.envelope)
-    elif message_in.envelope is not None and chat_settings is not None:
+    elif message_in.envelope is not None:
         raise AppException(
             400,
             "ENVELOPE_NOT_ALLOWED",
