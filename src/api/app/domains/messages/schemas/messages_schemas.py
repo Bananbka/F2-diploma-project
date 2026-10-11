@@ -291,6 +291,14 @@ class MessageUpdateRequest(BaseModel):
     encrypted_content: str | None = None
     envelope: MessageEnvelope | None = None
 
+    # Omitted (field absent from the request body) means "leave the existing attachments alone".
+    # Explicitly supplying either `[]` or `null` means "remove every attachment" — the two are
+    # treated as the same request, since both are just ways of saying "no attachments", and unlike
+    # `PATCH /profile/me` there is no NOT-NULL column an empty list would violate. `update_message`
+    # distinguishes "omitted" from "explicitly supplied" via `"attachments" in
+    # message_in.model_fields_set`, not by this field's default alone.
+    attachments: list[Attachment] | None = None
+
     @model_validator(mode="after")
     def check_exactly_one_content(self):
         if (self.envelope is None) == (self.encrypted_content is None):

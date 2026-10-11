@@ -329,6 +329,27 @@ this spec: the server never parses or touches this plaintext structure, so there
 server side that needs to be kept byte-identical to the client, and nothing for `npm run interop`
 to check here.
 
+Only the `{url, key}` pair travels inside the sealed plaintext above; the rest of an attachment's
+metadata (`name`, `size`, `content_type`, `kind`, `duration_ms`, `width`, `height`, `waveform`) is
+carried on the message document itself and is therefore server-asserted, not authenticated by the
+envelope. A malicious server could in principle relabel a displayed name, size or kind without the
+client detecting it — but it cannot swap the actual ciphertext content undetected, since GCM fails
+closed on any key/ciphertext mismatch. This is a metadata-display-trust caveat, not a gap in
+content confidentiality or integrity.
+
+Editing a message's attachment list and the envelope's `attachmentKeys` are two separate pieces of
+state that must be updated **together**, in the same edit. The Mongo-stored attachment metadata
+(`url`, `name`, `kind`, ...) is one thing; the per-attachment decryption key carried inside the
+sealed envelope's authenticated plaintext is another, and nothing on the server links the two or
+checks they stay consistent — it cannot, since it never sees the plaintext. A client that adds an
+attachment to `PUT /messages/{id}` without also re-sealing an envelope whose plaintext carries a
+matching key for it leaves the recipient with an attachment listed but no way to decrypt it: the
+key never reaches the wire except inside that authenticated plaintext, so there is nowhere else for
+it to come from. `MessageService.editText` maintains this by construction: it builds the fresh
+plaintext's `attachmentKeys` from the same attachment list it sends to `PUT /messages/{id}` in the
+same call, and refuses to proceed if any kept attachment is missing its decryption key, rather than
+silently persisting an unreadable attachment.
+
 ---
 
 ## 5. Key epochs and grants

@@ -521,21 +521,36 @@ async def update_message(
     chat_id = msg.get("chat_id")
     chat = await get_chat_or_403(db, chat_id, user_id)
 
-    chat_settings = await epoch_service.get_settings(db, chat_id)
-    is_encrypted_chat = (
-        chat_settings is not None
-        and chat_settings.crypto_mode is CryptoMode.SENDER_KEYS_V1
-    )
-
     # A channel post is signed over its own content, so replacing that content through the edit
     # path would leave a document whose stored signature covers something else entirely — an
     # "authenticated" post nobody actually authored. Editing a broadcast post is not supported.
+    # Checked before anything else in this function (including attachment authorization below):
+    # a channel post can never be edited regardless of what else the request changes, so there is
+    # no reason to do authorization or DB work for a request that was always going to be rejected
+    # on chat-type grounds alone, and the error reported should be about the chat type, not
+    # incidentally about attachments.
     if chat.chat_type == ChatType.CHANNEL:
         raise AppException(
             400,
             "CHANNEL_POST_NOT_EDITABLE",
             "Channel posts cannot be edited; delete the post and publish a new one.",
         )
+
+    # `attachments` distinguishes "field omitted" (leave the existing list untouched) from
+    # "field explicitly set, even to [] or null" (replace it wholesale, with both meaning "no
+    # attachments") — the same PATCH convention CLAUDE.md documents for `PATCH /chat-folder/{id}`.
+    # `model_fields_set` is what makes that distinction resolvable; `message_in.attachments` alone
+    # cannot tell "omitted" apart from "explicitly cleared", since both read as `None`.
+    attachments_supplied = "attachments" in message_in.model_fields_set
+
+    if attachments_supplied:
+        await _authorize_attachments(db, mongo_db, user_id, message_in.attachments)
+
+    chat_settings = await epoch_service.get_settings(db, chat_id)
+    is_encrypted_chat = (
+        chat_settings is not None
+        and chat_settings.crypto_mode is CryptoMode.SENDER_KEYS_V1
+    )
 
     # The send path gates every envelope on the live epoch, on owning the sender key it names, and
     # on the signature verifying. None of that ran here, so an edit was a complete bypass: a member
@@ -582,6 +597,15 @@ async def update_message(
         }
     else:
         update = {"encrypted_content": message_in.encrypted_content, "is_edited": True}
+
+    if attachments_supplied:
+        # Whole-list replacement, not a merge — mirrors `PATCH /chat-folder/{id}` replacing
+        # `chat_ids` wholesale. `[]` is a legitimate "remove every attachment" edit.
+        update["attachments"] = (
+            [a.model_dump(mode="json") for a in message_in.attachments]
+            if message_in.attachments
+            else []
+        )
 
     await collection.update_one({"_id": obj_id}, {"$set": update})
 

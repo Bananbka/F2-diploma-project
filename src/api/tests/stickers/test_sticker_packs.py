@@ -523,6 +523,47 @@ async def test_sticker_shaped_url_with_no_backing_row_is_rejected():
         await bob.aclose()
 
 
+async def test_sticker_attachment_can_be_added_on_edit():
+    """The edit path's `attachments` handling must call the same `_authorize_attachments`, which
+    exempts a real sticker from the ownership/visibility check exactly like the send path does."""
+    alice, alice_id = await _register_user()
+    bob, bob_id = await _register_user()
+
+    try:
+        pack_id = await _create_pack(alice, is_public=True)
+        sticker = await _add_sticker(alice, pack_id)
+
+        chat_id = await _group_with(bob, alice_id)
+
+        r = await bob.post(
+            "/messages/", json={"chat_id": str(chat_id), "encrypted_content": "x"}
+        )
+        assert r.status_code == 200, r.text
+        message_id = r.json()["data"]["_id"]
+
+        # Bob never uploaded this image and is not the pack owner.
+        r = await bob.put(
+            f"/messages/{message_id}",
+            json={
+                "encrypted_content": "x",
+                "attachments": [
+                    {
+                        "url": sticker["image_url"],
+                        "name": "sticker.png",
+                        "size": len(PNG),
+                        "content_type": "image/png",
+                        "kind": "sticker",
+                    }
+                ],
+            },
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["data"]["attachments"][0]["kind"] == "sticker"
+    finally:
+        await alice.aclose()
+        await bob.aclose()
+
+
 async def test_update_pack_rejects_explicit_null_title():
     alice, _ = await _register_user()
     try:

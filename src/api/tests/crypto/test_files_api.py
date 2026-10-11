@@ -19,8 +19,13 @@ import uuid
 
 import httpx
 
-from tests.crypto.test_epoch_api import _group_with
+from app.domains.crypto.reference.ratchet import SenderChain
+
+from tests.crypto.test_channel_api import _channel_with, _post
+from tests.crypto.test_epoch_api import _group_with, _publish_identity
 from tests.crypto.test_identity_api import _register_user
+from tests.crypto.test_message_envelope_api import _encrypted_private_chat
+from tests.crypto.test_rotation_api import _seal
 
 BASE = "http://localhost:8000"
 
@@ -412,6 +417,275 @@ async def test_oversized_message_attachment_is_rejected():
         assert r.json()["error_code"] == "FILE_SIZE_TOO_LARGE"
     finally:
         await alice.aclose()
+
+
+async def test_editing_text_only_leaves_attachments_untouched():
+    """The common case: `attachments` omitted entirely from the edit body must not touch the
+    existing list — distinct from sending an explicit `[]`."""
+    alice, alice_id = await _register_user()
+    bob, bob_id = await _register_user()
+
+    try:
+        chat_id = await _group_with(alice, bob_id)
+
+        r = await _upload(alice)
+        attachment = r.json()["data"]
+
+        r = await alice.post(
+            "/messages/",
+            json={
+                "chat_id": str(chat_id),
+                "encrypted_content": "x",
+                "attachments": [attachment],
+            },
+        )
+        assert r.status_code == 200, r.text
+        message_id = r.json()["data"]["_id"]
+
+        r = await alice.put(
+            f"/messages/{message_id}", json={"encrypted_content": "edited text"}
+        )
+        assert r.status_code == 200, r.text
+        data = r.json()["data"]
+        assert data["is_edited"] is True
+        assert len(data["attachments"]) == 1
+        assert data["attachments"][0]["url"] == attachment["url"]
+    finally:
+        await alice.aclose()
+        await bob.aclose()
+
+
+async def test_editing_to_add_an_owned_attachment_succeeds():
+    alice, alice_id = await _register_user()
+    bob, bob_id = await _register_user()
+
+    try:
+        chat_id = await _group_with(alice, bob_id)
+
+        r = await alice.post(
+            "/messages/", json={"chat_id": str(chat_id), "encrypted_content": "x"}
+        )
+        assert r.status_code == 200, r.text
+        message_id = r.json()["data"]["_id"]
+        assert r.json()["data"]["attachments"] is None
+
+        r = await _upload(alice)
+        attachment = r.json()["data"]
+
+        r = await alice.put(
+            f"/messages/{message_id}",
+            json={"encrypted_content": "x", "attachments": [attachment]},
+        )
+        assert r.status_code == 200, r.text
+        data = r.json()["data"]
+        assert len(data["attachments"]) == 1
+        assert data["attachments"][0]["url"] == attachment["url"]
+    finally:
+        await alice.aclose()
+        await bob.aclose()
+
+
+async def test_editing_to_add_an_unowned_unseen_attachment_is_rejected():
+    """Same `_authorize_attachments` gate the send path uses: swapping in an attachment the
+    editor neither uploaded nor can currently see must be rejected on edit exactly like it would
+    be on send."""
+    alice, alice_id = await _register_user()
+    bob, bob_id = await _register_user()
+    mallory, mallory_id = await _register_user()
+
+    try:
+        private_chat = await _group_with(alice, bob_id)
+        mallory_chat = await _group_with(mallory, alice_id, title="Mallory's")
+
+        r = await _upload(alice)
+        attachment = r.json()["data"]
+        await alice.post(
+            "/messages/",
+            json={
+                "chat_id": str(private_chat),
+                "encrypted_content": "x",
+                "attachments": [attachment],
+            },
+        )
+
+        r = await mallory.post(
+            "/messages/", json={"chat_id": str(mallory_chat), "encrypted_content": "x"}
+        )
+        assert r.status_code == 200, r.text
+        message_id = r.json()["data"]["_id"]
+
+        # Mallory knows the key but neither uploaded it nor is in a chat that references it.
+        r = await mallory.put(
+            f"/messages/{message_id}",
+            json={"encrypted_content": "x", "attachments": [attachment]},
+        )
+        assert r.status_code == 403, r.text
+        assert r.json()["error_code"] == "ATTACHMENT_FORBIDDEN"
+    finally:
+        await alice.aclose()
+        await bob.aclose()
+        await mallory.aclose()
+
+
+async def test_editing_to_remove_all_attachments_with_explicit_empty_list():
+    """`attachments: []` is a legitimate "remove everything" edit, distinct from omitting the
+    field (which must leave the list untouched — see the companion test above)."""
+    alice, alice_id = await _register_user()
+    bob, bob_id = await _register_user()
+
+    try:
+        chat_id = await _group_with(alice, bob_id)
+
+        r = await _upload(alice)
+        attachment = r.json()["data"]
+
+        r = await alice.post(
+            "/messages/",
+            json={
+                "chat_id": str(chat_id),
+                "encrypted_content": "x",
+                "attachments": [attachment],
+            },
+        )
+        assert r.status_code == 200, r.text
+        message_id = r.json()["data"]["_id"]
+
+        r = await alice.put(
+            f"/messages/{message_id}",
+            json={"encrypted_content": "x", "attachments": []},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["data"]["attachments"] == []
+    finally:
+        await alice.aclose()
+        await bob.aclose()
+
+
+async def test_editing_a_legacy_plaintext_message_attachment_still_goes_through_authorization():
+    """`_authorize_attachments` must gate an edit regardless of `content_format` — a legacy,
+    unencrypted group message is not a special path that skips it."""
+    alice, alice_id = await _register_user()
+    bob, bob_id = await _register_user()
+    mallory, mallory_id = await _register_user()
+
+    try:
+        chat_id = await _group_with(alice, bob_id)  # legacy_plaintext: no crypto enabled
+
+        mallory_chat = await _group_with(mallory, bob_id, title="Mallory's")
+        r = await _upload(mallory)
+        attachment = r.json()["data"]
+        await mallory.post(
+            "/messages/",
+            json={
+                "chat_id": str(mallory_chat),
+                "encrypted_content": "x",
+                "attachments": [attachment],
+            },
+        )
+
+        r = await alice.post(
+            "/messages/", json={"chat_id": str(chat_id), "encrypted_content": "x"}
+        )
+        assert r.status_code == 200, r.text
+        message_id = r.json()["data"]["_id"]
+        assert r.json()["data"]["content_format"] == "legacy_plaintext"
+
+        # Alice neither uploaded Mallory's attachment nor can see it from any chat of her own.
+        r = await alice.put(
+            f"/messages/{message_id}",
+            json={"encrypted_content": "x", "attachments": [attachment]},
+        )
+        assert r.status_code == 403, r.text
+        assert r.json()["error_code"] == "ATTACHMENT_FORBIDDEN"
+    finally:
+        await alice.aclose()
+        await bob.aclose()
+        await mallory.aclose()
+
+
+async def test_editing_a_channel_post_attachments_is_rejected_as_not_editable():
+    """The channel-post-not-editable check must run before attachment authorization: an edit
+    attempt on a channel post gets `CHANNEL_POST_NOT_EDITABLE`, not `ATTACHMENT_FORBIDDEN`, even
+    when the attachment in the request would also have failed authorization on its own."""
+    owner, owner_id = await _register_user()
+    subscriber, subscriber_id = await _register_user()
+    mallory, mallory_id = await _register_user()
+
+    try:
+        _, owner_keys = await _publish_identity(owner, owner_id)
+        chat_id = await _channel_with(owner, [subscriber_id])
+
+        r = await owner.post(
+            "/messages/",
+            json={"chat_id": str(chat_id), "channel_post": _post(owner_keys, chat_id, owner_id)},
+        )
+        assert r.status_code == 200, r.text
+        message_id = r.json()["data"]["_id"]
+
+        # An attachment Mallory owns and the owner cannot see — this would be ATTACHMENT_FORBIDDEN
+        # if attachment authorization ran at all, which is exactly what must not happen here.
+        mallory_chat = await _group_with(mallory, subscriber_id, title="Mallory's")
+        r = await _upload(mallory)
+        attachment = r.json()["data"]
+        await mallory.post(
+            "/messages/",
+            json={
+                "chat_id": str(mallory_chat),
+                "encrypted_content": "x",
+                "attachments": [attachment],
+            },
+        )
+
+        r = await owner.put(
+            f"/messages/{message_id}",
+            json={"encrypted_content": "x", "attachments": [attachment]},
+        )
+        assert r.status_code == 400, r.text
+        assert r.json()["error_code"] == "CHANNEL_POST_NOT_EDITABLE"
+    finally:
+        await owner.aclose()
+        await subscriber.aclose()
+        await mallory.aclose()
+
+
+async def test_rejected_edit_does_not_persist_a_smuggled_attachment_list():
+    """A request rejected on `CHAIN_INDEX_REUSED` must not leave the attachments half of the same
+    `$set` applied. Both must be rejected together, not validated-then-partially-written."""
+    alice, alice_id = await _register_user()
+    bob, bob_id = await _register_user()
+
+    try:
+        chat_id, epoch, chain_key, skid, chain_identity = await _encrypted_private_chat(
+            alice, alice_id, bob, bob_id
+        )
+        sender = SenderChain(chain_key)
+
+        envelope = _seal(sender, chat_id, epoch, alice_id, skid, chain_identity, body=b"original")
+        r = await alice.post("/messages/", json={"chat_id": str(chat_id), "envelope": envelope})
+        assert r.status_code == 200, r.text
+        message_id = r.json()["data"]["_id"]
+        assert r.json()["data"]["attachments"] is None
+
+        r = await _upload(alice)
+        attachment = r.json()["data"]
+
+        # Same envelope again (reused index 0) plus a legitimately-owned attachment list — the
+        # reuse rejection must not let the attachments half through.
+        r = await alice.put(
+            f"/messages/{message_id}",
+            json={"envelope": envelope, "attachments": [attachment]},
+        )
+        assert r.status_code == 400, r.text
+        assert r.json()["error_code"] == "CHAIN_INDEX_REUSED"
+
+        r = await alice.get(f"/chats/{chat_id}/messages")
+        assert r.status_code == 200, r.text
+        fetched = r.json()["data"][0]
+        assert fetched["_id"] == message_id
+        assert fetched["attachments"] is None
+    finally:
+        await alice.aclose()
+        await bob.aclose()
 
 
 async def test_oversized_avatar_is_rejected_at_the_lower_avatar_cap():
