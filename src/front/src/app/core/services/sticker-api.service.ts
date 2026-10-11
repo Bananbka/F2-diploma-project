@@ -32,7 +32,13 @@ export class StickerApiService {
     }
 
     createPack(title: string): Observable<StickerPack> {
-        return this.http.post<SuccessResponse<StickerPack>>(this.packsUrl, { title }).pipe(map((r) => r.data));
+        // No suffix follows `packsUrl` here, so its trailing slash would hit the backend's
+        // non-slash `POST /stickers/packs` route and get redirected (307) rather than matched —
+        // every other method below appends something after the slash, so this is the one call
+        // site that needs it stripped.
+        return this.http
+            .post<SuccessResponse<StickerPack>>(this.packsUrl.replace(/\/$/, ''), { title })
+            .pipe(map((r) => r.data));
     }
 
     /** The current user's tray: packs they own plus packs they have subscribed to. */

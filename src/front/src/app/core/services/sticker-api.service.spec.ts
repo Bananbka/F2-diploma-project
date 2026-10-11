@@ -53,8 +53,9 @@ describe('StickerApiService', () => {
         let result: StickerPack | undefined;
         service.createPack('Cats').subscribe((r) => (result = r));
 
-        const req = http.expectOne(`${API_URL}stickers/packs/`);
+        const req = http.expectOne(`${API_URL}stickers/packs`);
         expect(req.request.method).toBe('POST');
+        expect(req.request.url).not.toMatch(/\/$/);
         expect(req.request.body).toEqual({ title: 'Cats' });
         req.flush(ok(pack()));
 
