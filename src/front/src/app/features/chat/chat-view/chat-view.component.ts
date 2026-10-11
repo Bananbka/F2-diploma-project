@@ -44,6 +44,7 @@ import {
 import { DirectoryService } from '../../../core/services/directory.service';
 import { DecryptedMessage } from '../../../core/services/message.service';
 import { SessionService } from '../../../core/services/session.service';
+import { VoiceRecorderService } from '../../../core/services/voice-recorder.service';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
 import {
     ContextMenuComponent,
@@ -79,6 +80,10 @@ export class ChatViewComponent {
     private readonly directory = inject(DirectoryService);
     private readonly session = inject(SessionService);
     private readonly router = inject(Router);
+    // Root-scoped, like the composer's own instance — injected here too so edit-start can refuse
+    // to fire while a voice note is in flight, rather than threading a new output through the
+    // composer just to observe its recording state.
+    private readonly voiceRecorder = inject(VoiceRecorderService);
 
     /** Bound from the `:chatId` route parameter. */
     readonly chatId = input<string | undefined>(undefined);
@@ -521,8 +526,19 @@ export class ChatViewComponent {
         this.replyingTo.set(message);
     }
 
-    /** Load the message back into the composer. Sending replaces it rather than posting anew. */
+    /**
+     * Load the message back into the composer. Sending replaces it rather than posting anew.
+     *
+     * Refuses to start while a voice note is mid-recording: the composer's recording row stays up
+     * regardless of `editing()`, so without this check a confirmed recording would route into
+     * `editMessage` against whatever message this just switched to, silently replacing its text
+     * and attachments with the unrelated voice note. Cancelling the recording first is a safer
+     * default than quietly discarding the edit request, since the user explicitly asked to edit.
+     */
     startEdit(message: DecryptedMessage): void {
+        if (this.voiceRecorder.recordingState() === 'recording') {
+            this.voiceRecorder.cancel();
+        }
         this.replyingTo.set(null);
         this.editing.set(message);
     }

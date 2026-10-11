@@ -33,6 +33,16 @@
     </div>
 }
 
+@if (micError()) {
+    <div
+        class="strip is-danger"
+        role="alert"
+    >
+        <lucide-icon [img]="shieldAlertIcon" />
+        {{ micError() }}
+    </div>
+}
+
 @if (staged().length || uploading()) {
     <div class="staged">
         @for (entry of staged(); track entry.file.url) {
@@ -79,74 +89,124 @@
     </div>
 }
 
-<div
-    class="row"
-    [class.is-drag-over]="dragOver()"
-    (dragover)="onDragOver($event)"
-    (dragleave)="onDragLeave($event)"
-    (drop)="onDrop($event)"
->
-    <button
-        type="button"
-        class="side"
-        title="Attach a file"
-        [disabled]="!canSend() || uploading()"
-        (click)="openFilePicker()"
-    >
-        <lucide-icon [img]="paperclipIcon" />
-        <input
-            #fileInput
-            type="file"
-            multiple
-            class="sr-only"
-            [disabled]="!canSend() || uploading()"
-            (change)="onFilePicked($event)"
-        />
-        <span class="sr-only">Attach a file</span>
-    </button>
-
-    <div class="sticker-trigger-wrap">
+@if (showRecordingRow()) {
+    <!-- Recording replaces the composer row for its duration, the way most voice-note UIs do —
+         there is nothing else useful to do with the text input while the mic is live. -->
+    <div class="row recording-row">
         <button
             type="button"
-            class="side sticker-trigger"
-            title="Send a sticker"
-            aria-haspopup="dialog"
-            [attr.aria-expanded]="stickerPickerOpen()"
-            [disabled]="!canSend() || editing()"
-            (click)="toggleStickerPicker()"
+            class="side"
+            title="Discard recording"
+            [disabled]="confirmingRecording()"
+            (click)="cancelRecording()"
         >
-            <lucide-icon [img]="stickerIcon" />
-            <span class="sr-only">Send a sticker</span>
+            <lucide-icon [img]="trashIcon" />
+            <span class="sr-only">Discard recording</span>
         </button>
 
-        @if (stickerPickerOpen()) {
-            <app-sticker-picker
-                (closeRequested)="stickerPickerOpen.set(false)"
-                (stickerPicked)="onStickerPicked($event)"
-            />
-        }
-    </div>
+        <div
+            class="recording-indicator"
+            role="status"
+        >
+            <span
+                class="rec-pulse"
+                [style.transform]="'scale(' + (1 + recordingAmplitude() * 0.6) + ')'"
+                aria-hidden="true"
+            ></span>
+            <span class="rec-time">{{ formattedRecordingTime() }}</span>
+        </div>
 
-    <div class="input">
-        <textarea
-            #area
-            rows="1"
-            [placeholder]="canSend() ? placeholder() : 'Sending is blocked'"
-            [disabled]="!canSend()"
-            [value]="text()"
-            (input)="onInput($any($event.target).value)"
-            (keydown)="onKeydown($event)"
-            (paste)="onPaste($event)"
-        ></textarea>
+        <button
+            type="button"
+            class="send"
+            aria-label="Send voice message"
+            [disabled]="confirmingRecording()"
+            (click)="confirmRecording()"
+        >
+            <lucide-icon [img]="checkIcon" />
+        </button>
     </div>
-
-    <button
-        type="button"
-        class="send"
-        aria-label="Send message"
-        [disabled]="(!text().trim() && staged().length === 0) || !canSend()"
-        (click)="send()"
+} @else {
+    <div
+        class="row"
+        [class.is-drag-over]="dragOver()"
+        (dragover)="onDragOver($event)"
+        (dragleave)="onDragLeave($event)"
+        (drop)="onDrop($event)"
     >
-        <lucide-icon [img]="sendIcon" />
-    </button>
-</div>
+        <button
+            type="button"
+            class="side"
+            title="Attach a file"
+            [disabled]="!canSend() || uploading()"
+            (click)="openFilePicker()"
+        >
+            <lucide-icon [img]="paperclipIcon" />
+            <input
+                #fileInput
+                type="file"
+                multiple
+                class="sr-only"
+                [disabled]="!canSend() || uploading()"
+                (change)="onFilePicked($event)"
+            />
+            <span class="sr-only">Attach a file</span>
+        </button>
+
+        <div class="sticker-trigger-wrap">
+            <button
+                type="button"
+                class="side sticker-trigger"
+                title="Send a sticker"
+                aria-haspopup="dialog"
+                [attr.aria-expanded]="stickerPickerOpen()"
+                [disabled]="!canSend() || editing()"
+                (click)="toggleStickerPicker()"
+            >
+                <lucide-icon [img]="stickerIcon" />
+                <span class="sr-only">Send a sticker</span>
+            </button>
+
+            @if (stickerPickerOpen()) {
+                <app-sticker-picker
+                    (closeRequested)="stickerPickerOpen.set(false)"
+                    (stickerPicked)="onStickerPicked($event)"
+                />
+            }
+        </div>
+
+        <button
+            type="button"
+            class="side mic-trigger"
+            title="Record a voice message"
+            [disabled]="!canSend() || editing() || startingRecording()"
+            (click)="startRecording()"
+        >
+            <lucide-icon [img]="micIcon" />
+            <span class="sr-only">Record a voice message</span>
+        </button>
+
+        <div class="input">
+            <textarea
+                #area
+                rows="1"
+                [placeholder]="canSend() ? placeholder() : 'Sending is blocked'"
+                [disabled]="!canSend()"
+                [value]="text()"
+                (input)="onInput($any($event.target).value)"
+                (keydown)="onKeydown($event)"
+                (paste)="onPaste($event)"
+            ></textarea>
+        </div>
+
+        <button
+            type="button"
+            class="send"
+            aria-label="Send message"
+            [disabled]="(!text().trim() && staged().length === 0) || !canSend()"
+            (click)="send()"
+        >
+            <lucide-icon [img]="sendIcon" />
+        </button>
+    </div>
+}

@@ -194,6 +194,43 @@
     min-width: 0;
 }
 
+.recording-row {
+    align-items: center;
+}
+
+.recording-indicator {
+    display: flex;
+    flex: 1;
+    align-items: center;
+    gap: 0.625rem;
+    min-width: 0;
+    padding: 0.625rem 1rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-2xl);
+}
+
+.rec-pulse {
+    flex-shrink: 0;
+    width: 0.625rem;
+    height: 0.625rem;
+    background: var(--danger);
+    border-radius: 50%;
+    transition: transform 0.1s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .rec-pulse {
+        transition: none;
+    }
+}
+
+.rec-time {
+    color: var(--foreground);
+    font-size: 0.875rem;
+    font-variant-numeric: tabular-nums;
+}
+
 textarea {
     display: block;
     width: 100%;
