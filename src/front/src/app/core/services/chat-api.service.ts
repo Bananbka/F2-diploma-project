@@ -133,6 +133,16 @@ export class ChatApiService {
     }
 
     /**
+     * The object key a stored attachment URL points at.
+     *
+     * Shared by `attachmentUrl` (single-fetch) and `AttachmentBatchService` (batched fetch), so
+     * the two transports never disagree about how a key is derived from the stored URL.
+     */
+    attachmentObjectKey(storedUrl: string): string {
+        return storedUrl.split('/').pop() ?? '';
+    }
+
+    /**
      * Where to fetch an attachment.
      *
      * Not the URL the upload returned: that points straight at MinIO, and the message bucket is
@@ -140,8 +150,12 @@ export class ChatApiService {
      * re-addressed through it.
      */
     attachmentUrl(chatId: string, storedUrl: string): string {
-        const objectKey = storedUrl.split('/').pop() ?? '';
-        return `${this.configService.apiUrl}files/attachments/${chatId}/${objectKey}`;
+        return `${this.configService.apiUrl}files/attachments/${chatId}/${this.attachmentObjectKey(storedUrl)}`;
+    }
+
+    /** Where the batched attachment-fetch endpoint lives — see `AttachmentBatchService`. */
+    attachmentsBatchUrl(): string {
+        return `${this.configService.apiUrl}files/attachments/batch`;
     }
 
     /** Send a signed broadcast post. Channels are authenticated but not confidential. */

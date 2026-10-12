@@ -1,4 +1,3 @@
-import { HttpClient } from '@angular/common/http';
 import {
     ChangeDetectionStrategy,
     Component,
@@ -38,10 +37,10 @@ import {
     SmilePlus,
     Trash2,
 } from 'lucide-angular';
-import { firstValueFrom } from 'rxjs';
 
 import { decryptAttachment } from '../../../core/crypto/attachment-crypto';
 import { MessageAttachment } from '../../../core/models/crypto.model';
+import { AttachmentBatchService } from '../../../core/services/attachment-batch.service';
 import { ChatApiService } from '../../../core/services/chat-api.service';
 import { MessageReadReceipt } from '../../../core/services/chat-store.service';
 import { DirectoryService } from '../../../core/services/directory.service';
@@ -170,8 +169,8 @@ const STATUS_VIEWS: Record<DecryptStatus, StatusView> = {
 export class MessageBubbleComponent {
     private readonly directory = inject(DirectoryService);
     private readonly chatApi = inject(ChatApiService);
+    private readonly attachmentBatch = inject(AttachmentBatchService);
     private readonly destroyRef = inject(DestroyRef);
-    private readonly http = inject(HttpClient);
     private readonly elementRef = inject<ElementRef<HTMLElement>>(ElementRef);
 
     readonly message = input.required<DecryptedMessage>();
@@ -560,9 +559,7 @@ export class MessageBubbleComponent {
                 throw new Error('no attachment key');
             }
 
-            const ciphertext = await firstValueFrom(
-                this.http.get(this.downloadUrl(file), { responseType: 'arraybuffer' })
-            );
+            const ciphertext = await this.attachmentBatch.fetch(this.message().chatId, file.url);
             const plaintext = await decryptAttachment(new Uint8Array(ciphertext), file.decryptionKey);
             const blob = new Blob([plaintext as BufferSource], { type: file.content_type });
             const objectUrl = URL.createObjectURL(blob);

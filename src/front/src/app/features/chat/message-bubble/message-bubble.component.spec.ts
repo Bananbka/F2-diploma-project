@@ -50,7 +50,11 @@ describe('MessageBubbleComponent', () => {
                 { provide: DirectoryService, useValue: directory },
                 {
                     provide: ChatApiService,
-                    useValue: jasmine.createSpyObj<ChatApiService>('ChatApiService', ['attachmentUrl']),
+                    useValue: jasmine.createSpyObj<ChatApiService>('ChatApiService', [
+                        'attachmentUrl',
+                        'attachmentObjectKey',
+                        'attachmentsBatchUrl',
+                    ]),
                 },
             ],
         }).compileComponents();
