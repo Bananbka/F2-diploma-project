@@ -12,8 +12,14 @@ class Settings(BaseSettings):
     # Redis
     REDIS_URL: str
 
-    # MinIO
+    # Object store (RustFS, S3-compatible; `MinioClient` in app/infrastructure/minio.py is an S3
+    # client, kept under its existing name since the backing service changed, not the API shape).
     MINIO_URL: str
+    # Browser-reachable base for the public buckets (avatars, stickers) only. MINIO_URL is the
+    # compose-network hostname the server uses to reach the store, which a browser outside the
+    # Docker network can never resolve — using it as an <img src> base silently fails to load and
+    # falls back to rendering the alt text, which is what this setting exists to avoid.
+    MINIO_PUBLIC_URL: str
     MINIO_USER: str
     MINIO_PASSWORD: str
     MINIO_MESSAGE_BUCKET: str = "messages-attachments"

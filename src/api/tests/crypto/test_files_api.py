@@ -19,6 +19,7 @@ import uuid
 
 import httpx
 
+from app.core.config import settings
 from app.domains.crypto.reference.ratchet import SenderChain
 
 from tests.crypto.test_channel_api import _channel_with, _post
@@ -702,3 +703,180 @@ async def test_oversized_avatar_is_rejected_at_the_lower_avatar_cap():
         assert r.json()["error_code"] == "FILE_SIZE_TOO_LARGE"
     finally:
         await alice.aclose()
+
+
+async def test_avatar_and_sticker_uploads_use_the_public_base_url():
+    """A public-bucket upload's returned url must be browser-reachable (MINIO_PUBLIC_URL), not the
+    Docker-internal MINIO_URL — storing the internal hostname is exactly what made avatars and
+    stickers render as alt-text instead of images."""
+    alice, alice_id = await _register_user()
+
+    try:
+        for category, bucket in (
+            ("avatar", settings.MINIO_AVATAR_BUCKET),
+            ("sticker", settings.MINIO_STICKER_BUCKET),
+        ):
+            r = await alice.post(
+                "/files/upload",
+                files={"file": ("ok.png", PNG, "image/png")},
+                data={"category": category},
+            )
+            assert r.status_code == 200, r.text
+            url = r.json()["data"]["url"]
+            assert url.startswith(f"{settings.MINIO_PUBLIC_URL}/{bucket}/"), url
+            assert settings.MINIO_URL not in url
+    finally:
+        await alice.aclose()
+
+
+async def test_message_attachment_upload_still_uses_the_internal_base_url():
+    """Message-bucket attachments are never rendered as a raw `<img src>` — the client always
+    fetches them through the authenticated download proxy — so their url must stay anchored to the
+    internal MINIO_URL, not the public one."""
+    alice, alice_id = await _register_user()
+
+    try:
+        r = await _upload(alice)
+        assert r.status_code == 200, r.text
+        url = r.json()["data"]["url"]
+        assert url.startswith(f"{settings.MINIO_URL}/{settings.MINIO_MESSAGE_BUCKET}/"), url
+    finally:
+        await alice.aclose()
+
+
+async def test_batch_attachment_download_requires_membership():
+    alice, alice_id = await _register_user()
+    mallory, mallory_id = await _register_user()
+    bob, bob_id = await _register_user()
+
+    try:
+        chat_id = await _group_with(alice, bob_id)
+
+        r = await mallory.post(
+            "/files/attachments/batch",
+            json={"chat_id": str(chat_id), "object_keys": ["whatever.enc"]},
+        )
+        assert r.status_code == 403, r.text
+    finally:
+        await alice.aclose()
+        await mallory.aclose()
+        await bob.aclose()
+
+
+async def test_batch_attachment_download_mixed_statuses():
+    alice, alice_id = await _register_user()
+    bob, bob_id = await _register_user()
+    mallory, mallory_id = await _register_user()
+
+    try:
+        chat_id = await _group_with(alice, bob_id)
+        other_chat = await _group_with(alice, mallory_id, title="Other")
+
+        r = await _upload(alice)
+        attachment = r.json()["data"]
+        key = await _object_key(attachment["url"])
+
+        await alice.post(
+            "/messages/",
+            json={
+                "chat_id": str(chat_id),
+                "encrypted_content": "x",
+                "attachments": [attachment],
+            },
+        )
+
+        # A second, never-referenced key and a key only referenced in a *different* chat of
+        # Alice's own, alongside the one real key.
+        unknown_key = f"{uuid.uuid4()}.enc"
+
+        other_r = await _upload(alice)
+        other_attachment = other_r.json()["data"]
+        other_key = await _object_key(other_attachment["url"])
+        await alice.post(
+            "/messages/",
+            json={
+                "chat_id": str(other_chat),
+                "encrypted_content": "x",
+                "attachments": [other_attachment],
+            },
+        )
+
+        r = await alice.post(
+            "/files/attachments/batch",
+            json={
+                "chat_id": str(chat_id),
+                "object_keys": [key, unknown_key, other_key],
+            },
+        )
+        assert r.status_code == 200, r.text
+        by_key = {item["object_key"]: item for item in r.json()["data"]}
+
+        assert by_key[key]["status"] == "ok"
+        assert by_key[key]["content_base64"] is not None
+        import base64
+
+        assert base64.b64decode(by_key[key]["content_base64"]) == b"ciphertext-bytes"
+
+        assert by_key[unknown_key]["status"] == "not_found"
+        # Referenced only in `other_chat`, not `chat_id`, so must not be served through this chat.
+        assert by_key[other_key]["status"] == "not_found"
+    finally:
+        await alice.aclose()
+        await bob.aclose()
+        await mallory.aclose()
+
+
+async def test_batch_attachment_download_gone_for_a_reaped_object():
+    """A key that *is* referenced by a message in this chat but whose object no longer exists in
+    the store must report `gone`, not a 500 — mirroring the single-endpoint's ATTACHMENT_GONE."""
+    alice, alice_id = await _register_user()
+    bob, bob_id = await _register_user()
+
+    try:
+        chat_id = await _group_with(alice, bob_id)
+
+        r = await _upload(alice)
+        attachment = r.json()["data"]
+        key = await _object_key(attachment["url"])
+
+        await alice.post(
+            "/messages/",
+            json={
+                "chat_id": str(chat_id),
+                "encrypted_content": "x",
+                "attachments": [attachment],
+            },
+        )
+
+        from app.infrastructure.minio import minio_manager
+
+        await minio_manager.delete_file(attachment["url"], settings.MINIO_MESSAGE_BUCKET)
+
+        r = await alice.post(
+            "/files/attachments/batch",
+            json={"chat_id": str(chat_id), "object_keys": [key]},
+        )
+        assert r.status_code == 200, r.text
+        result = r.json()["data"][0]
+        assert result["status"] == "gone"
+    finally:
+        await alice.aclose()
+        await bob.aclose()
+
+
+async def test_batch_attachment_download_enforces_the_key_cap():
+    alice, alice_id = await _register_user()
+    bob, bob_id = await _register_user()
+
+    try:
+        chat_id = await _group_with(alice, bob_id)
+
+        too_many = [f"{uuid.uuid4()}.enc" for _ in range(51)]
+        r = await alice.post(
+            "/files/attachments/batch",
+            json={"chat_id": str(chat_id), "object_keys": too_many},
+        )
+        assert r.status_code == 422, r.text
+    finally:
+        await alice.aclose()
+        await bob.aclose()

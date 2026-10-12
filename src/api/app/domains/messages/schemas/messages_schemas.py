@@ -42,7 +42,10 @@ class Attachment(BaseModel):
     @classmethod
     def validate_url(cls, v: str) -> str:
         message_prefix = f"{settings.MINIO_URL}/{settings.MINIO_MESSAGE_BUCKET}/"
-        sticker_prefix = f"{settings.MINIO_URL}/{settings.MINIO_STICKER_BUCKET}/"
+        # Stickers are uploaded to a public bucket, so their stored url is built from
+        # MINIO_PUBLIC_URL (see MinioClient.upload_file), not the internal MINIO_URL used for the
+        # message bucket.
+        sticker_prefix = f"{settings.MINIO_PUBLIC_URL}/{settings.MINIO_STICKER_BUCKET}/"
 
         for prefix in (message_prefix, sticker_prefix):
             if v.startswith(prefix):
@@ -57,7 +60,7 @@ class Attachment(BaseModel):
 
     @model_validator(mode="after")
     def _check_kind_matches_bucket(self) -> "Attachment":
-        sticker_prefix = f"{settings.MINIO_URL}/{settings.MINIO_STICKER_BUCKET}/"
+        sticker_prefix = f"{settings.MINIO_PUBLIC_URL}/{settings.MINIO_STICKER_BUCKET}/"
         is_sticker_bucket_url = self.url.startswith(sticker_prefix)
         is_sticker_kind = self.kind == "sticker"
 

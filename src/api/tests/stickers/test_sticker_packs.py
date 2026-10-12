@@ -500,7 +500,10 @@ async def test_sticker_shaped_url_with_no_backing_row_is_rejected():
     try:
         chat_id = await _group_with(alice, bob_id)
 
-        fake_url = f"{settings.MINIO_URL}/{settings.MINIO_STICKER_BUCKET}/{uuid.uuid4()}.png"
+        # Sticker urls are anchored to the public base now (see MinioClient.upload_file /
+        # MINIO_PUBLIC_URL), same as a real upload would produce — this must fail the *service*
+        # layer's "no backing row" check, not the schema-level bucket-anchoring check.
+        fake_url = f"{settings.MINIO_PUBLIC_URL}/{settings.MINIO_STICKER_BUCKET}/{uuid.uuid4()}.png"
         r = await alice.post(
             "/messages/",
             json={

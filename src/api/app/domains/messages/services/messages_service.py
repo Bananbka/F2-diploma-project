@@ -356,7 +356,9 @@ async def _authorize_attachments(
         return
 
     message_prefix = f"{settings.MINIO_URL}/{settings.MINIO_MESSAGE_BUCKET}/"
-    sticker_prefix = f"{settings.MINIO_URL}/{settings.MINIO_STICKER_BUCKET}/"
+    # Stickers are a public bucket, so stored urls are built from MINIO_PUBLIC_URL (see
+    # MinioClient.upload_file), not the internal MINIO_URL used for the message bucket above.
+    sticker_prefix = f"{settings.MINIO_PUBLIC_URL}/{settings.MINIO_STICKER_BUCKET}/"
     collection = mongo_db["messages"]
 
     # Resolved at most once, and only if some attachment is not the caller's own upload. Fetching

@@ -16,7 +16,9 @@ class StickerCreateRequest(BaseModel):
         """Anchor the url to the sticker bucket, same single-segment check as `Attachment.url`
         and `avatar_url` — without it the value is client-controlled and flows into MinIO
         deletion when the sticker or pack is removed."""
-        prefix = f"{settings.MINIO_URL}/{settings.MINIO_STICKER_BUCKET}/"
+        # Stickers are a public-bucket image, so the stored url is built from MINIO_PUBLIC_URL
+        # (see MinioClient.upload_file), not the internal MINIO_URL.
+        prefix = f"{settings.MINIO_PUBLIC_URL}/{settings.MINIO_STICKER_BUCKET}/"
         if not v.startswith(prefix):
             raise ValueError("image_url must point at the sticker assets bucket.")
 
