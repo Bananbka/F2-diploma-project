@@ -83,29 +83,48 @@ work.
 
 ---
 
-## 4. Test coverage is uneven
+## 4. Test coverage is uneven — closed
 
-`src/api/tests/crypto/` covers the crypto surface, authorization, the rate limiter, and — as of
-the last pass — folders, contacts, files, reactions/pinning/mute (`test_message_features.py`),
-per-user read state (`test_read_state.py`) and invite links (`test_invite_links.py`). What that
-leaves:
+`src/api/tests/crypto/` now also covers the chats domain, profile, plain message CRUD, and the two
+previously-untested Celery task modules; the frontend's three highest-value components are now
+specced; and the whole integration suite runs with rate limiting genuinely on.
 
-- **The chats domain has no dedicated suite.** Chat creation, participant RBAC and the chat list
-  are exercised only incidentally, as setup for other tests. The rank-comparison rules in
-  `chat_services.role_rank` in particular deserve direct tests: they are the reason an admin
-  cannot remove an owner.
-- **Profile and the message CRUD paths** are covered only where a crypto test happens to touch
-  them.
-- **No frontend component tests beyond a handful.** 57 specs, almost all on the logic layer. The
-  chat view, composer and message bubble are untested, which is where the `DecryptStatus`
-  rendering rules in `docs/ui-states.md` actually live.
-- **Nothing exercises the Celery tasks end to end** except `test_rotation_tasks.py`.
+- **The chats domain had no dedicated suite — fixed.** New `test_chats_api.py`: chat
+  creation (private/group/channel), `chat_services.role_rank` RBAC directly (an admin cannot
+  remove/outrank an owner, an owner can remove an admin, a plain member cannot remove anyone, two
+  equal-rank admins cannot remove each other, all three RBAC endpoints reject `PRIVATE` chats),
+  chat-list ordering/enrichment and the group-dedup regression guard, ownership transfer and chat
+  deletion. Writing these tests surfaced and fixed a real bug: `get_chat_by_id` could return a
+  stale `participants` list in the SAME request's response after an add/remove (not in the
+  database, and not in any later request) whenever the `Chat` row was already in that request's
+  SQLAlchemy identity map — `selectinload` doesn't refresh an already-populated collection on an
+  identity-map hit. Fixed with `.execution_options(populate_existing=True)`.
+- **Profile and message CRUD — fixed.** New `test_profile_api.py` (partial-update semantics,
+  avatar-replace GC) and `test_message_crud_api.py` (plain CRUD, ownership gating, attachment
+  wholesale-replace/clear, shared-attachment delete-reaping).
+- **No frontend component tests beyond a handful — fixed for the three that matter most.**
+  `chat-view.component.spec.ts`, `composer.component.spec.ts` and
+  `message-bubble.component.spec.ts` now cover the `DecryptStatus` → rendering contract from
+  `docs/ui-states.md` (every status renders through its own view, `canRenderMedia` gating verified
+  against actual DOM output, not just signal state), the `no_key` grace-period timer, and —
+  specifically flagged in `CLAUDE.md`'s "Lessons" section as having no structural enforcement — the
+  `editing()` guard on every composer trigger, including the asymmetric case of a recording already
+  in flight when editing starts on a different message.
+- **Celery tasks — the two remaining untested ones now have coverage.** New `test_user_tasks.py`
+  (`prune_security_audit_task`'s retention cutoff, `send_email`'s unconfigured-SMTP and
+  unknown-type paths) and `test_file_tasks.py` (`cleanup_minio_orphans`/
+  `cleanup_minio_avatar_orphans`, both buckets, referenced-vs-orphaned). `test_rotation_tasks.py`
+  already covered the crypto rotation/pruning tasks and was left alone.
 
-**The awkward part.** The integration suite has to run with `RATE_LIMIT_ENABLED=false`, because it
-registers dozens of accounts from one address — exactly the pattern the registration limit exists
-to stop. The limiter has its own unit tests that turn it back on, so it is not left uncovered, but
-the suite cannot prove the limits are wired into the endpoints. A per-test limiter reset, or a
-test-only allowlisted address, would let the suite run with limits on.
+**The rate-limiting awkwardness — fixed with a test-only bypass, not a disabled limiter.**
+`client_identifier(request)` in `app/core/rate_limit.py` mints a fresh random identifier instead of
+the real address when the request carries a header matching the new
+`settings.RATE_LIMIT_TEST_BYPASS_TOKEN` (default `None` — dead code unless deliberately set). This
+only affects the IP-keyed scopes the registration-heavy test suite collides on
+(`register`/`verify-email`/`login-ip`/`forgot-ip`/`reset-ip`); every account-scoped limit is
+untouched. `RATE_LIMIT_ENABLED=true` is now the suite's actual running configuration — 329 tests
+across `tests/crypto`+`tests/stickers`, all green with limits genuinely on. See `CLAUDE.md`'s
+*Tests* section for the mechanism and its deployment caveat.
 
 ---
 
