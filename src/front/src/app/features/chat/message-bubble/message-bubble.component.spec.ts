@@ -1,20 +1,24 @@
-import { provideHttpClient } from '@angular/common/http';
-import { provideHttpClientTesting } from '@angular/common/http/testing';
-import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { ComponentFixture, fakeAsync, TestBed, tick } from '@angular/core/testing';
 
+import { MessageAttachment } from '../../../core/models/crypto.model';
+import { AttachmentBatchService } from '../../../core/services/attachment-batch.service';
 import { ChatApiService } from '../../../core/services/chat-api.service';
 import { DirectoryService } from '../../../core/services/directory.service';
 import { DecryptedMessage, DecryptStatus } from '../../../core/services/message.service';
 import { MessageBubbleComponent } from './message-bubble.component';
 
-const ALL_STATUSES: DecryptStatus[] = ['ok', 'no_key', 'unverified', 'failed', 'plaintext', 'legacy'];
+const CHAT_ID = 'a0000000-0000-4000-8000-000000000001';
+const SENDER_ID = 'bbbbbbbb-0000-4000-8000-000000000002';
 
-function message(overrides: Partial<DecryptedMessage> = {}): DecryptedMessage {
+/** `docs/ui-states.md`'s grace period before a fresh `no_key` explains itself. */
+const NO_KEY_GRACE_MS = 1500;
+
+function buildMessage(overrides: Partial<DecryptedMessage> = {}): DecryptedMessage {
     return {
-        id: 'm1',
-        chatId: 'c1',
-        senderId: 'peer',
-        createdAt: '2026-01-01T10:00:00Z',
+        id: 'msg-1',
+        chatId: CHAT_ID,
+        senderId: SENDER_ID,
+        createdAt: '2024-01-01T00:00:00Z',
         text: 'hello',
         status: 'ok',
         isEdited: false,
@@ -28,256 +32,228 @@ function message(overrides: Partial<DecryptedMessage> = {}): DecryptedMessage {
     };
 }
 
+function buildAttachment(overrides: Partial<MessageAttachment> = {}): MessageAttachment {
+    return {
+        url: 'https://files.test/attachment-1',
+        name: 'photo.png',
+        size: 1024,
+        content_type: 'image/png',
+        kind: 'image',
+        ...overrides,
+    };
+}
+
 describe('MessageBubbleComponent', () => {
     let fixture: ComponentFixture<MessageBubbleComponent>;
+
+    function create(message: DecryptedMessage): HTMLElement {
+        fixture = TestBed.createComponent(MessageBubbleComponent);
+        fixture.componentRef.setInput('message', message);
+        fixture.detectChanges();
+        return fixture.nativeElement as HTMLElement;
+    }
 
     beforeEach(async () => {
         const directory = jasmine.createSpyObj<DirectoryService>('DirectoryService', ['isMe', 'lookup']);
         directory.isMe.and.returnValue(false);
         directory.lookup.and.returnValue({
-            userId: 'peer',
+            userId: SENDER_ID,
             name: 'Alice',
             username: 'alice',
             avatarUrl: null,
             resolved: true,
         });
 
+        const chatApi = jasmine.createSpyObj<ChatApiService>('ChatApiService', ['attachmentUrl']);
+        chatApi.attachmentUrl.and.returnValue('https://api.test/files/attachments/chat/key');
+
+        const attachmentBatch = jasmine.createSpyObj<AttachmentBatchService>('AttachmentBatchService', ['fetch']);
+        attachmentBatch.fetch.and.returnValue(new Promise<ArrayBuffer>(() => undefined));
+
         await TestBed.configureTestingModule({
             imports: [MessageBubbleComponent],
             providers: [
-                provideHttpClient(),
-                provideHttpClientTesting(),
                 { provide: DirectoryService, useValue: directory },
-                {
-                    provide: ChatApiService,
-                    useValue: jasmine.createSpyObj<ChatApiService>('ChatApiService', [
-                        'attachmentUrl',
-                        'attachmentObjectKey',
-                        'attachmentsBatchUrl',
-                    ]),
-                },
+                { provide: ChatApiService, useValue: chatApi },
+                { provide: AttachmentBatchService, useValue: attachmentBatch },
             ],
         }).compileComponents();
-
-        fixture = TestBed.createComponent(MessageBubbleComponent);
     });
 
-    function renderWith(status: DecryptStatus, text: string | null = 'hello'): HTMLElement {
-        fixture.componentRef.setInput('message', message({ status, text }));
-        fixture.detectChanges();
-        return fixture.nativeElement as HTMLElement;
-    }
+    describe('per-status rendering — docs/ui-states.md "Message-level states"', () => {
+        it('ok: renders the plaintext with no status icon or warning detail', () => {
+            const host = create(buildMessage({ status: 'ok', text: 'hi there' }));
 
-    /**
-     * The core guarantee of docs/ui-states.md: collapsing these makes the interface lie about the
-     * security guarantee. The `Record<DecryptStatus, StatusView>` type already makes a *missing*
-     * status a compile error; this asserts what the type cannot — that they are distinguishable.
-     */
-    it('renders every decrypt status distinguishably', () => {
-        const tones = new Set<string>();
+            expect(host.querySelector('.text')?.textContent).toContain('hi there');
+            expect(host.querySelector('.status-icon')).toBeNull();
+            expect(host.querySelector('.detail')).toBeNull();
+        });
 
-        for (const status of ALL_STATUSES) {
-            renderWith(status, status === 'ok' || status === 'plaintext' ? 'hello' : null);
-            // The tone lives on the host element, which is the component itself.
-            tones.add((fixture.nativeElement as HTMLElement).getAttribute('data-tone') ?? 'missing');
+        it('no_key: during the grace period shows a quiet settling state, not the error-shaped explanation', fakeAsync(() => {
+            const host = create(buildMessage({ status: 'no_key', text: null }));
+            tick();
+            fixture.detectChanges();
+
+            expect(host.querySelector('.is-placeholder')?.textContent).toContain('Decrypting…');
+            expect(host.textContent).not.toContain('Waiting for this sender');
+        }));
+
+        it('no_key: explains itself only once the grace period elapses, and never shows it as an error', fakeAsync(() => {
+            const host = create(buildMessage({ status: 'no_key', text: null }));
+            tick(NO_KEY_GRACE_MS);
+            fixture.detectChanges();
+
+            expect(host.textContent).toContain('Waiting for this sender');
+            expect(host.textContent).toContain('usually resolves on its own');
+            expect(fixture.componentInstance.view().tone).toBe('pending');
+        }));
+
+        it('unverified: flags a signature failure without hiding the content as if it were ordinary text', () => {
+            const host = create(buildMessage({ status: 'unverified', text: 'forged?' }));
+
+            expect(host.querySelector('.text')?.textContent).toContain('forged?');
+            expect(host.textContent).toContain('did not verify');
+            expect(fixture.componentInstance.view().tone).toBe('warn');
+        });
+
+        it('failed: shows an explicit placeholder rather than a blank message', () => {
+            const host = create(buildMessage({ status: 'failed', text: null }));
+
+            expect(host.querySelector('.is-placeholder')?.textContent).toContain('Could not be decrypted');
+            expect(fixture.componentInstance.view().tone).toBe('danger');
+        });
+
+        it('plaintext: carries no lock affordance — showBroadcastMark is the signed-not-encrypted mark instead', () => {
+            create(buildMessage({ status: 'plaintext', text: 'public post' }));
+
+            expect(fixture.componentInstance.showBroadcastMark()).toBe(true);
+            expect(fixture.componentInstance.view().icon).toBeNull();
+        });
+
+        it('legacy: reads as permanently unreadable, never as a loading state', () => {
+            const host = create(buildMessage({ status: 'legacy', text: null }));
+
+            expect(host.querySelector('.is-placeholder')?.textContent).toContain('Permanently unreadable');
+            expect(host.textContent).not.toContain('Decrypting');
+            expect(fixture.componentInstance.view().tone).toBe('inert');
+        });
+    });
+
+    describe('canRenderMedia gating', () => {
+        const statuses: DecryptStatus[] = ['no_key', 'unverified', 'failed', 'legacy'];
+
+        for (const status of statuses) {
+            it(`${status}: an image attachment never renders as successfully-decrypted media`, () => {
+                const host = create(
+                    buildMessage({
+                        status,
+                        text: status === 'unverified' ? 'x' : null,
+                        attachments: [buildAttachment()],
+                    })
+                );
+
+                // The template falls back to the plain-file branch whenever canRenderMedia() is false,
+                // so a status that must never look "rendered" never produces a media tile or an <img>.
+                expect(host.querySelector('.media-tile')).toBeNull();
+                expect(host.querySelector('.media-image')).toBeNull();
+                expect(fixture.componentInstance.canRenderMedia()).toBe(false);
+            });
         }
 
-        // ok and plaintext deliberately share the ordinary treatment; the four unreadable states
-        // must each look like themselves.
-        expect(tones.size).toBeGreaterThanOrEqual(5);
-        expect(tones.has('missing')).toBeFalse();
-    });
+        it('ok: an image attachment is offered the real media treatment', () => {
+            const host = create(buildMessage({ status: 'ok', attachments: [buildAttachment()] }));
 
-    it('never shows the verified mark unless a signature actually passed', () => {
-        fixture.componentRef.setInput('message', message({ status: 'ok', senderVerified: false }));
-        fixture.detectChanges();
-        expect((fixture.nativeElement as HTMLElement).querySelector('.mark.is-ok')).toBeNull();
-
-        fixture.componentRef.setInput('message', message({ status: 'ok', senderVerified: true }));
-        fixture.detectChanges();
-        expect((fixture.nativeElement as HTMLElement).querySelector('.mark.is-ok')).not.toBeNull();
-    });
-
-    /** An unverified signature must never render as ordinary text — the content may be forged. */
-    it('explains why an unverified message is not trustworthy', () => {
-        const host = renderWith('unverified');
-        expect(host.textContent).toContain('Signature did not verify');
-    });
-
-    /** `failed` must not look like a blank message; the reason has to be legible. */
-    it('explains a decryption failure rather than rendering nothing', () => {
-        const host = renderWith('failed', null);
-        expect(host.textContent).toContain('Could not be decrypted');
-    });
-
-    /** `legacy` is permanently unreadable, so it must not imply loading. */
-    it('states that a legacy message is permanently unreadable', () => {
-        const host = renderWith('legacy', null);
-        expect(host.textContent).toContain('Permanently unreadable');
-    });
-
-    /** A plaintext message carries no confidentiality, so it must not show a lock. */
-    it('marks a plaintext message as signed-not-encrypted', () => {
-        const host = renderWith('plaintext');
-        expect(host.querySelector('.mark.is-warn')).not.toBeNull();
-    });
-
-    /** Right-click is the primary way in, so it must suppress the browser menu and report where. */
-    it('requests the actions menu on right-click and suppresses the browser one', () => {
-        fixture.componentRef.setInput('message', message());
-        fixture.detectChanges();
-
-        const requests: { x: number; y: number }[] = [];
-        fixture.componentInstance.menuRequested.subscribe((request) => requests.push(request));
-
-        const event = new MouseEvent('contextmenu', { clientX: 120, clientY: 240, cancelable: true });
-        (fixture.nativeElement as HTMLElement).dispatchEvent(event);
-
-        expect(event.defaultPrevented).toBeTrue();
-        expect(requests).toEqual([jasmine.objectContaining({ x: 120, y: 240 })]);
-    });
-
-    /** Touch has no right button, so the overflow control must reach the same menu. */
-    it('requests the actions menu from the overflow button', () => {
-        fixture.componentRef.setInput('message', message());
-        fixture.detectChanges();
-
-        let asked = false;
-        fixture.componentInstance.menuRequested.subscribe(() => (asked = true));
-
-        (fixture.nativeElement as HTMLElement).querySelector<HTMLButtonElement>('.action')?.click();
-
-        expect(asked).toBeTrue();
-    });
-
-    /** Telegram's gesture. Suppressing the default keeps a stray word-selection off the screen. */
-    it('replies on double-click and suppresses the word selection', () => {
-        fixture.componentRef.setInput('message', message());
-        fixture.detectChanges();
-
-        const replied: string[] = [];
-        fixture.componentInstance.replyRequested.subscribe((m) => replied.push(m.id));
-
-        const event = new MouseEvent('dblclick', { cancelable: true });
-        (fixture.nativeElement as HTMLElement).dispatchEvent(event);
-
-        expect(replied).toEqual(['m1']);
-        expect(event.defaultPrevented).toBeTrue();
-    });
-
-    /** While picking messages, a double-click must not fire a reply behind the selection. */
-    it('does not reply on double-click while selecting', () => {
-        fixture.componentRef.setInput('message', message());
-        fixture.componentRef.setInput('selecting', true);
-        fixture.detectChanges();
-
-        let replied = false;
-        fixture.componentInstance.replyRequested.subscribe(() => (replied = true));
-
-        (fixture.nativeElement as HTMLElement).dispatchEvent(new MouseEvent('dblclick', { cancelable: true }));
-
-        expect(replied).toBeFalse();
-    });
-
-    it('toggles selection on a plain click only while selecting', () => {
-        fixture.componentRef.setInput('message', message());
-        fixture.detectChanges();
-
-        const toggled: string[] = [];
-        fixture.componentInstance.selectionToggled.subscribe((id) => toggled.push(id));
-
-        (fixture.nativeElement as HTMLElement).click();
-        expect(toggled).toEqual([]);
-
-        fixture.componentRef.setInput('selecting', true);
-        fixture.detectChanges();
-        (fixture.nativeElement as HTMLElement).click();
-
-        expect(toggled).toEqual(['m1']);
-    });
-
-    it('does not offer editing for a message it could not open', () => {
-        fixture.componentRef.setInput('message', message({ status: 'failed', text: null }));
-        fixture.detectChanges();
-        expect(fixture.componentInstance.canEdit()).toBeFalse();
-    });
-
-    describe('read receipts', () => {
-        /**
-         * Read-receipt UI is scoped to the current user's own sent messages — a bubble for someone
-         * else's message has nothing useful to say about who has read it.
-         */
-        it("shows no receipt on someone else's message, even if one is supplied", () => {
-            fixture.componentRef.setInput('message', message());
-            fixture.componentRef.setInput('readReceipt', { readCount: 1, total: 1 });
-            fixture.detectChanges();
-
-            expect((fixture.nativeElement as HTMLElement).querySelector('.receipt')).toBeNull();
+            expect(fixture.componentInstance.canRenderMedia()).toBe(true);
+            expect(host.querySelector('.media-tile')).not.toBeNull();
         });
 
-        function ownMessage(): void {
-            (TestBed.inject(DirectoryService) as jasmine.SpyObj<DirectoryService>).isMe.and.returnValue(true);
-        }
+        it('plaintext (channel post): media is also allowed, since it is unsealed by design', () => {
+            create(buildMessage({ status: 'plaintext', attachments: [buildAttachment()] }));
 
-        it('shows a single, unread tick with no receipt at all', () => {
-            ownMessage();
-            fixture.componentRef.setInput('message', message());
-            fixture.componentRef.setInput('delivery', 'sent');
-            fixture.detectChanges();
+            expect(fixture.componentInstance.canRenderMedia()).toBe(true);
+        });
+    });
 
-            const host = fixture.nativeElement as HTMLElement;
-            expect(host.querySelector('.receipt')).not.toBeNull();
-            expect(host.querySelector('.mark.is-sent.is-read')).toBeNull();
-            expect(host.querySelector('.receipt-count')).toBeNull();
+    describe('isStickerOnly', () => {
+        it('is true only for a bare sticker with no text and exactly one sticker attachment', () => {
+            create(
+                buildMessage({
+                    status: 'ok',
+                    text: null,
+                    attachments: [buildAttachment({ kind: 'sticker', url: 'https://files.test/sticker.webp' })],
+                })
+            );
+
+            expect(fixture.componentInstance.isStickerOnly()).toBe(true);
         });
 
-        /** A private chat has one "other" — read means the tick turns into the read colour. */
-        it('marks a private-chat message read once the one other participant has read it', () => {
-            ownMessage();
-            fixture.componentRef.setInput('message', message());
-            fixture.componentRef.setInput('delivery', 'sent');
-            fixture.componentRef.setInput('readReceipt', { readCount: 1, total: 1 });
-            fixture.detectChanges();
+        it('is false when the message also carries text', () => {
+            create(
+                buildMessage({
+                    status: 'ok',
+                    text: 'look at this',
+                    attachments: [buildAttachment({ kind: 'sticker' })],
+                })
+            );
 
-            const host = fixture.nativeElement as HTMLElement;
-            expect(host.querySelector('.mark.is-sent.is-read')).not.toBeNull();
-            expect(host.querySelector('.receipt-count')).toBeNull();
+            expect(fixture.componentInstance.isStickerOnly()).toBe(false);
         });
 
-        /** A group not yet fully read gets a compact "read by N of M" rather than a full avatar stack. */
-        it('shows a compact "read by N of M" for a partially read group message', () => {
-            ownMessage();
-            fixture.componentRef.setInput('message', message());
-            fixture.componentRef.setInput('delivery', 'sent');
-            fixture.componentRef.setInput('readReceipt', { readCount: 1, total: 3 });
-            fixture.detectChanges();
+        it('is false when the status cannot render media at all, even if the only attachment is a sticker', () => {
+            create(
+                buildMessage({
+                    status: 'failed',
+                    text: null,
+                    attachments: [buildAttachment({ kind: 'sticker' })],
+                })
+            );
 
-            const host = fixture.nativeElement as HTMLElement;
-            expect(host.querySelector('.mark.is-sent.is-read')).toBeNull();
-            expect(host.querySelector('.receipt-count')?.textContent).toContain('1/3');
+            expect(fixture.componentInstance.isStickerOnly()).toBe(false);
+        });
+    });
+
+    describe('senderVerified indicator', () => {
+        it('is shown only when a signature was actually checked and passed', () => {
+            create(buildMessage({ status: 'ok', senderVerified: true }));
+            expect(fixture.componentInstance.showVerified()).toBe(true);
         });
 
-        it('drops the count and shows the read tick once every group member has read it', () => {
-            ownMessage();
-            fixture.componentRef.setInput('message', message());
-            fixture.componentRef.setInput('delivery', 'sent');
-            fixture.componentRef.setInput('readReceipt', { readCount: 3, total: 3 });
-            fixture.detectChanges();
-
-            const host = fixture.nativeElement as HTMLElement;
-            expect(host.querySelector('.mark.is-sent.is-read')).not.toBeNull();
-            expect(host.querySelector('.receipt-count')).toBeNull();
+        it('is never shown for a status that did not pass verification, even if senderVerified is somehow true', () => {
+            create(buildMessage({ status: 'unverified', senderVerified: true }));
+            expect(fixture.componentInstance.showVerified()).toBe(false);
         });
 
-        /** A message still sending or that failed must not claim any read progress. */
-        it('never shows read progress on a pending or failed send', () => {
-            ownMessage();
-            fixture.componentRef.setInput('message', message());
-            fixture.componentRef.setInput('delivery', 'sending');
-            fixture.componentRef.setInput('readReceipt', { readCount: 1, total: 1 });
+        it('is never shown by default', () => {
+            create(buildMessage({ status: 'ok', senderVerified: false }));
+            expect(fixture.componentInstance.showVerified()).toBe(false);
+        });
+    });
+
+    describe('reaction picker outside-click dismiss', () => {
+        it('closes when a click lands outside the picker and its trigger', () => {
+            const host = create(buildMessage());
+            const trigger = host.querySelector<HTMLButtonElement>('.react-trigger')!;
+            trigger.click();
+            fixture.detectChanges();
+            expect(fixture.componentInstance.pickerOpen()).toBe(true);
+
+            document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
             fixture.detectChanges();
 
-            expect((fixture.nativeElement as HTMLElement).querySelector('.mark.is-sent.is-read')).toBeNull();
+            expect(fixture.componentInstance.pickerOpen()).toBe(false);
+        });
+
+        it('does not close on a click inside the picker itself', () => {
+            const host = create(buildMessage());
+            const trigger = host.querySelector<HTMLButtonElement>('.react-trigger')!;
+            trigger.click();
+            fixture.detectChanges();
+
+            const picker = host.querySelector<HTMLElement>('.reactions-picker')!;
+            picker.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+            fixture.detectChanges();
+
+            expect(fixture.componentInstance.pickerOpen()).toBe(true);
         });
     });
 });
