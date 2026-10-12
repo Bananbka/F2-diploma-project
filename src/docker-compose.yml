@@ -60,18 +60,28 @@ services:
       timeout: 3s
       retries: 5
 
-  minio:
-    image: minio/minio
+  # MinIO's dev volume ended up in a broken state (objects missing independent of any app bug),
+  # so the object store is RustFS instead. It speaks the same S3 API `minio_manager`
+  # (app/infrastructure/minio.py) already talks over aiobotocore, so this is an endpoint/credential
+  # swap, not an application-code rewrite — the Python client class is still named `MinioClient`.
+  rustfs:
+    image: rustfs/rustfs:latest
     restart: always
-    command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD}
+      RUSTFS_ACCESS_KEY: ${MINIO_USER}
+      RUSTFS_SECRET_KEY: ${MINIO_PASSWORD}
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ADDRESS: ":9001"
+      RUSTFS_CONSOLE_ENABLE: "true"
     ports:
       - "127.0.0.1:9000:9000"
       - "127.0.0.1:9001:9001"
     volumes:
-      - minio_data:/data
+      - rustfs_data:/data
+    # RustFS runs as non-root uid 10001 inside the container. A fresh named Docker volume is
+    # usually fine (Docker initialises it with the image's filesystem permissions on first use),
+    # but if this container fails to start with a permissions error on /data, that uid/ownership
+    # mismatch is the first thing to check.
 
   api:
     build:
@@ -94,7 +104,7 @@ services:
         condition: service_started
       redis:
         condition: service_started
-      minio:
+      rustfs:
         condition: service_started
     # --no-access-log: uvicorn's default access logger writes the full request path — including
     # the invite-link token in `/invite-links/{token}` — verbatim to stdout, which `docker compose
@@ -146,4 +156,4 @@ volumes:
   postgres_data:
   mongo_data:
   redis_data:
-  minio_data:
+  rustfs_data:
