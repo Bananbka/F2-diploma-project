@@ -409,8 +409,21 @@ async def enrich_chats_with_mongo_data(
 
 
 async def get_chat_by_id(db, chat_id: uuid.UUID) -> Chat | None:
+    """Fetch a chat with its participants eagerly loaded.
+
+    `populate_existing=True` matters whenever this runs after a participant mutation earlier in
+    the *same* request/session (`add_participants`, `delete_participants`): without it, a `Chat`
+    already in the session's identity map from an earlier query keeps its previously-loaded
+    `participants` collection, and `selectinload` silently declines to refresh an already-loaded
+    collection on a cache hit. The database write itself is correct either way — only the response
+    payload returned from this same request was stale, still listing a participant who had just
+    been removed (or omitting one just added) until the caller made a second, fresh request.
+    """
     stmt = (
-        select(Chat).where(Chat.id == chat_id).options(selectinload(Chat.participants))
+        select(Chat)
+        .where(Chat.id == chat_id)
+        .options(selectinload(Chat.participants))
+        .execution_options(populate_existing=True)
     )
     res = await db.execute(stmt)
 

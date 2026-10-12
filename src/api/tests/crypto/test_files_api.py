@@ -24,7 +24,7 @@ from app.domains.crypto.reference.ratchet import SenderChain
 
 from tests.crypto.test_channel_api import _channel_with, _post
 from tests.crypto.test_epoch_api import _group_with, _publish_identity
-from tests.crypto.test_identity_api import _register_user
+from tests.crypto.test_identity_api import _register_user, rate_limit_bypass_headers
 from tests.crypto.test_message_envelope_api import _encrypted_private_chat
 from tests.crypto.test_rotation_api import _seal
 
@@ -299,7 +299,7 @@ async def test_unknown_attachment_key_is_not_found_rather_than_a_crash():
 
 
 async def test_files_require_authentication():
-    async with httpx.AsyncClient(base_url=BASE, timeout=30.0) as anon:
+    async with httpx.AsyncClient(base_url=BASE, timeout=30.0, headers=rate_limit_bypass_headers()) as anon:
         r = await anon.post(
             "/files/upload",
             files={"file": ("a.enc", b"x", "application/octet-stream")},

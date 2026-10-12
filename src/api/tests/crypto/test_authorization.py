@@ -13,7 +13,7 @@ import websockets
 from app.domains.crypto.reference.ratchet import SenderChain
 
 from tests.crypto.test_epoch_api import _group_with, _publish_identity
-from tests.crypto.test_identity_api import _register_user
+from tests.crypto.test_identity_api import _register_user, rate_limit_bypass_headers
 from tests.crypto.test_rotation_api import _publish_chain, _seal
 
 BASE = "http://localhost:8000"
@@ -432,7 +432,7 @@ async def test_refresh_respects_forced_logout():
 
         # A refresh token issued *before* the cutoff must not work, even though it is validly
         # signed and unexpired.
-        async with httpx.AsyncClient(base_url=BASE, timeout=30.0) as stale:
+        async with httpx.AsyncClient(base_url=BASE, timeout=30.0, headers=rate_limit_bypass_headers()) as stale:
             r = await stale.post(
                 "/auth/login",
                 json={
@@ -454,7 +454,7 @@ async def test_refresh_respects_forced_logout():
             )
             assert r.status_code == 200, r.text
 
-            async with httpx.AsyncClient(base_url=BASE, timeout=30.0) as replay:
+            async with httpx.AsyncClient(base_url=BASE, timeout=30.0, headers=rate_limit_bypass_headers()) as replay:
                 replay.cookies.set("refresh_token", old_refresh)
                 r = await replay.post("/auth/refresh")
 
@@ -474,7 +474,7 @@ async def test_logout_revokes_the_refresh_token_too():
         r = await client.post("/auth/logout")
         assert r.status_code == 200, r.text
 
-        async with httpx.AsyncClient(base_url=BASE, timeout=30.0) as replay:
+        async with httpx.AsyncClient(base_url=BASE, timeout=30.0, headers=rate_limit_bypass_headers()) as replay:
             replay.cookies.set("refresh_token", refresh_token)
             r = await replay.post("/auth/refresh")
 
@@ -647,7 +647,7 @@ async def test_forgot_password_does_not_reveal_whether_an_account_exists():
     try:
         known = (await client.get("/profile/me")).json()["data"]
 
-        async with httpx.AsyncClient(base_url=BASE, timeout=30.0) as anon:
+        async with httpx.AsyncClient(base_url=BASE, timeout=30.0, headers=rate_limit_bypass_headers()) as anon:
             real = await anon.post(
                 "/auth/forgot-password",
                 json={
@@ -713,7 +713,7 @@ async def test_identity_can_be_republished_after_every_device_is_revoked():
         assert r.status_code == 200, r.text
 
         # Log back in — reset forces every session out.
-        async with httpx.AsyncClient(base_url=BASE, timeout=30.0) as fresh:
+        async with httpx.AsyncClient(base_url=BASE, timeout=30.0, headers=rate_limit_bypass_headers()) as fresh:
             r = await fresh.post(
                 "/auth/login", json={"username": username, "password": "NewPassw0rd!"}
             )

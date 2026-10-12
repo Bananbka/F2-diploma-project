@@ -14,11 +14,18 @@ it is a broken deployment. Limits therefore fail closed.
 """
 
 import time
+import uuid
 
 from redis.asyncio import Redis
 
 from app.core.config import settings
 from app.core.exceptions import AppException
+
+# Header the integration suite's test-only bypass rides on. See
+# `Settings.RATE_LIMIT_TEST_BYPASS_TOKEN` for why this is safe to leave in production code: it is
+# only ever consulted, and only ever matches, when that setting has been deliberately set, which
+# never happens outside a test environment.
+TEST_BYPASS_HEADER = "x-ratelimit-test-bypass"
 
 
 async def enforce_rate_limit(
@@ -74,7 +81,21 @@ def client_identifier(request) -> str:
     nginx sets X-Forwarded-For, and only the *first* hop of it may be trusted here because the
     rest is client-supplied and trivially forged. Behind the compose setup there is exactly one
     proxy, so the first entry is what nginx observed.
+
+    Test-only exception: the integration suite registers dozens of accounts from one address,
+    which is exactly the pattern the IP-keyed limits (`register`, `verify-email`, `login-ip`,
+    `forgot-ip`/`reset-ip`) exist to stop, and every request in the suite shares the same real
+    address regardless. When `RATE_LIMIT_TEST_BYPASS_TOKEN` is set on the server and the caller's
+    request carries a matching `TEST_BYPASS_HEADER`, a fresh random identifier is minted per call
+    instead of the real address, so test traffic stops colliding with itself without disabling the
+    limiter or trusting anything a real client could forge — the bypass only fires when the exact
+    secret configured on this deployment is presented, and that secret is never set outside a test
+    environment.
     """
+    token = settings.RATE_LIMIT_TEST_BYPASS_TOKEN
+    if token and request.headers.get(TEST_BYPASS_HEADER) == token:
+        return f"test-bypass:{uuid.uuid4()}"
+
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
         return forwarded.split(",")[0].strip()

@@ -41,6 +41,16 @@ class Settings(BaseSettings):
     # those runs. Never turn it off anywhere a real user can reach.
     RATE_LIMIT_ENABLED: bool = True
 
+    # Test-only escape hatch. When set, a request carrying the header named by
+    # `rate_limit.TEST_BYPASS_HEADER` with this exact value is given a fresh, unique identifier for
+    # every IP-keyed rate limit check instead of its real client address — see
+    # `rate_limit.client_identifier`. This is what lets the integration suite run with
+    # RATE_LIMIT_ENABLED=true even though every request in it originates from the same container:
+    # the suite sets this to a secret only it knows, rather than the limiter trusting an address or
+    # header a real client could ever send. Must never be set outside a test environment — it is
+    # `None` by default, and leaving it unset is what keeps this dead code in production.
+    RATE_LIMIT_TEST_BYPASS_TOKEN: str | None = None
+
     # EMAIL
     SMTP_HOST: str = "smtp.gmail.com"
     SMTP_PORT: int = 587
