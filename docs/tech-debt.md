@@ -144,3 +144,65 @@ These look like gaps and are deliberate:
   `expires_at`) all exist end to end, backend and frontend, with dedicated test suites. **No polls
   or scheduled messages.** No backend exists for either, so the UI does not offer them — a control
   that cannot work is worse than none.
+
+---
+
+## 7. Media-features follow-ups (stickers, object storage) — closed
+
+Found during a live post-deploy smoke test of the `feat/media-and-ui-features` branch. All three
+items below are now fixed.
+
+**Sticker creation UX was unfriendly — fixed.** `sticker-pack-manager`'s "add sticker" flow used to
+ask the user to type an emoji into a plain text field. Replaced with a hand-rolled
+`shared/ui/emoji-picker/` popover (curated ~220-emoji grid across 6 categories, no new npm
+dependency — follows this branch's existing hand-rolled style for waveform/resize/voice-recording)
+wired into the same `uploadEmoji` signal the old `<input>` wrote to.
+
+**Sent stickers rendered as the emoji/name instead of the image — root-caused and fixed.** It was
+never the `message-bubble` template's `kind === 'sticker'` branch itself (that was always correct).
+The real bug was one level down: `MinioClient.upload_file` built every object's public URL from
+`settings.MINIO_URL`, the Docker-internal hostname (`http://minio:9000`) — fine for the server's own
+S3 client, but that same URL was also handed straight to the browser as `<img src>` for avatars and
+stickers (the only two public buckets), and a browser outside the Docker network can never resolve
+that hostname. The image request failed and the browser fell back to rendering the `alt` text — the
+sticker's emoji/name — which is exactly the symptom reported. Message attachments never hit this
+because they're always fetched through the authenticated same-origin API proxy, never a raw stored
+URL. Fixed by adding a separate `MINIO_PUBLIC_URL` setting (browser-reachable, used only for the
+avatar/sticker buckets) and switching every URL-prefix validator/comparison for those two buckets to
+it, while the private message bucket correctly stays on the internal `MINIO_URL`. See
+`app/infrastructure/minio.py`'s `upload_file(..., public: bool)` and the `MINIO_PUBLIC_URL` entries
+in *Environment files* in `CLAUDE.md`. This also silently fixed the same bug for avatars, which had
+never been reported but had the identical defect.
+
+**MinIO was in a bad state and due for replacement — migrated to RustFS.** `docker-compose.yml`'s
+`minio` service is now `rustfs` (image `rustfs/rustfs:latest`), same S3-compatible API surface, same
+`MINIO_USER`/`MINIO_PASSWORD` credentials feeding its `RUSTFS_ACCESS_KEY`/`RUSTFS_SECRET_KEY`. The
+`Settings`/`minio_manager` Python identifiers were deliberately left unchanged — this stayed a pure
+endpoint/credential swap, not an application-code rewrite, as originally scoped here. Old `minio_data`
+volume was dropped (its contents were already lost/broken); RustFS starts on a fresh `rustfs_data`
+volume.
+
+---
+
+## 8. Loading a chat's recent history fires far too many requests — closed
+
+Root-caused: each visible image/video/audio attachment was triggering its own independent
+`GET /files/attachments/{chat_id}/{object_key}` round trip (one `get_chat_or_403` + Mongo `find_one`
+each) the moment it scrolled into view or rendered. Nothing *else* was going per-message — it was
+genuinely N attachment fetches for N visible attachments, inherent to per-attachment E2E decryption
+until batched.
+
+**Fixed with a batch download endpoint.** `POST /files/attachments/batch` (`chat_id`,
+`object_keys: list[str]`, capped at 50 per call) authorizes the chat once, runs one Mongo `$in` query
+to determine which requested keys are actually referenced in that chat, and returns a
+base64-carrying JSON result per key (`ok`/`not_found`/`gone`) instead of multipart — a deliberate
+simplicity-over-byte-efficiency tradeoff, since the payload is already-opaque client-encrypted
+ciphertext so base64's ~33% overhead isn't a real loss. Client side, a new
+`core/services/attachment-batch.service.ts` coalesces every `ensureDecrypted` call that fires within
+the same microtask (e.g. a whole screenful of tiles becoming visible at once) into as few batch calls
+as the 50-key cap allows, scoped per chat id, and `message-bubble.component.ts` now calls it instead
+of issuing its own `http.get` per attachment. Rate-limited server side
+(`attachments_batch`, 300/hour); a 429 or any other batch failure surfaces as the existing
+per-attachment `error` state rather than crashing — it does not currently auto-retry later (no
+backoff, unlike the `no_key` grace-period handling elsewhere in `message-bubble`), which is worth a
+small follow-up if it turns out to matter in practice.
