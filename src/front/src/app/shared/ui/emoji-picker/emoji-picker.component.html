@@ -1,0 +1,37 @@
+<div
+    class="picker"
+    role="dialog"
+    aria-label="Choose an emoji"
+>
+    <div
+        class="tabs"
+        role="tablist"
+    >
+        @for (category of categories; track category.label; let i = $index) {
+            <button
+                type="button"
+                role="tab"
+                class="tab"
+                [class.is-active]="activeCategory() === i"
+                [attr.aria-selected]="activeCategory() === i"
+                [title]="category.label"
+                (click)="selectCategory(i)"
+            >
+                {{ category.emoji[0] }}
+            </button>
+        }
+    </div>
+
+    <div class="grid">
+        @for (emoji of categories[activeCategory()].emoji; track emoji) {
+            <button
+                type="button"
+                class="emoji"
+                [attr.aria-label]="emoji"
+                (click)="choose(emoji)"
+            >
+                {{ emoji }}
+            </button>
+        }
+    </div>
+</div>

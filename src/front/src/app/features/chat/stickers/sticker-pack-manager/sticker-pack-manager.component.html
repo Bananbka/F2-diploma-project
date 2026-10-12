@@ -159,15 +159,25 @@
 
                                 @if (canAddSticker()) {
                                     <div class="add-sticker">
-                                        <input
-                                            type="text"
-                                            class="emoji-input"
-                                            placeholder="Emoji"
-                                            maxlength="8"
-                                            aria-label="Emoji tag for the next sticker"
-                                            [value]="uploadEmoji()"
-                                            (input)="uploadEmoji.set($any($event.target).value)"
-                                        />
+                                        <div class="emoji-trigger-wrap">
+                                            <button
+                                                type="button"
+                                                class="emoji-input emoji-trigger"
+                                                aria-haspopup="dialog"
+                                                [attr.aria-expanded]="emojiPickerOpen()"
+                                                aria-label="Choose an emoji tag for the next sticker"
+                                                (click)="toggleEmojiPicker()"
+                                            >
+                                                {{ uploadEmoji() || '🙂' }}
+                                            </button>
+
+                                            @if (emojiPickerOpen()) {
+                                                <app-emoji-picker
+                                                    (closeRequested)="emojiPickerOpen.set(false)"
+                                                    (pick)="onEmojiPicked($event)"
+                                                />
+                                            }
+                                        </div>
                                         <label class="upload-btn">
                                             <lucide-icon [img]="uploadIcon" />
                                             {{ uploading() ? 'Uploading…' : 'Add sticker' }}

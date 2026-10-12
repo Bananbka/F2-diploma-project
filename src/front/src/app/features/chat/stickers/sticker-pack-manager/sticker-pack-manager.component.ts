@@ -7,6 +7,7 @@ import { Sticker, StickerPack, StickerPackSummary } from '../../../../core/model
 import { ProfileApiService } from '../../../../core/services/profile-api.service';
 import { SessionService } from '../../../../core/services/session.service';
 import { StickerApiService } from '../../../../core/services/sticker-api.service';
+import { EmojiPickerComponent } from '../../../../shared/ui/emoji-picker/emoji-picker.component';
 
 /** Server-enforced caps, mirrored here only for UX — the backend is the real enforcer. */
 const MAX_PACKS = 50;
@@ -22,7 +23,7 @@ const MAX_STICKERS_PER_PACK = 120;
  */
 @Component({
     selector: 'app-sticker-pack-manager',
-    imports: [LucideAngularModule],
+    imports: [LucideAngularModule, EmojiPickerComponent],
     templateUrl: './sticker-pack-manager.component.html',
     styleUrl: './sticker-pack-manager.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
@@ -51,6 +52,7 @@ export class StickerPackManagerComponent {
     readonly togglingPublic = signal(false);
 
     readonly uploadEmoji = signal('');
+    readonly emojiPickerOpen = signal(false);
     readonly uploading = signal(false);
     readonly uploadError = signal<string | null>(null);
 
@@ -121,6 +123,7 @@ export class StickerPackManagerComponent {
 
         this.expandedPackId.set(pack.id);
         this.confirmingDeletePack.set(false);
+        this.emojiPickerOpen.set(false);
         this.uploadError.set(null);
         this.loadingDetail.set(true);
         try {
@@ -172,6 +175,15 @@ export class StickerPackManagerComponent {
         } finally {
             this.togglingPublic.set(false);
         }
+    }
+
+    toggleEmojiPicker(): void {
+        this.emojiPickerOpen.update((open) => !open);
+    }
+
+    onEmojiPicked(emoji: string): void {
+        this.uploadEmoji.set(emoji);
+        this.emojiPickerOpen.set(false);
     }
 
     async onFilePicked(event: Event): Promise<void> {

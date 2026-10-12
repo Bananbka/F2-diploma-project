@@ -204,13 +204,19 @@
     margin-top: 0.75rem;
 }
 
+.emoji-trigger-wrap {
+    position: relative;
+    flex-shrink: 0;
+}
+
 .emoji-input {
     @include ui.field;
 
-    width: 5rem;
+    width: 3.5rem;
     padding: 0.5rem 0.625rem;
-    font-size: 1rem;
+    font-size: 1.125rem;
     text-align: center;
+    cursor: pointer;
 }
 
 .upload-btn {
