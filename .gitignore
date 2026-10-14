@@ -98,6 +98,11 @@ dist
 # https://nextjs.org/blog/next-9-1#public-directory-support
 # public
 
+# Generated Twemoji SVGs (scripts/copy-emoji.mjs) — reproducibly copied from the @twemoji/svg
+# devDependency at install/build time, unlike public/fonts (a live Google Fonts fetch, committed
+# for offline/reproducible builds). ~3700 files; not worth the repo bloat.
+src/front/public/assets/emoji/
+
 # vuepress build output
 .vuepress/dist
 

@@ -89,9 +89,10 @@ services:
       dockerfile: Dockerfile
     restart: always
     ports:
-      # Loopback only. nginx on 4200 is the single origin the browser uses, and it is where
-      # the security headers and the first layer of rate limiting live — reaching the API
-      # directly from the network would bypass both. Swagger still works at localhost:8000/docs.
+      # Loopback only. The gateway container on 4200 is the single origin the browser uses, and
+      # it is where the security headers and the first layer of rate limiting live — reaching
+      # the API directly from the network would bypass both. Swagger still works at
+      # localhost:8000/docs.
       - "127.0.0.1:8000:8000"
     volumes:
       - ./api:/app
@@ -119,15 +120,31 @@ services:
       dockerfile: Dockerfile
       target: ${FRONTEND_TARGET:-production}
     restart: always
-    ports:
-      - "4200:80"
+    # No `ports:` here — this container is internal-only now. The gateway service is the single
+    # published entry point on 4200 and is the only thing that reaches this one, over the compose
+    # network.
     environment:
-      # nginx proxies /api and /ws to the api service, so the browser sees a single origin and
-      # the auth cookies stay same-site.
+      # Still relative: the browser's requests go through the gateway regardless of which
+      # container actually answers them, so the auth cookies stay same-site either way.
       - API_URL=/api/
       - WS_URL=/ws
     depends_on:
       - api
+
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      # The single published entry point. nginx here owns security headers, rate limiting, and
+      # all /api, /ws and /objects routing — the frontend container no longer does either of
+      # those jobs, it only serves the Angular build, and it is reached only from here.
+      - "4200:80"
+    depends_on:
+      - frontend
+      - api
+      - rustfs
 
   celery-worker:
     build:
