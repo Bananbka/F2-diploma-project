@@ -1,10 +1,12 @@
 import { TestBed } from '@angular/core/testing';
+import { ed25519 } from '@noble/curves/ed25519.js';
 import { of } from 'rxjs';
 
+import { signChannelPost } from '../crypto/channel';
 import { openMessage, sealMessage } from '../crypto/envelope';
 import { b64uEncode, utf8 } from '../crypto/primitives';
 import { SenderChain } from '../crypto/ratchet';
-import { MessageAttachment, MessageResponse } from '../models/crypto.model';
+import { MessageAttachment, MessageResponse, PublicKey } from '../models/crypto.model';
 import { ChatApiService } from './chat-api.service';
 import { CryptoApiService } from './crypto-api.service';
 import { KeyStoreService } from './key-store.service';
@@ -45,10 +47,37 @@ function envelopeMessage(id: string, idx: number): MessageResponse {
     } as MessageResponse;
 }
 
+/** A `PublicKey` with only `user_id`/`signing_public_key` meaningful; the rest is filler. */
+function publicKeyStub(userId: string, signingPublicKey: string): PublicKey {
+    return {
+        user_id: userId,
+        device_id: 'device-1',
+        identity_key_id: 'identity-1',
+        version: 1,
+        identity_public_key: 'unused',
+        signing_public_key: signingPublicKey,
+        identity_key_signature: 'unused',
+        signed_prekey_public: null,
+        signed_prekey_signature: null,
+    };
+}
+
+function channelMessage(id: string, senderId: string, postId: string, content: string, sig: string): MessageResponse {
+    const base = envelopeMessage(id, 0);
+    return {
+        ...base,
+        envelope: null,
+        sender_id: senderId,
+        content_format: 'channel_signed_v1',
+        channel_post: { v: 1, alg: 'ed25519-post-v1', post_id: postId, content, sig },
+    };
+}
+
 describe('MessageService', () => {
     let service: MessageService;
     let keyStore: jasmine.SpyObj<KeyStoreService>;
     let chatApi: jasmine.SpyObj<ChatApiService>;
+    let cryptoApi: jasmine.SpyObj<CryptoApiService>;
 
     beforeEach(() => {
         keyStore = jasmine.createSpyObj<KeyStoreService>(
@@ -58,7 +87,7 @@ describe('MessageService', () => {
         );
         chatApi = jasmine.createSpyObj<ChatApiService>('ChatApiService', ['getMessages', 'editMessage']);
 
-        const cryptoApi = jasmine.createSpyObj<CryptoApiService>('CryptoApiService', ['getChatKeys']);
+        cryptoApi = jasmine.createSpyObj<CryptoApiService>('CryptoApiService', ['getChatKeys', 'getKeysBatch']);
         cryptoApi.getChatKeys.and.returnValue(
             of({
                 crypto_mode: 'sender_keys_v1',
@@ -133,6 +162,89 @@ describe('MessageService', () => {
 
         expect(raw.map((m) => m._id)).toEqual(['oldest', 'newest']);
         expect(messages.map((m) => m.id)).toEqual(['oldest', 'newest']);
+    });
+
+    /**
+     * The fix this guards: `loadMessages` used to call `keys/batch` once per channel post, even
+     * when several posts in the same page shared a sender. It must collect every distinct sender
+     * across the whole page and issue exactly one batched call for all of them.
+     */
+    it('fetches every distinct channel-post sender in a single keys/batch call', async () => {
+        const senderA = 'd0000000-0000-4000-8000-00000000000a';
+        const senderB = 'd0000000-0000-4000-8000-00000000000b';
+        const privA = crypto.getRandomValues(new Uint8Array(32));
+        const privB = crypto.getRandomValues(new Uint8Array(32));
+        const pubA = ed25519.getPublicKey(privA);
+        const pubB = ed25519.getPublicKey(privB);
+
+        const postIdA = 'e0000000-0000-4000-8000-000000000001';
+        const postIdB = 'e0000000-0000-4000-8000-000000000002';
+
+        const sigA = signChannelPost({
+            signingPrivate: privA,
+            chatId: CHAT,
+            senderId: senderA,
+            postId: postIdA,
+            content: 'hi a',
+        });
+        const sigB = signChannelPost({
+            signingPrivate: privB,
+            chatId: CHAT,
+            senderId: senderB,
+            postId: postIdB,
+            content: 'hi b',
+        });
+
+        // Two posts from sender A (same sender should not duplicate the batch request) plus one
+        // from sender B, returned newest-first the way the API actually orders them.
+        const msgB = channelMessage('cb', senderB, postIdB, 'hi b', sigB);
+        const msgA2 = channelMessage('ca2', senderA, postIdA, 'hi a', sigA);
+        const msgA1 = channelMessage('ca1', senderA, postIdA, 'hi a', sigA);
+        chatApi.getMessages.and.returnValue(of([msgB, msgA2, msgA1]));
+
+        cryptoApi.getKeysBatch.and.returnValue(
+            of([publicKeyStub(senderA, b64uEncode(pubA)), publicKeyStub(senderB, b64uEncode(pubB))])
+        );
+
+        const { messages } = await service.loadMessages(CHAT);
+
+        expect(cryptoApi.getKeysBatch).toHaveBeenCalledTimes(1);
+        const [requestedIds] = cryptoApi.getKeysBatch.calls.mostRecent().args;
+        expect(new Set(requestedIds)).toEqual(new Set([senderA, senderB]));
+
+        expect(messages.find((m) => m.id === 'ca1')?.senderVerified).toBeTrue();
+        expect(messages.find((m) => m.id === 'ca2')?.senderVerified).toBeTrue();
+        expect(messages.find((m) => m.id === 'cb')?.senderVerified).toBeTrue();
+    });
+
+    /**
+     * The safety property reviewed by reading the code, now actually exercised: a sender absent
+     * from the batch response (e.g. the server omitted a now-revoked device) must degrade to an
+     * unverified post rather than throwing and breaking the whole page.
+     */
+    it('degrades to senderVerified: false, without throwing, when a sender is missing from the keys batch', async () => {
+        const senderA = 'd0000000-0000-4000-8000-00000000000a';
+        const privA = crypto.getRandomValues(new Uint8Array(32));
+
+        const postId = 'e0000000-0000-4000-8000-000000000003';
+        const sigA = signChannelPost({
+            signingPrivate: privA,
+            chatId: CHAT,
+            senderId: senderA,
+            postId,
+            content: 'hi a',
+        });
+        const msg = channelMessage('cx', senderA, postId, 'hi a', sigA);
+        chatApi.getMessages.and.returnValue(of([msg]));
+
+        // The batch response simply does not include this sender.
+        cryptoApi.getKeysBatch.and.returnValue(of([]));
+
+        const { messages } = await service.loadMessages(CHAT);
+
+        expect(messages.length).toBe(1);
+        expect(messages[0].status).toBe('plaintext');
+        expect(messages[0].senderVerified).toBeFalse();
     });
 
     /** Our own message is never round-tripped through the receiver ratchet; we already have the text. */

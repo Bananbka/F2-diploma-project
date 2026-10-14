@@ -6,7 +6,14 @@ import { v4 as uuidv4 } from 'uuid';
 import { signChannelPost, verifyChannelPost } from '../crypto/channel';
 import { openMessage, sealMessage } from '../crypto/envelope';
 import { b64uDecode, b64uEncode, fromUtf8, utf8 } from '../crypto/primitives';
-import { ChatKeys, ForwardOrigin, MessageAttachment, MessageReaction, MessageResponse } from '../models/crypto.model';
+import {
+    ChatKeys,
+    ForwardOrigin,
+    MessageAttachment,
+    MessageReaction,
+    MessageResponse,
+    PublicKey,
+} from '../models/crypto.model';
 import { ChatApiService } from './chat-api.service';
 import { CryptoApiService } from './crypto-api.service';
 import { isCryptoNotEnabled } from './crypto-errors';
@@ -341,13 +348,25 @@ export class MessageService {
      *
      * Grants are ingested first so chains exist before we walk the messages; otherwise every
      * message from a sender we have not seen would report no_key on first load.
+     *
+     * `knownKeys` lets a caller that already fetched this chat's keys (e.g. `ChatStoreService.openChat`,
+     * right after `ensureEncryptionEnabled`) pass them through instead of this method fetching them
+     * again. Pass `undefined` (the default) to have this method fetch them itself — the right choice
+     * for any caller without a fresher copy already in hand. Pass `null` explicitly to mean "already
+     * checked, this chat has no crypto settings" and skip the fetch entirely without treating it as
+     * unknown.
      */
-    async loadMessages(chatId: string, limit = 50, beforeId?: string): Promise<LoadedMessages> {
+    async loadMessages(
+        chatId: string,
+        limit = 50,
+        beforeId?: string,
+        knownKeys?: ChatKeys | null
+    ): Promise<LoadedMessages> {
         // A chat need not have crypto settings at all: channels are signed rather than encrypted, and
         // a private chat has none until encryption is enabled for it. Neither is an error — there are
         // simply no grants to ingest, and `decrypt` reports anything it cannot open as `no_key`
         // rather than pretending to have read it.
-        const keys = await this.tryGetChatKeys(chatId);
+        const keys = knownKeys !== undefined ? knownKeys : await this.tryGetChatKeys(chatId);
         if (keys) {
             await this.keyStore.ingestDistributions(chatId, keys.distributions);
         }
@@ -359,16 +378,34 @@ export class MessageService {
         // ascending order too.
         const raw = (await firstValueFrom(this.chatApi.getMessages(chatId, limit, beforeId))).slice().reverse();
 
+        // Channel posts are verified against the sender's signing key, fetched via the same
+        // `keys/batch` endpoint regardless of how many posts in this page share a sender — one
+        // round trip for the whole page rather than one per post.
+        const channelSenderIds = Array.from(
+            new Set(
+                raw
+                    .filter((message) => message.content_format === 'channel_signed_v1' && message.channel_post)
+                    .map((message) => message.sender_id)
+            )
+        );
+        const senderKeys = channelSenderIds.length > 0 ? await this.getKeysBatchMap(channelSenderIds) : undefined;
+
         // The ciphertext is handed back too. A message that decrypts to no_key today may be
         // decryptable in a second, and re-running it needs the envelope, not another round trip.
         const messages: DecryptedMessage[] = [];
         for (const message of raw) {
             // Sequential, not Promise.all: concurrent decryption of one sender's chain interleaves
             // the ratchet's index advances.
-            messages.push(await this.decrypt(chatId, message));
+            messages.push(await this.decrypt(chatId, message, senderKeys));
         }
 
         return { raw, messages };
+    }
+
+    /** One `keys/batch` round trip for several senders at once, keyed by `user_id`. */
+    private async getKeysBatchMap(userIds: string[]): Promise<Map<string, PublicKey>> {
+        const keys = await firstValueFrom(this.cryptoApi.getKeysBatch(userIds));
+        return new Map(keys.map((key) => [key.user_id, key]));
     }
 
     /**
@@ -413,13 +450,17 @@ export class MessageService {
      * `no_key` is deliberately not cached: nothing was consumed, and the whole point is that it
      * becomes readable once the grant arrives.
      */
-    async decrypt(chatId: string, message: MessageResponse): Promise<DecryptedMessage> {
+    async decrypt(
+        chatId: string,
+        message: MessageResponse,
+        senderKeys?: Map<string, PublicKey>
+    ): Promise<DecryptedMessage> {
         const cached = this.opened.get(message._id);
         if (cached) {
             return cached;
         }
 
-        const result = await this.decryptOnce(chatId, message);
+        const result = await this.decryptOnce(chatId, message, senderKeys);
 
         // `decryptOnce` awaits real crypto work, so a `patchMeta` call can land on the side-map
         // at any point during that wait. Overlaying here, right before caching, is the latest
@@ -531,7 +572,11 @@ export class MessageService {
         return message;
     }
 
-    private async decryptOnce(chatId: string, message: MessageResponse): Promise<DecryptedMessage> {
+    private async decryptOnce(
+        chatId: string,
+        message: MessageResponse,
+        senderKeys?: Map<string, PublicKey>
+    ): Promise<DecryptedMessage> {
         // `reactions`/`isPinned` here reflect this particular `MessageResponse` instance only.
         // `decrypt()` overlays `metaOverrides` afterwards, once this (possibly slow, real-crypto)
         // call has actually resolved, so a `patchMeta` racing this decrypt is not lost.
@@ -550,11 +595,18 @@ export class MessageService {
 
         if (message.content_format === 'channel_signed_v1' && message.channel_post) {
             // Readable by design. What matters is whether the author is who the post claims.
-            const senderKeys = await firstValueFrom(this.cryptoApi.getKeysBatch([message.sender_id]));
+            //
+            // `senderKeys` lets a page-level caller (`loadMessages`) supply every sender's key from
+            // one batched `keys/batch` call instead of this method making its own per-message round
+            // trip. A caller decrypting a single message in isolation (e.g. one arriving live over
+            // the socket) omits it and this falls back to fetching just this one sender's key itself.
+            const senderKey = senderKeys
+                ? senderKeys.get(message.sender_id)
+                : (await firstValueFrom(this.cryptoApi.getKeysBatch([message.sender_id])))[0];
             const verified =
-                senderKeys.length > 0 &&
+                senderKey !== undefined &&
                 verifyChannelPost({
-                    signingPublic: b64uDecode(senderKeys[0].signing_public_key),
+                    signingPublic: b64uDecode(senderKey.signing_public_key),
                     signature: message.channel_post.sig,
                     chatId,
                     senderId: message.sender_id,

@@ -441,13 +441,28 @@ export class ChatStoreService {
 
             // Channels are signed rather than encrypted, so they have no epochs, no roster and no
             // grants. Asking for their keys always 404s.
+            //
+            // `knownKeys` starts `undefined` (a channel never fetched its keys at all) rather than
+            // `null`, so `loadMessages` falls back to fetching for itself — it still needs to know
+            // whether a non-channel chat has crypto settings, which only `ensureEncryptionEnabled`
+            // below has actually checked for this open.
+            let knownKeys: ChatKeys | null | undefined;
             if (chat?.chat_type !== 'channel') {
                 // Fetched before the history so the roster and grants are in place; otherwise every
                 // message from a sender we have not ingested yet would report no_key on first paint.
-                this.chatKeys.set(await this.ensureEncryptionEnabled(chatId));
+                knownKeys = await this.ensureEncryptionEnabled(chatId);
+                this.chatKeys.set(knownKeys);
             }
 
-            const { raw, messages: decrypted } = await this.messages_.loadMessages(chatId, PAGE_SIZE);
+            // Pass through what `ensureEncryptionEnabled` just fetched instead of asking
+            // `loadMessages` to fetch the same chat's keys again — this used to fire the identical
+            // `GET /crypto/chats/{id}/keys` request twice on every chat open.
+            const { raw, messages: decrypted } = await this.messages_.loadMessages(
+                chatId,
+                PAGE_SIZE,
+                undefined,
+                knownKeys
+            );
             raw.forEach((message) => this.rawMessages.set(message._id, message));
 
             this.messages.set(decrypted);

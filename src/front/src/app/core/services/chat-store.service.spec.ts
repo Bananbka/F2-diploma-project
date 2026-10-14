@@ -238,6 +238,45 @@ describe('ChatStoreService', () => {
         });
     });
 
+    describe('openChat', () => {
+        /**
+         * The fix this guards: `openChat` used to let `loadMessages` fetch this chat's keys a
+         * second time, immediately after `ensureEncryptionEnabled` had already fetched them. For a
+         * non-channel chat, the `ChatKeys` returned by `ensureEncryptionEnabled` (here, via the
+         * mocked `cryptoApi.getChatKeys`) must be threaded straight through as `loadMessages`'
+         * fourth argument instead of being dropped.
+         */
+        it('passes the ChatKeys fetched for this chat through to loadMessages as the 4th argument', async () => {
+            const chatApi = TestBed.inject(ChatApiService) as jasmine.SpyObj<ChatApiService>;
+            const cryptoApi = TestBed.inject(CryptoApiService) as jasmine.SpyObj<CryptoApiService>;
+            const messages = TestBed.inject(MessageService) as jasmine.SpyObj<MessageService>;
+
+            const keys: ChatKeys = {
+                crypto_mode: 'sender_keys_v1',
+                history_visibility: 'joined',
+                current_epoch: 1,
+                my_join_epoch: 1,
+                epochs: [],
+                distributions: [],
+            };
+
+            chatApi.getChat.and.returnValue(of(chat()));
+            cryptoApi.getChatKeys.and.returnValue(of(keys));
+            chatApi.getPinnedMessages.and.returnValue(of([]));
+            chatApi.getReadState.and.returnValue(of([]));
+            messages.loadMessages.and.resolveTo({ raw: [], messages: [] });
+
+            store.chats.set([chat()]);
+            store.activeChatId.set(CHAT);
+
+            // Flushes the microtask queue (and the effect's scheduling) so openChat's whole async
+            // chain — hydrateChat, ensureEncryptionEnabled, loadMessages — has actually run.
+            await new Promise((resolve) => setTimeout(resolve, 0));
+
+            expect(messages.loadMessages).toHaveBeenCalledWith(CHAT, 50, undefined, keys);
+        });
+    });
+
     describe('editMessage', () => {
         it('threads the caller-supplied attachment list through to MessageService.editText', async () => {
             const messages = TestBed.inject(MessageService) as jasmine.SpyObj<MessageService>;
