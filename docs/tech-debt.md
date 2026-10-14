@@ -225,3 +225,27 @@ of issuing its own `http.get` per attachment. Rate-limited server side
 per-attachment `error` state rather than crashing — it does not currently auto-retry later (no
 backoff, unlike the `no_key` grace-period handling elsewhere in `message-bubble`), which is worth a
 small follow-up if it turns out to matter in practice.
+
+---
+
+## 9. Noted for future work (not started)
+
+Raised by the user on 2026-10-14; recorded here rather than acted on immediately.
+
+- **Production-readiness architecture review.** The current setup (single `api`/`frontend`
+  instance each, `uvicorn --reload`, no TLS, no CI, no observability stack) is a dev/diploma
+  configuration, not a deployable one. Needs a real pass at what an actual open-source project in
+  this space would run: a proper ASGI process manager instead of bare `--reload` uvicorn, TLS
+  termination (see §1), structured metrics/tracing, CI (lint/test/build on push), dependency/image
+  scanning, and a documented deployment target — not just incremental fixes to the dev compose
+  file like the gateway split or RustFS migration already done in §7 and this session.
+- **No chat-view side panel for emoji/stickers.** Telegram-style: a panel on the right side of the
+  conversation (or a slide-over) exposing the emoji picker and sticker tray together, rather than
+  today's composer-trigger-opens-a-popover pattern (`shared/ui/emoji-picker/`,
+  `features/chat/stickers/sticker-picker/`). Not scoped or designed yet.
+- **Chat list shows a bare username/title, not a message preview, in some path(s) the user has
+  seen.** `chat-sidebar.component.ts`/`.html` already has a `preview(chat)` mechanism driven by
+  `chat.last_message` (readable/sealed states, used for the list's timestamp too), so this may be a
+  narrower gap than "entirely missing" — worth actually tracing which case(s) still fall back to a
+  bare username before scoping a fix, rather than assuming the whole feature needs to be built from
+  scratch.
