@@ -9,6 +9,7 @@ from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
 from app.domains.chats.models import Chat
+from app.domains.stickers.models import Sticker
 from app.domains.users.models import User
 from app.infrastructure.minio import minio_manager
 
@@ -102,7 +103,45 @@ async def cleanup_minio_avatar_orphans():
     print(f"MINIO GARBAGE COLLECTOR: FINISHED AVATAR BUCKET. DELETED {deleted_count} ORPHANS")
 
 
+async def cleanup_minio_sticker_orphans():
+    """Sweep the sticker bucket for objects no longer referenced by any `Sticker` row.
+
+    A sticker image uploaded via `POST /files/upload?category=sticker` that is never followed by
+    a successful `POST /packs/{pack_id}/stickers` call (abandoned upload, failed request, user
+    navigates away mid-creation) has no deletion path otherwise — unlike a sticker that *did* get
+    attached to a pack and later explicitly deleted, which `sticker_pack_service`/`sticker_service`
+    already deletes synchronously. This sweep is the safety net for the former, mirroring the
+    avatar sweep above.
+    """
+    print("MINIO GARBAGE COLLECTOR: START STICKER CLEANUP")
+
+    # Short-lived engine created fresh every beat tick — no need for a pooled connection.
+    engine = create_async_engine(settings.DATABASE_URL, poolclass=NullPool)
+    Session = async_sessionmaker(bind=engine, expire_on_commit=False)
+
+    active_keys: set[str] = set()
+    try:
+        async with Session() as db:
+            urls = (
+                (await db.execute(select(Sticker.image_url).where(Sticker.image_url.is_not(None))))
+                .scalars()
+                .all()
+            )
+            for url in urls:
+                if url:
+                    active_keys.add(url.split("/")[-1])
+    finally:
+        await engine.dispose()
+
+    print(f"MINIO GARBAGE COLLECTOR: FOUND {len(active_keys)} ACTIVE STICKER KEYS")
+
+    deleted_count = await _sweep_bucket(settings.MINIO_STICKER_BUCKET, active_keys)
+
+    print(f"MINIO GARBAGE COLLECTOR: FINISHED STICKER BUCKET. DELETED {deleted_count} ORPHANS")
+
+
 @shared_task
 def cleanup_minio_orphans_task():
     asyncio.run(cleanup_minio_orphans())
     asyncio.run(cleanup_minio_avatar_orphans())
+    asyncio.run(cleanup_minio_sticker_orphans())
