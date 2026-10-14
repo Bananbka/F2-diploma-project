@@ -16,9 +16,8 @@
                 [attr.aria-selected]="activeCategory() === i"
                 [title]="category.label"
                 (click)="selectCategory(i)"
-            >
-                {{ category.emoji[0] }}
-            </button>
+                [innerHTML]="category.emoji[0] | twemoji"
+            ></button>
         }
     </div>
 
@@ -29,9 +28,8 @@
                 class="emoji"
                 [attr.aria-label]="emoji"
                 (click)="choose(emoji)"
-            >
-                {{ emoji }}
-            </button>
+                [innerHTML]="emoji | twemoji"
+            ></button>
         }
     </div>
 </div>

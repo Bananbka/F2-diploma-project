@@ -7,6 +7,7 @@ import { Sticker, StickerPack, StickerPackSummary } from '../../../../core/model
 import { ProfileApiService } from '../../../../core/services/profile-api.service';
 import { SessionService } from '../../../../core/services/session.service';
 import { StickerApiService } from '../../../../core/services/sticker-api.service';
+import { TwemojiPipe } from '../../../../shared/emoji/twemoji.pipe';
 import { EmojiPickerComponent } from '../../../../shared/ui/emoji-picker/emoji-picker.component';
 
 /** Server-enforced caps, mirrored here only for UX — the backend is the real enforcer. */
@@ -23,7 +24,7 @@ const MAX_STICKERS_PER_PACK = 120;
  */
 @Component({
     selector: 'app-sticker-pack-manager',
-    imports: [LucideAngularModule, EmojiPickerComponent],
+    imports: [LucideAngularModule, EmojiPickerComponent, TwemojiPipe],
     templateUrl: './sticker-pack-manager.component.html',
     styleUrl: './sticker-pack-manager.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,

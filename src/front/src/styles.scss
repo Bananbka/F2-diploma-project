@@ -142,6 +142,24 @@ lucide-icon {
     }
 }
 
+/*
+ * Self-hosted Twemoji, swapped in for a plain-text emoji glyph by `TwemojiPipe` /
+ * `twemojifyHtml()` (see `shared/emoji/`) so every user sees the same artwork regardless of
+ * their OS's native emoji font. Sized in `em` so it tracks the font-size of whatever text it
+ * sits inside — a reaction pill, a message bubble, a sticker's emoji tag — rather than needing a
+ * per-component override, and nudged up slightly so it reads at the same visual weight as the
+ * glyph it replaced instead of looking undersized next to surrounding text.
+ *
+ * Global rather than scoped: it is rendered via `[innerHTML]` as a child of whichever component's
+ * template used the pipe, the same reason `lucide-icon`'s svg sizing above is global too.
+ */
+.twemoji {
+    display: inline-block;
+    width: 1.25em;
+    height: 1.25em;
+    vertical-align: -0.2em;
+}
+
 .mono {
     font-family: var(--font-mono);
 }

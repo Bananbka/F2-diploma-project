@@ -50,7 +50,10 @@
                 (click)="jumpRequested.emit(quoted.id)"
             >
                 <span class="quote-author">{{ quotedAuthor() }}</span>
-                <span class="quote-text">{{ quoted.text ?? 'Unreadable message' }}</span>
+                <span
+                    class="quote-text"
+                    [innerHTML]="quoted.text ?? 'Unreadable message' | twemoji"
+                ></span>
             </button>
         } @else {
             <!-- Not a button: the quoted message is not loaded, so there is nowhere to jump to.
@@ -86,7 +89,10 @@
         <div class="content">
             @if (!isStickerOnly()) {
                 @if (message().text !== null) {
-                    <p class="text">{{ message().text }}</p>
+                    <p
+                        class="text"
+                        [innerHTML]="message().text | twemoji"
+                    ></p>
                 } @else {
                     <p class="text is-placeholder">{{ view().placeholder }}</p>
                 }
@@ -274,7 +280,10 @@
                     [attr.aria-label]="group.emoji + ' reaction, ' + group.count"
                     (click)="onPillClick(group.emoji)"
                 >
-                    <span class="reaction-emoji">{{ group.emoji }}</span>
+                    <span
+                        class="reaction-emoji"
+                        [innerHTML]="group.emoji | twemoji"
+                    ></span>
                     <span class="reaction-count">{{ group.count }}</span>
                 </button>
             }
@@ -303,9 +312,8 @@
                                     role="menuitem"
                                     class="picker-emoji"
                                     (click)="pickReaction(emoji)"
-                                >
-                                    {{ emoji }}
-                                </button>
+                                    [innerHTML]="emoji | twemoji"
+                                ></button>
                             }
                             <input
                                 type="text"

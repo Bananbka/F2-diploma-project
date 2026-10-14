@@ -1,5 +1,6 @@
 import { ChangeDetectionStrategy, Component, DestroyRef, ElementRef, inject, output, signal } from '@angular/core';
 
+import { TwemojiPipe } from '../../emoji/twemoji.pipe';
 import { EMOJI_CATEGORIES } from './emoji-data';
 
 /**
@@ -18,7 +19,7 @@ import { EMOJI_CATEGORIES } from './emoji-data';
  */
 @Component({
     selector: 'app-emoji-picker',
-    imports: [],
+    imports: [TwemojiPipe],
     templateUrl: './emoji-picker.component.html',
     styleUrl: './emoji-picker.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,

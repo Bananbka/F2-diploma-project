@@ -10,7 +10,10 @@
     "lint": "eslint src",
     "lint:fix": "eslint src --fix",
     "format": "prettier --write \"src/**/*.{ts,html,scss,json}\"",
-    "interop": "node scripts/run-interop.mjs"
+    "interop": "node scripts/run-interop.mjs",
+    "generate-assets": "node scripts/copy-emoji.mjs && node scripts/fetch-fonts.mjs",
+    "postinstall": "npm run generate-assets",
+    "prebuild": "npm run generate-assets"
   },
   "private": true,
   "dependencies": {
@@ -24,6 +27,7 @@
     "@angular/router": "^19.2.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0",
+    "@twemoji/api": "^17.0.3",
     "lucide-angular": "^0.577.0",
     "qrcode": "^1.5.4",
     "rxjs": "~7.8.0",
@@ -36,6 +40,7 @@
     "@angular-eslint/eslint-plugin": "^19.8.1",
     "@angular/cli": "^19.2.27",
     "@angular/compiler-cli": "^19.2.0",
+    "@twemoji/svg": "^15.0.0",
     "@types/jasmine": "~5.1.0",
     "@types/qrcode": "^1.5.6",
     "eslint": "^9.39.5",

@@ -46,6 +46,7 @@ import { MessageReadReceipt } from '../../../core/services/chat-store.service';
 import { DirectoryService } from '../../../core/services/directory.service';
 import { DecryptedMessage, DecryptStatus } from '../../../core/services/message.service';
 import { VisibleOnceDirective } from '../../../shared/directives/visible-once.directive';
+import { TwemojiPipe } from '../../../shared/emoji/twemoji.pipe';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
 import { messageTime } from '../../../shared/utils/display';
 
@@ -146,7 +147,7 @@ const STATUS_VIEWS: Record<DecryptStatus, StatusView> = {
 
 @Component({
     selector: 'app-message-bubble',
-    imports: [LucideAngularModule, AvatarComponent, VisibleOnceDirective],
+    imports: [LucideAngularModule, AvatarComponent, VisibleOnceDirective, TwemojiPipe],
     templateUrl: './message-bubble.component.html',
     styleUrl: './message-bubble.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,

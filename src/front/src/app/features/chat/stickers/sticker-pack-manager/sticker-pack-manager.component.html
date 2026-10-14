@@ -119,7 +119,10 @@
                                                 [src]="sticker.image_url"
                                                 [alt]="sticker.emoji"
                                             />
-                                            <span class="sticker-emoji">{{ sticker.emoji }}</span>
+                                            <span
+                                                class="sticker-emoji"
+                                                [innerHTML]="sticker.emoji | twemoji"
+                                            ></span>
                                             <button
                                                 type="button"
                                                 class="sticker-action"
@@ -167,9 +170,8 @@
                                                 [attr.aria-expanded]="emojiPickerOpen()"
                                                 aria-label="Choose an emoji tag for the next sticker"
                                                 (click)="toggleEmojiPicker()"
-                                            >
-                                                {{ uploadEmoji() || '🙂' }}
-                                            </button>
+                                                [innerHTML]="uploadEmoji() || '🙂' | twemoji"
+                                            ></button>
 
                                             @if (emojiPickerOpen()) {
                                                 <app-emoji-picker
