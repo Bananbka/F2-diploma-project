@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends, Path
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.exceptions import AppException
 from app.core.responses import SuccessResponse
 from app.domains.users.dependencies import get_current_user
@@ -8,6 +10,7 @@ from app.domains.users.models import User
 from app.domains.users.schemas.profile_schemas import ProfileRequestSchema
 from app.domains.users.schemas.user_schemas import UserResponse
 from app.domains.users.services.profile_service import is_username_taken
+from app.infrastructure.minio import minio_manager
 from app.infrastructure.postgres import get_db
 
 router = APIRouter(prefix="/profile", tags=["Profile"])
@@ -49,11 +52,26 @@ async def change_me(
             "Display name cannot be cleared; omit the field instead.",
         )
 
+    old_avatar_url = user.avatar_url if "avatar_url" in update_data else None
+
     for key, value in update_data.items():
         setattr(user, key, value)
 
     await db.commit()
     await db.refresh(user)
+
+    # Only reap the old object once the replacement has actually landed — deleting it first and
+    # having the commit fail would leave the profile pointing at an already-deleted avatar.
+    #
+    # Re-check against the database immediately before deleting: a concurrent PATCH could have
+    # swapped the avatar back to old_avatar_url between our commit above and this point (e.g. A
+    # changes X->Y while B concurrently changes Y->X). Comparing against the in-memory `user`
+    # object here would still be comparing against the stale value captured before commit, so we
+    # issue a fresh column-level SELECT rather than trusting the ORM identity map.
+    if old_avatar_url is not None and old_avatar_url != user.avatar_url:
+        current_avatar_url = await db.scalar(select(User.avatar_url).where(User.id == user.id))
+        if current_avatar_url != old_avatar_url:
+            await minio_manager.delete_file(old_avatar_url, settings.MINIO_AVATAR_BUCKET)
 
     return SuccessResponse(data=user)
 

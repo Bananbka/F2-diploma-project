@@ -131,6 +131,23 @@
     </section>
 
     <section class="group">
+        <p class="section">Stickers</p>
+        <button
+            type="button"
+            class="tile"
+            (click)="goToStickers()"
+        >
+            <span class="tile-icon">
+                <lucide-icon [img]="stickerIcon" />
+            </span>
+            <span class="tile-text">
+                <span class="tile-title">Manage sticker packs</span>
+                <span class="tile-sub">Create packs, add stickers, and browse public ones to subscribe to.</span>
+            </span>
+        </button>
+    </section>
+
+    <section class="group">
         <p class="section">Your devices</p>
 
         @if (devicesLoading()) {

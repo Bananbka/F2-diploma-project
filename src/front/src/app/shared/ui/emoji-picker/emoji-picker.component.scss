@@ -1,0 +1,69 @@
+@use 'ui';
+
+:host {
+    position: absolute;
+    bottom: calc(100% + 0.5rem);
+    left: 0;
+    z-index: 20;
+}
+
+.picker {
+    display: flex;
+    flex-direction: column;
+    width: 18rem;
+    max-height: 18rem;
+    padding: 0.625rem;
+    box-shadow: 0 4px 16px rgb(0 0 0 / 40%);
+
+    @include ui.panel;
+}
+
+.tabs {
+    display: flex;
+    gap: 0.25rem;
+    overflow-x: auto;
+    padding-bottom: 0.5rem;
+}
+
+.tab {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
+    background: var(--surface-raised);
+    border: 1px solid transparent;
+    border-radius: var(--radius-lg);
+    font-size: 1rem;
+
+    &.is-active {
+        border-color: rgb(163 88 249 / 60%);
+    }
+}
+
+.grid {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 0.125rem;
+    overflow-y: auto;
+}
+
+.emoji {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    aspect-ratio: 1;
+    background: none;
+    border: none;
+    border-radius: var(--radius-lg);
+    font-size: 1.125rem;
+    line-height: 1;
+    transition: background-color 0.12s ease;
+
+    &:hover,
+    &:focus-visible {
+        background: rgb(163 88 249 / 12%);
+        outline: none;
+    }
+}

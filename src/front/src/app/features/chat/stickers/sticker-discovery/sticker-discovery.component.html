@@ -1,0 +1,74 @@
+<header class="head">
+    <button
+        type="button"
+        class="back"
+        aria-label="Back"
+        (click)="close()"
+    >
+        <lucide-icon [img]="arrowLeftIcon" />
+    </button>
+    <h2>Discover sticker packs</h2>
+</header>
+
+<div class="body">
+    <div class="search">
+        <lucide-icon [img]="searchIcon" />
+        <input
+            type="search"
+            placeholder="Search public packs…"
+            aria-label="Search public sticker packs"
+            [value]="query()"
+            (input)="onQuery($any($event.target).value)"
+        />
+    </div>
+
+    @if (loading()) {
+        <p class="muted">Searching…</p>
+    } @else if (results().length === 0) {
+        <div class="empty">
+            <lucide-icon [img]="emptyIcon" />
+            <p>No public packs match.</p>
+        </div>
+    } @else {
+        <ul class="packs">
+            @for (pack of results(); track pack.id) {
+                <li class="pack-row">
+                    @if (pack.cover_image_url) {
+                        <img
+                            class="pack-cover"
+                            [src]="pack.cover_image_url"
+                            [alt]="pack.title"
+                        />
+                    } @else {
+                        <span class="pack-cover is-empty"></span>
+                    }
+                    <span class="pack-text">
+                        <span class="pack-title">{{ pack.title }}</span>
+                        <span class="pack-sub">
+                            {{ pack.sticker_count }} {{ pack.sticker_count === 1 ? 'sticker' : 'stickers' }}
+                        </span>
+                    </span>
+                    <button
+                        type="button"
+                        class="subscribe-btn"
+                        [class.is-on]="isSubscribed(pack)"
+                        [disabled]="busyId() === pack.id"
+                        (click)="toggleSubscribe(pack)"
+                    >
+                        <lucide-icon [img]="isSubscribed(pack) ? checkIcon : plusIcon" />
+                        {{ isSubscribed(pack) ? 'Added' : 'Add' }}
+                    </button>
+                </li>
+            }
+        </ul>
+    }
+
+    @if (error()) {
+        <p
+            class="error"
+            role="alert"
+        >
+            {{ error() }}
+        </p>
+    }
+</div>

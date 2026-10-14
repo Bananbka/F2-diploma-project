@@ -23,6 +23,7 @@ from app.domains.chats.routers.invite_link_routes import (
 )
 from app.domains.crypto.routers.crypto_routes import router as crypto_router
 from app.domains.files.routers.file_routes import router as file_router
+from app.domains.stickers.routers.sticker_routes import router as sticker_router
 from app.domains.messages.routes.messages_routes import router as messages_router
 from app.domains.messages.routes.ws_router import ws_router
 
@@ -98,3 +99,4 @@ app.include_router(messages_router)
 app.include_router(ws_router)
 app.include_router(file_router)
 app.include_router(crypto_router)
+app.include_router(sticker_router)

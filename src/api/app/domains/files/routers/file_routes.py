@@ -1,3 +1,4 @@
+import base64
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, Response, UploadFile
@@ -8,7 +9,12 @@ from app.core.config import settings
 from app.core.exceptions import AppException
 from app.core.rate_limit import enforce_rate_limit
 from app.core.responses import SuccessResponse
-from app.domains.files.schemas.file_schemas import FileCategory
+from app.domains.files.schemas.file_schemas import (
+    AttachmentFetchStatus,
+    BatchAttachmentRequest,
+    BatchAttachmentResult,
+    FileCategory,
+)
 from app.domains.messages.services import messages_service
 from app.domains.users.dependencies import get_current_user
 from app.domains.users.models import User
@@ -34,6 +40,12 @@ ALLOWED_AVATAR_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 
 UPLOAD_WINDOW = 3600
 UPLOAD_LIMIT = 100
+
+# Looser than the upload limit by design: a batch call only reads existing objects (no write, no
+# size cap to enforce), and opening several chats in a session can plausibly fire one batch call
+# per chat, each covering up to MAX_BATCH_ATTACHMENT_KEYS objects.
+BATCH_WINDOW = 3600
+BATCH_LIMIT = 300
 
 
 async def _read_bounded(file: UploadFile, limit: int) -> bytes:
@@ -70,29 +82,37 @@ async def upload_file(
     )
 
     is_avatar = category == FileCategory.AVATAR
-    target_bucket = (
-        settings.MINIO_AVATAR_BUCKET if is_avatar else settings.MINIO_MESSAGE_BUCKET
-    )
+    is_sticker = category == FileCategory.STICKER
+    # Stickers get the same validation treatment as avatars: both are public, directly
+    # renderable images served inline, so both are checked against the same allowlist and cap.
+    is_image_upload = is_avatar or is_sticker
+
+    if is_avatar:
+        target_bucket = settings.MINIO_AVATAR_BUCKET
+    elif is_sticker:
+        target_bucket = settings.MINIO_STICKER_BUCKET
+    else:
+        target_bucket = settings.MINIO_MESSAGE_BUCKET
 
     filename = file.filename or "encrypted_file.enc"
     content_type = file.content_type or "application/octet-stream"
 
-    if is_avatar and content_type not in ALLOWED_AVATAR_TYPES:
+    if is_image_upload and content_type not in ALLOWED_AVATAR_TYPES:
         raise AppException(
             415,
             "UNSUPPORTED_MEDIA_TYPE",
-            "Avatars must be a JPEG, PNG, WebP or GIF image.",
+            "Avatars and stickers must be a JPEG, PNG, WebP or GIF image.",
         )
 
     file_bytes = await _read_bounded(
-        file, MAX_AVATAR_SIZE if is_avatar else MAX_FILE_SIZE
+        file, MAX_AVATAR_SIZE if is_image_upload else MAX_FILE_SIZE
     )
     file_size = len(file_bytes)
 
     if file_size == 0:
         raise AppException(400, "EMPTY_FILE", "The uploaded file is empty.")
 
-    if is_avatar and not _looks_like_image(file_bytes):
+    if is_image_upload and not _looks_like_image(file_bytes):
         # The declared Content-Type is client-supplied. Checking the leading bytes stops a file
         # that merely claims to be a PNG from being served as one from a public bucket.
         raise AppException(
@@ -105,8 +125,10 @@ async def upload_file(
         content_type=content_type,
         bucket_name=target_bucket,
         # Message attachments are ciphertext and are served through this API, never inline.
-        force_octet_stream=not is_avatar,
+        # Avatars and stickers are public, directly renderable images, so neither is forced.
+        force_octet_stream=not is_image_upload,
         owner_id=str(user.id),
+        public=is_image_upload,
     )
 
     attachment_data = {
@@ -183,3 +205,90 @@ async def download_attachment(
             "Cache-Control": "private, max-age=300",
         },
     )
+
+
+@router.post(
+    "/attachments/batch", response_model=SuccessResponse[list[BatchAttachmentResult]]
+)
+async def download_attachments_batch(
+    body: BatchAttachmentRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    mongo_db=Depends(get_mongo_db),
+    redis: Redis = Depends(get_redis),
+):
+    """Fetch several message-bucket attachments from one chat in a single round trip.
+
+    Authorization is the same two checks as the single-object endpoint above, just run once for
+    the whole batch instead of once per key: chat membership, then — per key — whether the object
+    is actually referenced by a message in *this* chat. A key that fails the second check is never
+    read from the object store at all, exactly like today; this must not become a looser gate just
+    because it now serves several keys per call.
+    """
+    await enforce_rate_limit(
+        redis,
+        scope="attachments_batch",
+        identifier=str(user.id),
+        limit=BATCH_LIMIT,
+        window_seconds=BATCH_WINDOW,
+        message="Too many attachment batch requests. Please wait and try again.",
+    )
+
+    chat_id = body.chat_id
+    await messages_service.get_chat_or_403(db, chat_id, user.id)
+
+    key_to_url = {
+        key: f"{settings.MINIO_URL}/{settings.MINIO_MESSAGE_BUCKET}/{key}"
+        for key in body.object_keys
+    }
+    urls = list(key_to_url.values())
+
+    # One Mongo query for the whole batch, mirroring the single-endpoint's authorization logic:
+    # an object must be referenced by some message in *this* chat, or it is not served — keys are
+    # a flat UUID namespace shared across every conversation, so chat membership alone is not
+    # enough. `ix_chat_attachment_url` on (chat_id, attachments.url) covers this query.
+    referenced_urls: set[str] = set()
+    cursor = mongo_db["messages"].find(
+        {"chat_id": chat_id, "attachments.url": {"$in": urls}},
+        {"attachments.url": 1},
+    )
+    url_set = set(urls)
+    async for doc in cursor:
+        for attachment in doc.get("attachments") or []:
+            attachment_url = attachment.get("url")
+            if attachment_url in url_set:
+                referenced_urls.add(attachment_url)
+
+    results: list[BatchAttachmentResult] = []
+    for key, url in key_to_url.items():
+        if url not in referenced_urls:
+            results.append(
+                BatchAttachmentResult(
+                    object_key=key, status=AttachmentFetchStatus.NOT_FOUND
+                )
+            )
+            continue
+
+        try:
+            file_bytes, content_type, length = await minio_manager.stream_object(
+                key, settings.MINIO_MESSAGE_BUCKET
+            )
+        except Exception:
+            # Mirrors the single-endpoint's ATTACHMENT_GONE: the row survives but the object does
+            # not, most often because the 24h GC reaped a blob whose message was never sent.
+            results.append(
+                BatchAttachmentResult(object_key=key, status=AttachmentFetchStatus.GONE)
+            )
+            continue
+
+        results.append(
+            BatchAttachmentResult(
+                object_key=key,
+                status=AttachmentFetchStatus.OK,
+                content_type=content_type,
+                content_base64=base64.b64encode(file_bytes).decode("ascii"),
+                content_length=length,
+            )
+        )
+
+    return SuccessResponse(data=results)

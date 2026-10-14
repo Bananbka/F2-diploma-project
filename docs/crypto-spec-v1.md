@@ -310,6 +310,52 @@ The original ciphertext is destroyed, so there is no cryptographic edit history.
 | `legacy_rsa` | private chat under the superseded RSA scheme |
 | `legacy_plaintext` | group/channel message from before encryption |
 
+### 4.5 Attachment encryption
+
+Attachments (photos, videos, gifs, voice notes) are encrypted entirely client-side, on top of the
+mechanisms above rather than as a new one. For each attachment the client generates a random
+32-byte AES-256-GCM key and a random 12-byte nonce, and uploads `nonce || ciphertext` as an opaque
+blob through the existing `POST /files/upload` — the server stores and serves these bytes exactly
+as it does any other attachment, with no awareness that they are encrypted.
+
+The per-attachment key is not a new wire primitive: it travels to recipients inside the
+`envelope`'s already-sealed, authenticated plaintext, alongside the message text, the same way the
+message body itself does. This needs **no new domain separator** and **no change** to the
+envelope, ratchet or grant mechanisms defined elsewhere in this document — an attachment key is
+just more plaintext under the same seal.
+
+Stickers are the one attachment kind exempt from this — they're public, unencrypted images served
+from the sticker-packs bucket (see `_authorize_sticker_attachment` in `messages_service.py`), so
+they carry no key and never appear in `attachmentKeys`.
+
+Consequently there is no Python reference counterpart for this, unlike every other primitive in
+this spec: the server never parses or touches this plaintext structure, so there is nothing on the
+server side that needs to be kept byte-identical to the client, and nothing for `npm run interop`
+to check here.
+
+Only the `{url, key}` pair travels inside the sealed plaintext above; the rest of an attachment's
+metadata (`name`, `size`, `content_type`, `kind`, `duration_ms`, `width`, `height`, `waveform`) is
+carried on the message document itself and is therefore server-asserted, not authenticated by the
+envelope. A malicious server could in principle relabel a displayed name, size or kind without the
+client detecting it — but it cannot swap the actual ciphertext content undetected, since GCM fails
+closed on any key/ciphertext mismatch. This is a metadata-display-trust caveat, not a gap in
+content confidentiality or integrity.
+
+Editing a message's attachment list and the envelope's `attachmentKeys` are two separate pieces of
+state that must be updated **together**, in the same edit. The Mongo-stored attachment metadata
+(`url`, `name`, `kind`, ...) is one thing; the per-attachment decryption key carried inside the
+sealed envelope's authenticated plaintext is another, and nothing on the server links the two or
+checks they stay consistent — it cannot, since it never sees the plaintext. A client that adds an
+attachment to `PUT /messages/{id}` without also re-sealing an envelope whose plaintext carries a
+matching key for it leaves the recipient with an attachment listed but no way to decrypt it: the
+key never reaches the wire except inside that authenticated plaintext, so there is nowhere else for
+it to come from. `MessageService.editText` maintains this by construction: it builds the fresh
+plaintext's `attachmentKeys` from the same attachment list it sends to `PUT /messages/{id}` in the
+same call, and refuses to proceed if any kept attachment is missing its decryption key, rather than
+silently persisting an unreadable attachment. This check correctly exempts sticker-kind attachments
+— they never carried a key to begin with, so requiring one would make editing any message that
+happens to carry a sticker impossible, including a pure text-only edit.
+
 ---
 
 ## 5. Key epochs and grants

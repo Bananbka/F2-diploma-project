@@ -133,6 +133,16 @@ export class ChatApiService {
     }
 
     /**
+     * The object key a stored attachment URL points at.
+     *
+     * Shared by `attachmentUrl` (single-fetch) and `AttachmentBatchService` (batched fetch), so
+     * the two transports never disagree about how a key is derived from the stored URL.
+     */
+    attachmentObjectKey(storedUrl: string): string {
+        return storedUrl.split('/').pop() ?? '';
+    }
+
+    /**
      * Where to fetch an attachment.
      *
      * Not the URL the upload returned: that points straight at MinIO, and the message bucket is
@@ -140,8 +150,12 @@ export class ChatApiService {
      * re-addressed through it.
      */
     attachmentUrl(chatId: string, storedUrl: string): string {
-        const objectKey = storedUrl.split('/').pop() ?? '';
-        return `${this.configService.apiUrl}files/attachments/${chatId}/${objectKey}`;
+        return `${this.configService.apiUrl}files/attachments/${chatId}/${this.attachmentObjectKey(storedUrl)}`;
+    }
+
+    /** Where the batched attachment-fetch endpoint lives — see `AttachmentBatchService`. */
+    attachmentsBatchUrl(): string {
+        return `${this.configService.apiUrl}files/attachments/batch`;
     }
 
     /** Send a signed broadcast post. Channels are authenticated but not confidential. */
@@ -192,10 +206,28 @@ export class ChatApiService {
         return this.http.delete<SuccessResponse<unknown>>(`${this.chatsUrl}${chatId}`).pipe(map((r) => r.data));
     }
 
-    /** Edit a message. The envelope must carry a FRESH chain index; reuse is rejected. */
-    editMessage(messageId: string, envelope: MessageEnvelope): Observable<MessageResponse> {
+    /**
+     * Edit a message. The envelope must carry a FRESH chain index; reuse is rejected.
+     *
+     * `attachments` follows the same omit/replace convention as `PATCH /chat-folder/{id}`:
+     * `undefined` (the parameter not passed at all) omits the key from the body entirely, which
+     * the server reads as "leave the stored attachment list untouched" — the common, text-only
+     * edit. Passing `[]` explicitly clears every attachment. Callers must have already stripped
+     * each attachment's `decryptionKey` (see `stripDecryptionKeys` in `message.service.ts`) — that
+     * field is in-memory-only and must never reach the wire.
+     */
+    editMessage(
+        messageId: string,
+        envelope: MessageEnvelope,
+        attachments?: MessageAttachment[]
+    ): Observable<MessageResponse> {
+        const body: { envelope: MessageEnvelope; attachments?: MessageAttachment[] } = { envelope };
+        if (attachments !== undefined) {
+            body.attachments = attachments;
+        }
+
         return this.http
-            .put<SuccessResponse<MessageResponse>>(`${this.messagesUrl}${messageId}`, { envelope })
+            .put<SuccessResponse<MessageResponse>>(`${this.messagesUrl}${messageId}`, body)
             .pipe(map((r) => r.data));
     }
 

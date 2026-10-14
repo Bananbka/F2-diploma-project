@@ -57,3 +57,10 @@ Angular CLI does not come with an end-to-end testing framework by default. You c
 ## Additional Resources
 
 For more information on using the Angular CLI, including detailed command references, visit the [Angular CLI Overview and Command Reference](https://angular.dev/tools/cli) page.
+
+## Third-party assets
+
+Emoji graphics are [Twemoji](https://github.com/jdecked/twemoji) by Twitter, Inc and other
+contributors, licensed under [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/). The SVGs
+are copied from the `@twemoji/svg` npm package into `public/assets/emoji/` by
+`scripts/copy-emoji.mjs` and served from this app's own origin — see that script for why.

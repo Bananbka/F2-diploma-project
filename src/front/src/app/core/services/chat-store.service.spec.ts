@@ -3,7 +3,7 @@ import { TestBed } from '@angular/core/testing';
 import { of, Subject, throwError } from 'rxjs';
 
 import { Chat } from '../models/chat.model';
-import { ChatKeys, MessageResponse } from '../models/crypto.model';
+import { ChatKeys, MessageAttachment, MessageResponse } from '../models/crypto.model';
 import { ChatApiService } from './chat-api.service';
 import { ChatStoreService } from './chat-store.service';
 import { CryptoApiService } from './crypto-api.service';
@@ -109,6 +109,7 @@ describe('ChatStoreService', () => {
                         'sendChannelPost',
                         'recordOutgoing',
                         'patchMeta',
+                        'editText',
                     ]),
                 },
                 {
@@ -234,6 +235,80 @@ describe('ChatStoreService', () => {
                 // queue implying it will go out later.
                 expect(store.pending().length).withContext('no pending row may survive').toBe(0);
             }
+        });
+    });
+
+    describe('openChat', () => {
+        /**
+         * The fix this guards: `openChat` used to let `loadMessages` fetch this chat's keys a
+         * second time, immediately after `ensureEncryptionEnabled` had already fetched them. For a
+         * non-channel chat, the `ChatKeys` returned by `ensureEncryptionEnabled` (here, via the
+         * mocked `cryptoApi.getChatKeys`) must be threaded straight through as `loadMessages`'
+         * fourth argument instead of being dropped.
+         */
+        it('passes the ChatKeys fetched for this chat through to loadMessages as the 4th argument', async () => {
+            const chatApi = TestBed.inject(ChatApiService) as jasmine.SpyObj<ChatApiService>;
+            const cryptoApi = TestBed.inject(CryptoApiService) as jasmine.SpyObj<CryptoApiService>;
+            const messages = TestBed.inject(MessageService) as jasmine.SpyObj<MessageService>;
+
+            const keys: ChatKeys = {
+                crypto_mode: 'sender_keys_v1',
+                history_visibility: 'joined',
+                current_epoch: 1,
+                my_join_epoch: 1,
+                epochs: [],
+                distributions: [],
+            };
+
+            chatApi.getChat.and.returnValue(of(chat()));
+            cryptoApi.getChatKeys.and.returnValue(of(keys));
+            chatApi.getPinnedMessages.and.returnValue(of([]));
+            chatApi.getReadState.and.returnValue(of([]));
+            messages.loadMessages.and.resolveTo({ raw: [], messages: [] });
+
+            store.chats.set([chat()]);
+            store.activeChatId.set(CHAT);
+
+            // Flushes the microtask queue (and the effect's scheduling) so openChat's whole async
+            // chain — hydrateChat, ensureEncryptionEnabled, loadMessages — has actually run.
+            await new Promise((resolve) => setTimeout(resolve, 0));
+
+            expect(messages.loadMessages).toHaveBeenCalledWith(CHAT, 50, undefined, keys);
+        });
+    });
+
+    describe('editMessage', () => {
+        it('threads the caller-supplied attachment list through to MessageService.editText', async () => {
+            const messages = TestBed.inject(MessageService) as jasmine.SpyObj<MessageService>;
+            const attachment: MessageAttachment = {
+                url: 'files/attachments/a/new.png',
+                name: 'new.png',
+                size: 10,
+                content_type: 'image/png',
+            };
+
+            store.chats.set([chat()]);
+            store.activeChatId.set(CHAT);
+            store.messages.set([decrypted('a', 'ok')]);
+            messages.editText.and.resolveTo({ ...decrypted('a', 'ok'), text: 'edited', attachments: [attachment] });
+
+            await store.editMessage('a', 'edited', [attachment]);
+
+            expect(messages.editText).toHaveBeenCalledWith(CHAT, 'a', 'edited', [attachment]);
+        });
+
+        it('falls back to the message’s existing attachments when none are supplied', async () => {
+            const messages = TestBed.inject(MessageService) as jasmine.SpyObj<MessageService>;
+            const existing = { ...decrypted('a', 'ok'), attachments: [] };
+
+            store.chats.set([chat()]);
+            store.activeChatId.set(CHAT);
+            store.messages.set([existing]);
+            messages.editText.and.resolveTo({ ...existing, text: 'edited' });
+
+            await store.editMessage('a', 'edited');
+
+            expect(messages.editText).toHaveBeenCalledWith(CHAT, 'a', 'edited', existing.attachments);
         });
     });
 

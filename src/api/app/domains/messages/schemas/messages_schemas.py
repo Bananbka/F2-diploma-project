@@ -1,6 +1,7 @@
 ﻿import datetime
 import enum
 import uuid
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
@@ -10,27 +11,69 @@ from app.core.config import settings
 class Attachment(BaseModel):
     """A message attachment.
 
-    `url` is validated to be a single object key inside the message bucket. Without this the
-    value is entirely client-controlled and flows into MinIO deletion in `delete_message`,
-    which would let a user delete arbitrary objects belonging to other users.
+    `url` is validated to be a single object key inside the message bucket, OR inside the
+    sticker bucket when `kind == 'sticker'` — a sticker is a public asset belonging to some pack,
+    never something "uploaded" into the message bucket by the sender. Without this the value is
+    entirely client-controlled and flows into MinIO deletion in `delete_message`, which would let
+    a user delete arbitrary objects belonging to other users.
+
+    `kind` and the matched bucket are cross-checked by `_check_kind_matches_bucket` below so the
+    two fields can never disagree: `kind == 'sticker'` with a message-bucket url (or vice versa)
+    was exactly how a sender could claim `kind: 'sticker'` to skip `_authorize_attachments`'s
+    ownership/visibility check while actually naming a private message-bucket object. The service
+    layer now also derives the sticker exemption from the URL itself rather than trusting `kind`,
+    but this keeps the two fields from being able to lie to each other in the first place.
     """
     url: str
     name: str = Field(..., max_length=255)
     size: int = Field(..., ge=0)
     content_type: str = Field(..., max_length=255)
 
+    # Media metadata, all client-supplied and optional — the server never inspects attachment
+    # bytes (they are opaque, client-encrypted blobs; see docs/crypto-spec-v1.md), so none of
+    # this is verified, only carried through for rendering.
+    kind: Literal['file', 'image', 'video', 'gif', 'audio', 'sticker'] = 'file'
+    duration_ms: int | None = Field(None, ge=0)
+    width: int | None = Field(None, ge=0)
+    height: int | None = Field(None, ge=0)
+    waveform: list[float] | None = Field(None, max_length=64)
+
     @field_validator('url')
     @classmethod
     def validate_url(cls, v: str) -> str:
-        prefix = f"{settings.MINIO_URL}/{settings.MINIO_MESSAGE_BUCKET}/"
-        if not v.startswith(prefix):
-            raise ValueError('Attachment url must point at the message attachments bucket.')
+        message_prefix = f"{settings.MINIO_URL}/{settings.MINIO_MESSAGE_BUCKET}/"
+        # Stickers are uploaded to a public bucket, so their stored url is built from
+        # MINIO_PUBLIC_URL (see MinioClient.upload_file), not the internal MINIO_URL used for the
+        # message bucket.
+        sticker_prefix = f"{settings.MINIO_PUBLIC_URL}/{settings.MINIO_STICKER_BUCKET}/"
 
-        object_key = v[len(prefix):]
-        if not object_key or "/" in object_key:
-            raise ValueError('Attachment url must reference a single object key.')
+        for prefix in (message_prefix, sticker_prefix):
+            if v.startswith(prefix):
+                object_key = v[len(prefix):]
+                if not object_key or "/" in object_key:
+                    raise ValueError('Attachment url must reference a single object key.')
+                return v
 
-        return v
+        raise ValueError(
+            'Attachment url must point at the message attachments bucket or the sticker bucket.'
+        )
+
+    @model_validator(mode="after")
+    def _check_kind_matches_bucket(self) -> "Attachment":
+        sticker_prefix = f"{settings.MINIO_PUBLIC_URL}/{settings.MINIO_STICKER_BUCKET}/"
+        is_sticker_bucket_url = self.url.startswith(sticker_prefix)
+        is_sticker_kind = self.kind == "sticker"
+
+        if is_sticker_kind and not is_sticker_bucket_url:
+            raise ValueError(
+                "An attachment with kind 'sticker' must point at the sticker bucket."
+            )
+        if is_sticker_bucket_url and not is_sticker_kind:
+            raise ValueError(
+                "An attachment pointing at the sticker bucket must have kind 'sticker'."
+            )
+
+        return self
 
 
 class ContentFormat(str, enum.Enum):
@@ -151,7 +194,7 @@ class MessageDocument(BaseModel):
     reply_to_message_id: str | None = None
     forwarded_from: ForwardOrigin | None = None
 
-    attachments: list[dict] | None = None
+    attachments: list[Attachment] | None = None
 
     reactions: list[Reaction] = Field(default_factory=list)
 
@@ -184,7 +227,7 @@ class MessageResponse(BaseModel):
     forwarded_from: ForwardOrigin | None = None
     created_at: datetime.datetime
 
-    attachments: list[dict] | None = None
+    attachments: list[Attachment] | None = None
 
     reactions: list[Reaction] = Field(default_factory=list)
 
@@ -250,6 +293,14 @@ class MessageUpdateRequest(BaseModel):
     """
     encrypted_content: str | None = None
     envelope: MessageEnvelope | None = None
+
+    # Omitted (field absent from the request body) means "leave the existing attachments alone".
+    # Explicitly supplying either `[]` or `null` means "remove every attachment" — the two are
+    # treated as the same request, since both are just ways of saying "no attachments", and unlike
+    # `PATCH /profile/me` there is no NOT-NULL column an empty list would violate. `update_message`
+    # distinguishes "omitted" from "explicitly supplied" via `"attachments" in
+    # message_in.model_fields_set`, not by this field's default alone.
+    attachments: list[Attachment] | None = None
 
     @model_validator(mode="after")
     def check_exactly_one_content(self):

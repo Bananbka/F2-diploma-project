@@ -11,7 +11,15 @@ COPY package*.json ./
 # binaries, and a lockfile generated on Windows does not record the Linux variants, so `npm ci`
 # fails here with "Missing: @esbuild/linux-x64 from lock file". Resolving fresh costs
 # reproducibility but is what actually builds on a mixed-OS team.
-RUN npm install && npm cache clean --force
+#
+# `--ignore-scripts`: this stage only has package*.json on disk yet (no `src/`, no `scripts/`),
+# so the `postinstall` hook (copy-emoji.mjs / fetch-fonts.mjs) would fail outright trying to
+# write into directories that don't exist here. The `build` stage's `COPY . .` below brings in
+# the full tree — including the already-committed `public/fonts`/`src/styles/_fonts.scss` and
+# emoji assets — and its `npm run build` auto-runs `prebuild`, which finds everything already
+# present and no-ops. The `development` stage's `npm install` (its CMD, not this RUN) runs again
+# at container start against the bind-mounted full source, so postinstall fires correctly there.
+RUN npm install --ignore-scripts && npm cache clean --force
 
 # ─── Stage: development ───────────────────────────────────────────────────────
 FROM deps AS development
@@ -34,9 +42,6 @@ FROM nginx:alpine AS production
 COPY --from=build /app/dist/messenger/browser/ /usr/share/nginx/html/
 
 COPY nginx.conf /etc/nginx/conf.d/default.conf
-# Included from default.conf, and from every location in it that sets a header of its own —
-# nginx `add_header` does not inherit into a block that declares any.
-COPY security-headers.conf /etc/nginx/security-headers.conf
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

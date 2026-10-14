@@ -2,7 +2,7 @@ import { DatePipe } from '@angular/common';
 import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
 import { AbstractControl, FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { Router } from '@angular/router';
-import { ArrowLeft, Camera, KeyRound, LucideAngularModule, RefreshCw } from 'lucide-angular';
+import { ArrowLeft, Camera, KeyRound, LucideAngularModule, RefreshCw, Sticker } from 'lucide-angular';
 import { firstValueFrom } from 'rxjs';
 
 import { CryptoApiService } from '../../../core/services/crypto-api.service';
@@ -69,6 +69,7 @@ export class ProfileComponent {
     readonly cameraIcon = Camera;
     readonly keyIcon = KeyRound;
     readonly rotateIcon = RefreshCw;
+    readonly stickerIcon = Sticker;
 
     readonly rotatingPrekey = signal(false);
     readonly prekeyRotated = signal(false);
@@ -151,6 +152,10 @@ export class ProfileComponent {
 
     async goToPassword(): Promise<void> {
         await this.router.navigate(['/settings/password']);
+    }
+
+    async goToStickers(): Promise<void> {
+        await this.router.navigate(['/stickers/manage']);
     }
 
     private async loadDevices(): Promise<void> {

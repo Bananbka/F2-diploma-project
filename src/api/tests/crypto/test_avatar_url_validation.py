@@ -12,7 +12,7 @@ from app.domains.chats.schemas.chat_schemas import (
 )
 from app.domains.users.schemas.profile_schemas import ProfileRequestSchema
 
-VALID = f"{settings.MINIO_URL}/{settings.MINIO_AVATAR_BUCKET}/some-object-key"
+VALID = f"{settings.MINIO_PUBLIC_URL}/{settings.MINIO_AVATAR_BUCKET}/some-object-key"
 
 
 @pytest.mark.parametrize(
@@ -44,8 +44,8 @@ def test_none_avatar_url_is_still_allowed(model, extra_required):
     [
         "https://evil.example.com/image.png",
         f"{settings.MINIO_URL}/{settings.MINIO_MESSAGE_BUCKET}/some-key",  # wrong bucket
-        f"{settings.MINIO_URL}/{settings.MINIO_AVATAR_BUCKET}/",  # empty object key
-        f"{settings.MINIO_URL}/{settings.MINIO_AVATAR_BUCKET}/a/../../etc/passwd",  # path traversal
+        f"{settings.MINIO_PUBLIC_URL}/{settings.MINIO_AVATAR_BUCKET}/",  # empty object key
+        f"{settings.MINIO_PUBLIC_URL}/{settings.MINIO_AVATAR_BUCKET}/a/../../etc/passwd",  # path traversal
         "javascript:alert(1)",
     ],
 )

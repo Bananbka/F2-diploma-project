@@ -23,61 +23,190 @@
     </div>
 }
 
-@if (attachments().length || uploading()) {
+@if (uploadError()) {
+    <div
+        class="strip is-danger"
+        role="alert"
+    >
+        <lucide-icon [img]="shieldAlertIcon" />
+        {{ uploadError() }}
+    </div>
+}
+
+@if (micError()) {
+    <div
+        class="strip is-danger"
+        role="alert"
+    >
+        <lucide-icon [img]="shieldAlertIcon" />
+        {{ micError() }}
+    </div>
+}
+
+@if (staged().length || uploading()) {
     <div class="staged">
-        @for (file of attachments(); track file.url) {
-            <span class="staged-file">
-                <lucide-icon [img]="paperclipIcon" />
-                {{ file.name }}
-                <button
-                    type="button"
-                    [attr.aria-label]="'Remove ' + file.name"
-                    (click)="removeAttachment(file.url)"
-                >
-                    ×
-                </button>
-            </span>
+        @for (entry of staged(); track entry.file.url) {
+            @if (entry.previewUrl) {
+                <div class="staged-tile">
+                    <img
+                        [src]="entry.previewUrl"
+                        [alt]="entry.file.name"
+                    />
+                    @if (entry.file.kind === 'gif') {
+                        <span class="tile-badge">GIF</span>
+                    } @else if (entry.file.kind === 'video') {
+                        <span class="tile-badge">
+                            <lucide-icon [img]="filmIcon" />
+                        </span>
+                    }
+                    <button
+                        type="button"
+                        class="tile-remove"
+                        [attr.aria-label]="'Remove ' + entry.file.name"
+                        (click)="removeAttachment(entry.file.url)"
+                    >
+                        <lucide-icon [img]="closeIcon" />
+                    </button>
+                </div>
+            } @else {
+                <span class="staged-file">
+                    <lucide-icon [img]="paperclipIcon" />
+                    {{ entry.file.name }}
+                    <span class="staged-file-size">{{ readableSize(entry.file.size) }}</span>
+                    <button
+                        type="button"
+                        [attr.aria-label]="'Remove ' + entry.file.name"
+                        (click)="removeAttachment(entry.file.url)"
+                    >
+                        <lucide-icon [img]="closeIcon" />
+                    </button>
+                </span>
+            }
         }
         @if (uploading()) {
-            <span class="staged-file is-busy">Uploading…</span>
+            <span class="staged-file is-busy">Encrypting and uploading…</span>
         }
     </div>
 }
 
-<div class="row">
-    <label
-        class="side"
-        title="Attach a file"
-    >
-        <lucide-icon [img]="paperclipIcon" />
-        <input
-            type="file"
-            class="sr-only"
-            [disabled]="!canSend() || uploading()"
-            (change)="onFilePicked($event)"
-        />
-        <span class="sr-only">Attach a file</span>
-    </label>
+@if (showRecordingRow()) {
+    <!-- Recording replaces the composer row for its duration, the way most voice-note UIs do —
+         there is nothing else useful to do with the text input while the mic is live. -->
+    <div class="row recording-row">
+        <button
+            type="button"
+            class="side"
+            title="Discard recording"
+            [disabled]="confirmingRecording()"
+            (click)="cancelRecording()"
+        >
+            <lucide-icon [img]="trashIcon" />
+            <span class="sr-only">Discard recording</span>
+        </button>
 
-    <div class="input">
-        <textarea
-            #area
-            rows="1"
-            [placeholder]="canSend() ? placeholder() : 'Sending is blocked'"
-            [disabled]="!canSend()"
-            [value]="text()"
-            (input)="onInput($any($event.target).value)"
-            (keydown)="onKeydown($event)"
-        ></textarea>
+        <div
+            class="recording-indicator"
+            role="status"
+        >
+            <span
+                class="rec-pulse"
+                [style.transform]="'scale(' + (1 + recordingAmplitude() * 0.6) + ')'"
+                aria-hidden="true"
+            ></span>
+            <span class="rec-time">{{ formattedRecordingTime() }}</span>
+        </div>
+
+        <button
+            type="button"
+            class="send"
+            aria-label="Send voice message"
+            [disabled]="confirmingRecording()"
+            (click)="confirmRecording()"
+        >
+            <lucide-icon [img]="checkIcon" />
+        </button>
     </div>
-
-    <button
-        type="button"
-        class="send"
-        aria-label="Send message"
-        [disabled]="!text().trim() || !canSend()"
-        (click)="send()"
+} @else {
+    <div
+        class="row"
+        [class.is-drag-over]="dragOver()"
+        (dragover)="onDragOver($event)"
+        (dragleave)="onDragLeave($event)"
+        (drop)="onDrop($event)"
     >
-        <lucide-icon [img]="sendIcon" />
-    </button>
-</div>
+        <button
+            type="button"
+            class="side"
+            title="Attach a file"
+            [disabled]="!canSend() || uploading()"
+            (click)="openFilePicker()"
+        >
+            <lucide-icon [img]="paperclipIcon" />
+            <input
+                #fileInput
+                type="file"
+                multiple
+                class="sr-only"
+                [disabled]="!canSend() || uploading()"
+                (change)="onFilePicked($event)"
+            />
+            <span class="sr-only">Attach a file</span>
+        </button>
+
+        <div class="sticker-trigger-wrap">
+            <button
+                type="button"
+                class="side sticker-trigger"
+                title="Send a sticker"
+                aria-haspopup="dialog"
+                [attr.aria-expanded]="stickerPickerOpen()"
+                [disabled]="!canSend() || editing()"
+                (click)="toggleStickerPicker()"
+            >
+                <lucide-icon [img]="stickerIcon" />
+                <span class="sr-only">Send a sticker</span>
+            </button>
+
+            @if (stickerPickerOpen()) {
+                <app-sticker-picker
+                    (closeRequested)="stickerPickerOpen.set(false)"
+                    (stickerPicked)="onStickerPicked($event)"
+                />
+            }
+        </div>
+
+        <button
+            type="button"
+            class="side mic-trigger"
+            title="Record a voice message"
+            [disabled]="!canSend() || editing() || startingRecording()"
+            (click)="startRecording()"
+        >
+            <lucide-icon [img]="micIcon" />
+            <span class="sr-only">Record a voice message</span>
+        </button>
+
+        <div class="input">
+            <textarea
+                #area
+                rows="1"
+                [placeholder]="canSend() ? placeholder() : 'Sending is blocked'"
+                [disabled]="!canSend()"
+                [value]="text()"
+                (input)="onInput($any($event.target).value)"
+                (keydown)="onKeydown($event)"
+                (paste)="onPaste($event)"
+            ></textarea>
+        </div>
+
+        <button
+            type="button"
+            class="send"
+            aria-label="Send message"
+            [disabled]="(!text().trim() && staged().length === 0) || !canSend()"
+            (click)="send()"
+        >
+            <lucide-icon [img]="sendIcon" />
+        </button>
+    </div>
+}

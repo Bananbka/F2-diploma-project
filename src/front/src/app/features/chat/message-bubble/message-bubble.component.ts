@@ -4,6 +4,7 @@ import {
     computed,
     DestroyRef,
     effect,
+    ElementRef,
     inject,
     input,
     output,
@@ -16,14 +17,17 @@ import {
     Check,
     CheckCheck,
     Clock,
+    Film,
     Forward,
     Lock,
     LucideAngularModule,
     LucideIconData,
     MoreVertical,
     Paperclip,
+    Pause,
     Pencil,
     Pin,
+    Play,
     RefreshCw,
     Reply,
     ShieldAlert,
@@ -34,13 +38,26 @@ import {
     Trash2,
 } from 'lucide-angular';
 
+import { decryptAttachment } from '../../../core/crypto/attachment-crypto';
 import { MessageAttachment } from '../../../core/models/crypto.model';
+import { AttachmentBatchService } from '../../../core/services/attachment-batch.service';
 import { ChatApiService } from '../../../core/services/chat-api.service';
 import { MessageReadReceipt } from '../../../core/services/chat-store.service';
 import { DirectoryService } from '../../../core/services/directory.service';
 import { DecryptedMessage, DecryptStatus } from '../../../core/services/message.service';
+import { VisibleOnceDirective } from '../../../shared/directives/visible-once.directive';
+import { TwemojiPipe } from '../../../shared/emoji/twemoji.pipe';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
 import { messageTime } from '../../../shared/utils/display';
+
+/** Where a media attachment is in its own, separate (lazier) decrypt lifecycle. */
+type MediaStatus = 'idle' | 'decrypting' | 'ready' | 'error';
+
+interface MediaEntry {
+    status: MediaStatus;
+    /** `URL.createObjectURL` on the decrypted plaintext — revoked on removal/destroy. */
+    objectUrl?: string;
+}
 
 /**
  * The curated quick-react set. Not exhaustive — a full emoji keyboard is out of scope — but this
@@ -130,7 +147,7 @@ const STATUS_VIEWS: Record<DecryptStatus, StatusView> = {
 
 @Component({
     selector: 'app-message-bubble',
-    imports: [LucideAngularModule, AvatarComponent],
+    imports: [LucideAngularModule, AvatarComponent, VisibleOnceDirective, TwemojiPipe],
     templateUrl: './message-bubble.component.html',
     styleUrl: './message-bubble.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
@@ -153,7 +170,9 @@ const STATUS_VIEWS: Record<DecryptStatus, StatusView> = {
 export class MessageBubbleComponent {
     private readonly directory = inject(DirectoryService);
     private readonly chatApi = inject(ChatApiService);
+    private readonly attachmentBatch = inject(AttachmentBatchService);
     private readonly destroyRef = inject(DestroyRef);
+    private readonly elementRef = inject<ElementRef<HTMLElement>>(ElementRef);
 
     readonly message = input.required<DecryptedMessage>();
     /** Groups and channels label each sender; a two-party chat does not need to. */
@@ -224,8 +243,59 @@ export class MessageBubbleComponent {
     /** A channel post is signed but not confidential, so it gets the opposite of a lock. */
     readonly showBroadcastMark = computed(() => this.message().status === 'plaintext');
 
+    /**
+     * Only decrypt and render real media for a message we actually opened. `docs/ui-states.md`
+     * governs every other status — `no_key`/`unverified`/`failed`/`legacy` must never show
+     * anything that looks like successfully-rendered content, attachments included.
+     */
+    readonly canRenderMedia = computed(() => {
+        const status = this.message().status;
+        return status === 'ok' || status === 'plaintext';
+    });
+
+    /** A sticker is a bare image with no bubble chrome — only when it is the *entire* message. */
+    readonly isStickerOnly = computed(() => {
+        const message = this.message();
+        return (
+            this.canRenderMedia() &&
+            !message.text &&
+            message.attachments.length === 1 &&
+            message.attachments[0].kind === 'sticker'
+        );
+    });
+
+    /** Per-attachment decrypt state, keyed by url. A `Map` so one re-render covers every tile. */
+    readonly mediaState = signal<Map<string, MediaEntry>>(new Map());
+    /** The one audio attachment currently playing, if any — native elements are looked up by url. */
+    readonly playingUrl = signal<string | null>(null);
+
+    readonly playIcon = Play;
+    readonly pauseIcon = Pause;
+    readonly filmIcon = Film;
+    readonly alertIcon = AlertTriangle;
+
     constructor() {
         let timer: ReturnType<typeof setTimeout> | null = null;
+
+        // Audio decrypts immediately on render — voice notes are small — unlike image/video, which
+        // wait for `appVisibleOnce` so a long scrollback does not decrypt every video in it at once.
+        effect(() => {
+            const message = this.message();
+            const canRender = this.canRenderMedia();
+
+            untracked(() => {
+                if (!canRender) {
+                    return;
+                }
+                for (const file of message.attachments) {
+                    if (file.kind === 'audio') {
+                        void this.ensureDecrypted(file);
+                    }
+                }
+            });
+        });
+
+        this.destroyRef.onDestroy(() => this.revokeMediaUrls());
 
         // Only the first sighting of a no_key gets the grace period. A message still unreadable after
         // the retries have run stays escalated rather than flickering back to a calm state.
@@ -417,6 +487,96 @@ export class MessageBubbleComponent {
             return `${Math.round(bytes / 1024)} KB`;
         }
         return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    }
+
+    mediaStatus(url: string): MediaStatus {
+        return this.mediaState().get(url)?.status ?? 'idle';
+    }
+
+    mediaObjectUrl(url: string): string | undefined {
+        return this.mediaState().get(url)?.objectUrl;
+    }
+
+    /** Bound to `appVisibleOnce` on an image/video tile — starts its decrypt the first time it is scrolled into view. */
+    onMediaVisible(file: MessageAttachment): void {
+        void this.ensureDecrypted(file);
+    }
+
+    formatDuration(ms: number | null | undefined): string {
+        const totalSeconds = Math.max(0, Math.round((ms ?? 0) / 1000));
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = totalSeconds % 60;
+        return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+    }
+
+    /** A flat waveform when the attachment carries none — still looks like a waveform, not nothing. */
+    waveform(file: MessageAttachment): number[] {
+        return file.waveform && file.waveform.length > 0 ? file.waveform : new Array(24).fill(0.3);
+    }
+
+    barHeight(amplitude: number): number {
+        return Math.max(12, Math.min(100, Math.round(amplitude * 100)));
+    }
+
+    toggleAudio(file: MessageAttachment): void {
+        const audio = this.elementRef.nativeElement.querySelector<HTMLAudioElement>(
+            `audio[data-audio-url="${CSS.escape(file.url)}"]`
+        );
+        if (!audio) {
+            return;
+        }
+
+        if (this.playingUrl() === file.url) {
+            audio.pause();
+            this.playingUrl.set(null);
+            return;
+        }
+
+        void audio.play();
+        this.playingUrl.set(file.url);
+    }
+
+    onAudioEnded(file: MessageAttachment): void {
+        if (this.playingUrl() === file.url) {
+            this.playingUrl.set(null);
+        }
+    }
+
+    /**
+     * Fetch, decrypt and stage one attachment's plaintext as a blob url.
+     *
+     * Idempotent per url: a tile that has already started (or finished) decrypting is left alone,
+     * so `appVisibleOnce` firing more than once, or the audio effect re-running on an unrelated
+     * signal change, never re-issues the request.
+     */
+    private async ensureDecrypted(file: MessageAttachment): Promise<void> {
+        if (this.mediaState().has(file.url)) {
+            return;
+        }
+        this.mediaState.update((current) => new Map(current).set(file.url, { status: 'decrypting' }));
+
+        try {
+            if (!file.decryptionKey) {
+                throw new Error('no attachment key');
+            }
+
+            const ciphertext = await this.attachmentBatch.fetch(this.message().chatId, file.url);
+            const plaintext = await decryptAttachment(new Uint8Array(ciphertext), file.decryptionKey);
+            const blob = new Blob([plaintext as BufferSource], { type: file.content_type });
+            const objectUrl = URL.createObjectURL(blob);
+
+            this.mediaState.update((current) => new Map(current).set(file.url, { status: 'ready', objectUrl }));
+        } catch {
+            this.mediaState.update((current) => new Map(current).set(file.url, { status: 'error' }));
+        }
+    }
+
+    private revokeMediaUrls(): void {
+        for (const entry of this.mediaState().values()) {
+            if (entry.objectUrl) {
+                URL.revokeObjectURL(entry.objectUrl);
+            }
+        }
     }
 
     /** Who wrote the quoted message, resolved the same way any other sender is. */

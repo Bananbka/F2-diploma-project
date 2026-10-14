@@ -441,13 +441,28 @@ export class ChatStoreService {
 
             // Channels are signed rather than encrypted, so they have no epochs, no roster and no
             // grants. Asking for their keys always 404s.
+            //
+            // `knownKeys` starts `undefined` (a channel never fetched its keys at all) rather than
+            // `null`, so `loadMessages` falls back to fetching for itself — it still needs to know
+            // whether a non-channel chat has crypto settings, which only `ensureEncryptionEnabled`
+            // below has actually checked for this open.
+            let knownKeys: ChatKeys | null | undefined;
             if (chat?.chat_type !== 'channel') {
                 // Fetched before the history so the roster and grants are in place; otherwise every
                 // message from a sender we have not ingested yet would report no_key on first paint.
-                this.chatKeys.set(await this.ensureEncryptionEnabled(chatId));
+                knownKeys = await this.ensureEncryptionEnabled(chatId);
+                this.chatKeys.set(knownKeys);
             }
 
-            const { raw, messages: decrypted } = await this.messages_.loadMessages(chatId, PAGE_SIZE);
+            // Pass through what `ensureEncryptionEnabled` just fetched instead of asking
+            // `loadMessages` to fetch the same chat's keys again — this used to fire the identical
+            // `GET /crypto/chats/{id}/keys` request twice on every chat open.
+            const { raw, messages: decrypted } = await this.messages_.loadMessages(
+                chatId,
+                PAGE_SIZE,
+                undefined,
+                knownKeys
+            );
             raw.forEach((message) => this.rawMessages.set(message._id, message));
 
             this.messages.set(decrypted);
@@ -607,7 +622,7 @@ export class ChatStoreService {
             // Bump before recording: bumping clears the preview override, and our own message is one
             // we can always read, so it should end up as the override rather than be wiped by it.
             this.bumpChatPreview(chatId, sent);
-            this.appendDecrypted(this.messages_.recordOutgoing(sent, text));
+            this.appendDecrypted(this.messages_.recordOutgoing(sent, text, attachments));
         } catch (error) {
             if (this.isMemberVerificationFailure(error)) {
                 // Blocking, not retryable: we refused to hand keys to a roster we cannot verify.
@@ -734,14 +749,28 @@ export class ChatStoreService {
         return sent;
     }
 
-    /** Edit one of our own messages. Only the sender may, and only in an encrypted chat. */
-    async editMessage(messageId: string, text: string): Promise<void> {
+    /**
+     * Edit one of our own messages. Only the sender may, and only in an encrypted chat.
+     *
+     * `attachments`, when passed, is the composer's current attachment list for this edit session
+     * — reflecting whatever was added or removed while editing — and replaces the stored list
+     * wholesale. When omitted, the message's existing attachments travel unchanged, which keeps
+     * callers that only ever change text (there are none left, but the parameter stays optional)
+     * from having to resupply a list they never touched.
+     */
+    async editMessage(messageId: string, text: string, attachments?: MessageAttachment[]): Promise<void> {
         const chatId = this.activeChatId();
         if (!chatId || !text.trim()) {
             return;
         }
 
-        const edited = await this.messages_.editText(chatId, messageId, text.trim());
+        const existing = this.messages().find((m) => m.id === messageId);
+        const edited = await this.messages_.editText(
+            chatId,
+            messageId,
+            text.trim(),
+            attachments ?? existing?.attachments
+        );
         this.messages.update((list) => list.map((m) => (m.id === edited.id ? edited : m)));
         this.cachePreview(chatId, [edited]);
     }

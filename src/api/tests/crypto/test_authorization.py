@@ -10,8 +10,10 @@ import uuid
 import httpx
 import websockets
 
+from app.domains.crypto.reference.ratchet import SenderChain
+
 from tests.crypto.test_epoch_api import _group_with, _publish_identity
-from tests.crypto.test_identity_api import _register_user
+from tests.crypto.test_identity_api import _register_user, rate_limit_bypass_headers
 from tests.crypto.test_rotation_api import _publish_chain, _seal
 
 BASE = "http://localhost:8000"
@@ -199,6 +201,114 @@ async def test_edit_cannot_claim_another_members_sender_key():
 
 
 # --------------------------------------------------------------------------------------------
+# An envelope was accepted and labeled SENDER_KEYS_V1 ("encrypted and authenticated") on any chat
+# with no ChatCryptoSettings row — the default state of every new chat until /crypto/chats/{id}/
+# enable is called — without ever running _validate_envelope. Epoch enforcement, sender-key
+# ownership and the Ed25519 signature were all skipped entirely.
+# --------------------------------------------------------------------------------------------
+
+
+async def test_envelope_rejected_when_chat_has_no_crypto_settings():
+    """A forged/unverified envelope must not be accepted on a chat that was never put into
+    encrypted mode. The point of this envelope is that it is garbage: it must never reach
+    `_validate_envelope`, because there is nothing there to validate against."""
+    alice, alice_id = await _register_user()
+    bob, bob_id = await _register_user()
+
+    try:
+        chat_id = await _group_with(alice, bob_id)
+
+        forged_envelope = {
+            "v": 1,
+            "alg": "A256GCM-SK1",
+            "epoch": 1,
+            "skid": str(uuid.uuid4()),
+            "idx": 0,
+            "n": "AAAAAAAAAAAAAAAA",
+            "ct": "AAAAAAAAAAAAAAAA",
+            "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        }
+        r = await alice.post(
+            "/messages/", json={"chat_id": str(chat_id), "envelope": forged_envelope}
+        )
+
+        assert r.status_code == 400, r.text
+        assert r.json()["error_code"] == "ENVELOPE_NOT_ALLOWED"
+    finally:
+        await alice.aclose()
+        await bob.aclose()
+
+
+async def test_edit_with_envelope_rejected_when_chat_has_no_crypto_settings():
+    """Same hole, reached through PUT: the edit path fell through to acceptance just as
+    unconditionally when `chat_settings` was None."""
+    alice, alice_id = await _register_user()
+    bob, bob_id = await _register_user()
+
+    try:
+        chat_id = await _group_with(alice, bob_id)
+
+        r = await alice.post(
+            "/messages/", json={"chat_id": str(chat_id), "encrypted_content": "hello"}
+        )
+        assert r.status_code == 200, r.text
+        message_id = r.json()["data"]["_id"]
+
+        forged_envelope = {
+            "v": 1,
+            "alg": "A256GCM-SK1",
+            "epoch": 1,
+            "skid": str(uuid.uuid4()),
+            "idx": 0,
+            "n": "AAAAAAAAAAAAAAAA",
+            "ct": "AAAAAAAAAAAAAAAA",
+            "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        }
+        r = await alice.put(
+            f"/messages/{message_id}", json={"envelope": forged_envelope}
+        )
+
+        assert r.status_code == 400, r.text
+        assert r.json()["error_code"] == "ENVELOPE_NOT_ALLOWED"
+    finally:
+        await alice.aclose()
+        await bob.aclose()
+
+
+async def test_envelope_still_accepted_once_the_chat_is_actually_encrypted():
+    """The fix must not over-correct: a correctly signed envelope on a chat that *did* call
+    /enable and published a real sender key still goes through exactly as before."""
+    alice, alice_id = await _register_user()
+    bob, bob_id = await _register_user()
+
+    try:
+        alice_device, alice_keys = await _publish_identity(alice, alice_id)
+        await _publish_identity(bob, bob_id)
+
+        chat_id = await _group_with(alice, bob_id)
+
+        r = await alice.post(f"/crypto/chats/{chat_id}/enable")
+        assert r.status_code == 200, r.text
+        epoch = r.json()["data"]["epoch"]
+
+        chain_key, skid, chain_identity = await _publish_chain(
+            alice, chat_id, epoch, alice_id, alice_device, alice_keys
+        )
+        chain = SenderChain(chain_key)
+        envelope = _seal(chain, chat_id, epoch, alice_id, skid, chain_identity)
+
+        r = await alice.post(
+            "/messages/", json={"chat_id": str(chat_id), "envelope": envelope}
+        )
+
+        assert r.status_code == 200, r.text
+        assert r.json()["data"]["content_format"] == "sender_keys_v1"
+    finally:
+        await alice.aclose()
+        await bob.aclose()
+
+
+# --------------------------------------------------------------------------------------------
 # The WebSocket took chat_id from the frame with no membership check.
 # --------------------------------------------------------------------------------------------
 
@@ -322,7 +432,7 @@ async def test_refresh_respects_forced_logout():
 
         # A refresh token issued *before* the cutoff must not work, even though it is validly
         # signed and unexpired.
-        async with httpx.AsyncClient(base_url=BASE, timeout=30.0) as stale:
+        async with httpx.AsyncClient(base_url=BASE, timeout=30.0, headers=rate_limit_bypass_headers()) as stale:
             r = await stale.post(
                 "/auth/login",
                 json={
@@ -344,7 +454,7 @@ async def test_refresh_respects_forced_logout():
             )
             assert r.status_code == 200, r.text
 
-            async with httpx.AsyncClient(base_url=BASE, timeout=30.0) as replay:
+            async with httpx.AsyncClient(base_url=BASE, timeout=30.0, headers=rate_limit_bypass_headers()) as replay:
                 replay.cookies.set("refresh_token", old_refresh)
                 r = await replay.post("/auth/refresh")
 
@@ -364,7 +474,7 @@ async def test_logout_revokes_the_refresh_token_too():
         r = await client.post("/auth/logout")
         assert r.status_code == 200, r.text
 
-        async with httpx.AsyncClient(base_url=BASE, timeout=30.0) as replay:
+        async with httpx.AsyncClient(base_url=BASE, timeout=30.0, headers=rate_limit_bypass_headers()) as replay:
             replay.cookies.set("refresh_token", refresh_token)
             r = await replay.post("/auth/refresh")
 
@@ -537,7 +647,7 @@ async def test_forgot_password_does_not_reveal_whether_an_account_exists():
     try:
         known = (await client.get("/profile/me")).json()["data"]
 
-        async with httpx.AsyncClient(base_url=BASE, timeout=30.0) as anon:
+        async with httpx.AsyncClient(base_url=BASE, timeout=30.0, headers=rate_limit_bypass_headers()) as anon:
             real = await anon.post(
                 "/auth/forgot-password",
                 json={
@@ -603,7 +713,7 @@ async def test_identity_can_be_republished_after_every_device_is_revoked():
         assert r.status_code == 200, r.text
 
         # Log back in — reset forces every session out.
-        async with httpx.AsyncClient(base_url=BASE, timeout=30.0) as fresh:
+        async with httpx.AsyncClient(base_url=BASE, timeout=30.0, headers=rate_limit_bypass_headers()) as fresh:
             r = await fresh.post(
                 "/auth/login", json={"username": username, "password": "NewPassw0rd!"}
             )

@@ -2,8 +2,10 @@ import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
 import { TestBed } from '@angular/core/testing';
 
+import { MessageEnvelope } from '../crypto/envelope';
 import { SuccessResponse } from '../models/api.model';
 import { InviteLink, InviteLinkJoinResult, InviteLinkPreview } from '../models/chat.model';
+import { MessageAttachment, MessageResponse } from '../models/crypto.model';
 import { ChatApiService } from './chat-api.service';
 import { ConfigService } from './config.service';
 
@@ -116,6 +118,71 @@ describe('ChatApiService — invite links', () => {
         req.flush(ok(joinResult));
 
         expect(result).toEqual(joinResult);
+    });
+
+    it('edits a message without an attachments field when none is supplied', () => {
+        const envelope: MessageEnvelope = {
+            v: 1,
+            alg: 'A256GCM-SK1',
+            epoch: 0,
+            skid: 'sk-1',
+            idx: 1,
+            n: 'nonce',
+            ct: 'ciphertext',
+            sig: 'sig',
+        };
+        const response = { _id: 'm1' } as unknown as MessageResponse;
+
+        service.editMessage('m1', envelope).subscribe();
+
+        const req = http.expectOne(`${API_URL}messages/m1`);
+        expect(req.request.method).toBe('PUT');
+        expect(req.request.body).toEqual({ envelope });
+        expect('attachments' in req.request.body).toBeFalse();
+        req.flush(ok(response));
+    });
+
+    it('edits a message and includes a stripped attachments field when supplied', () => {
+        const envelope: MessageEnvelope = {
+            v: 1,
+            alg: 'A256GCM-SK1',
+            epoch: 0,
+            skid: 'sk-1',
+            idx: 1,
+            n: 'nonce',
+            ct: 'ciphertext',
+            sig: 'sig',
+        };
+        const attachments: MessageAttachment[] = [
+            { url: 'files/attachments/a/one.png', name: 'one.png', size: 10, content_type: 'image/png' },
+        ];
+        const response = { _id: 'm1' } as unknown as MessageResponse;
+
+        service.editMessage('m1', envelope, attachments).subscribe();
+
+        const req = http.expectOne(`${API_URL}messages/m1`);
+        expect(req.request.body).toEqual({ envelope, attachments });
+        req.flush(ok(response));
+    });
+
+    it('clears attachments when an empty list is explicitly supplied', () => {
+        const envelope: MessageEnvelope = {
+            v: 1,
+            alg: 'A256GCM-SK1',
+            epoch: 0,
+            skid: 'sk-1',
+            idx: 1,
+            n: 'nonce',
+            ct: 'ciphertext',
+            sig: 'sig',
+        };
+        const response = { _id: 'm1' } as unknown as MessageResponse;
+
+        service.editMessage('m1', envelope, []).subscribe();
+
+        const req = http.expectOne(`${API_URL}messages/m1`);
+        expect(req.request.body).toEqual({ envelope, attachments: [] });
+        req.flush(ok(response));
     });
 
     it('revokes via token in the request body, not the URL', () => {
