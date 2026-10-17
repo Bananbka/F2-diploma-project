@@ -604,7 +604,7 @@ classDiagram
     +MessageEnvelope envelope
     +ChannelPost channel_post
     +String encrypted_content
-    +ObjectId reply_to_message_id
+    +String reply_to_message_id
     +ForwardOrigin forwarded_from
     +Attachment[] attachments
     +Reaction[] reactions
@@ -707,7 +707,7 @@ classDiagram
 | `envelope` | MessageEnvelope | Рівно одне з трьох полів вмісту | Зашифрований конверт |
 | `channel_post` | ChannelPost | – | Підписана публікація каналу |
 | `encrypted_content` | String | – | Застарілий формат |
-| `reply_to_message_id` | ObjectId | NULL | Посилання на інше повідомлення того самого чату |
+| `reply_to_message_id` | String (24 hex) | NULL; To-Be: тип ObjectId | Посилання на інше повідомлення того самого чату |
 | `forwarded_from` | ForwardOrigin | NULL | Заява пересилача про автора (не перевіряється сервером) |
 | `attachments` | Array\<Attachment\> | ≤ 10 | Метадані зашифрованих вкладень |
 | `reactions` | Array\<Reaction\> | – | Одна реакція на emoji від користувача |
@@ -779,7 +779,7 @@ classDiagram
 2. Частковий унікальний індекс `uq_open_epoch_per_chat` і композитний FK `(epoch_id, chat_id)` у `sender_key_distributions`.
 3. Індекси на `sender_key_grants.recipient_device_id`, `recipient_identity_key_id` і `chats.updated_at`; вилучення надлишкового стовпця `sender_key_grants.recipient_user_id`, який записується, але не читається (транзитивна залежність через `recipient_device_id`).
 4. CHECK-обмеження `use_count ≤ max_uses`, `owner_id ≠ contact_id`, UNIQUE (pack_id, position).
-5. Поля `client_message_id` і `edited_at` у `messages`, частковий унікальний індекс ідемпотентності, TTL-індекс журналу аудиту, перевірка схеми колекції `$jsonSchema`.
+5. Поля `client_message_id` і `edited_at` у `messages`, тип ObjectId для `reply_to_message_id` (зараз рядок), частковий унікальний індекс ідемпотентності, TTL-індекс журналу аудиту, перевірка схеми колекції `$jsonSchema`.
 6. Зберігання в denylist хешу SHA-256 токена замість самого токена.
 7. Зміна `users.public_key` і `users.encrypted_private_key` на NULL з подальшим вилученням.
 
@@ -864,10 +864,10 @@ components:
 
 Вхід: `U` – ідентифікатор користувача з JWT; `Req` – тіло `MessageCreateRequest`. Вихід: збережене повідомлення `M` або `ErrorResponse`. Вимоги: [SRS-FUN-16](srs.md#srs-fun-16) – [SRS-FUN-18](srs.md#srs-fun-18), [SRS-FUN-20](srs.md#srs-fun-20), [SRS-NFR-SEC-03](srs.md#srs-nfr-sec-03).
 
-1. `W := ⌊t / 60⌋`; `Used := INCR(ratelimit:message-send:U:W)`; якщо `Used = 1`, то `EXPIRE(…, 60)`.
-2. Якщо Redis недоступний, то `Code := 503` (fail-closed). Якщо `Used > 300`, то `Code := 429 RATE_LIMITED`.
+1. `W := ⌊t / 60⌋`; `(Used, RedisErr) := INCR(ratelimit:message-send:U:W)`; якщо `Used = 1`, то `EXPIRE(…, 60)`.
+2. Якщо `RedisErr ≠ NULL`, то `Code := 503` (fail-closed). Якщо `Used > 300`, то `Code := 429 RATE_LIMITED`.
 3. `P := Participant(Req.chat_id, U)`. Якщо `P = NULL`, то `Code := 403 FORBIDDEN`.
-4. `S := CryptoSettings(Req.chat_id)`. Якщо `S = NULL OR S.crypto_mode ≠ sender_keys_v1`, то виконується визначений процес обробки незашифрованого чату або публікації каналу з переходом до кроку 9.
+4. `S := CryptoSettings(Req.chat_id)`. Якщо `S = NULL OR S.crypto_mode ≠ sender_keys_v1`, то `Doc := LegacyOrChannel(Req, U)` (визначений процес) і перехід до кроку 9.
 5. Якщо `Req.envelope = NULL`, то `Code := 400 ENVELOPE_REQUIRED`; інакше `E := Req.envelope`.
 6. Якщо `E.epoch ≠ S.current_epoch`, то `Code := 409 EPOCH_STALE`, `Details := {current_epoch: S.current_epoch}`. Вікно допуску не застосовується: повідомлення попередньої епохи після видалення учасника було б доступне йому.
 7. `D := Distribution(Req.chat_id, S.current_epoch, E.skid)`. Якщо `D = NULL`, то `Code := 409 SENDER_KEY_MISSING`. Якщо `D.sender_user_id ≠ U`, то `Code := 403 SENDER_KEY_NOT_YOURS`.
@@ -875,7 +875,7 @@ components:
 9. `Doc := {chat_id, sender_id := U, envelope := E, content_format := sender_keys_v1, created_at := now()}`; `Res := InsertOne(messages, Doc)`.
 10. Якщо `Res = DuplicateKey(client_message_id)`, то `M := FindOne(chat_id, U, Req.client_message_id)`, `Status := 200` – повтор не створює дубліката. Якщо `Res = Error`, то `Code := 503`.
 11. `M := Doc ∪ {_id := Res.inserted_id}`; `Status := 201`; `chats.updated_at := now()`; COMMIT.
-12. `Members := ParticipantIds(Req.chat_id)`; `N := |Members|`. Для `i := 1, N`: `PUBLISH user:Members[i], Event(new_message, M)`; помилка публікації журналюється і не перериває цикл, оскільки повідомлення вже збережене.
+12. `Members := ParticipantIds(Req.chat_id)`; `N := |Members|`. Для `i := 1, N`: `PubErr := PUBLISH(user:Members[i], Event(new_message, M))`; якщо `PubErr ≠ NULL`, то `Log(PubErr)` без переривання циклу, оскільки повідомлення вже збережене.
 13. Вивід `Status, M` або `ErrorResponse(Code, Details)`.
 
 <a id="diagram-alg-send"></a>
@@ -883,17 +883,17 @@ components:
 ```mermaid
 flowchart TD
   s([Початок]) --> in[/"Ввід: U := JWT.sub, Req"/]
-  in --> rl["W := ⌊t / 60⌋<br/>Used := INCR(ratelimit:message-send:U:W)"]
-  rl --> d0{"Redis доступний"}
-  d0 -- Ні --> e0["Code := 503 SERVICE_UNAVAILABLE"]
-  d0 -- Так --> d1{"Used > 300"}
+  in --> rl["W := ⌊t / 60⌋<br/>(Used, RedisErr) := INCR(ratelimit:message-send:U:W)"]
+  rl --> d0{"RedisErr ≠ NULL"}
+  d0 -- Так --> e0["Code := 503 SERVICE_UNAVAILABLE"]
+  d0 -- Ні --> d1{"Used > 300"}
   d1 -- Так --> e1["Code := 429 RATE_LIMITED"]
   d1 -- Ні --> p1["P := Participant(Req.chat_id, U)"]
   p1 --> d2{"P = NULL"}
   d2 -- Так --> e2["Code := 403 FORBIDDEN"]
   d2 -- Ні --> s1["S := CryptoSettings(Req.chat_id)"]
   s1 --> d3{"S ≠ NULL AND<br/>S.crypto_mode = sender_keys_v1"}
-  d3 -- Ні --> leg[["Обробка незашифрованого чату<br/>або публікації каналу"]]
+  d3 -- Ні --> leg[["Doc := LegacyOrChannel(Req, U)"]]
   leg --> ins
   d3 -- Так --> d4{"Req.envelope = NULL"}
   d4 -- Так --> e4["Code := 400 ENVELOPE_REQUIRED"]
@@ -917,8 +917,11 @@ flowchart TD
   d10 -- Ні --> p5["M := Doc ∪ {_id := Res.inserted_id}; Status := 201<br/>chats.updated_at := now(); COMMIT"]
   p5 --> p6["Members := ParticipantIds(Req.chat_id)<br/>N := |Members|"]
   p6 --> lp{{"i := 1, N"}}
-  lp -- "i ≤ N" --> pub["PUBLISH user:Members[i], Event(new_message, M)<br/>помилку журналювати без переривання циклу"]
-  pub -- "i := i + 1" --> lp
+  lp -- "i ≤ N" --> pub["PubErr := PUBLISH(user:Members[i], Event(new_message, M))"]
+  pub --> dp{"PubErr ≠ NULL"}
+  dp -- Так --> lg["Log(PubErr)"]
+  lg -- "i := i + 1" --> lp
+  dp -- "Ні; i := i + 1" --> lp
   lp -- "i > N" --> out[/"Вивід: Status, M"/]
   out --> f([Кінець])
   e0 --> c_e0((A))
@@ -945,14 +948,14 @@ flowchart TD
 1. `S := CryptoSettings(ChatId)`. Якщо `S = NULL OR S.crypto_mode ≠ sender_keys_v1`, то `Epoch := NULL`.
 2. Якщо `Reason = member_added AND S.history_visibility = shared`, то `Epoch := NULL`: наявні учасники передають новому учаснику гранти попередніх епох.
 3. `pg_advisory_xact_lock(hashtext(ChatId))` – серіалізація ротацій одного чату.
-4. `R := Roster(ChatId)`, впорядкований за `device_id`; `N := |R|`.
+4. `R := SortBy(Roster(ChatId), device_id)`; `N := |R|`.
 5. Для `i := 1, N`: `Rec[i] := Join(':', R[i].device_id, R[i].identity_public_key, R[i].signing_public_key, R[i].signed_prekey_public)`.
 6. `Rec := Sort(Rec)`; `H := SHA-256(DS_MEMBER_SET ∥ Join('|', Rec))`.
 7. `closed_at := now()` для відкритої епохи чату.
 8. `K := S.current_epoch + 1`; вставка `chat_key_epochs(ChatId, K, Reason, member_count := N, member_set_hash := H)`.
 9. `S.current_epoch := K`; `S.last_rotated_at := now()`.
-10. Якщо `M > 0 AND S.history_visibility = joined`, то `Floor := NewestMessageId(ChatId)`; при помилці MongoDB – ROLLBACK. Для `j := 1, M`: `Joiners[j].joined_at_epoch := K`, `Joiners[j].history_start_message_id := Floor`.
-11. FLUSH. Якщо порушено `uq_chat_epoch OR uq_open_epoch_per_chat`, то ROLLBACK транзакції зміни складу, `Code := 500`.
+10. Якщо `M > 0 AND S.history_visibility = joined`, то `(Floor, MongoErr) := NewestMessageId(ChatId)`; якщо `MongoErr ≠ NULL`, то ROLLBACK. Для `j := 1, M`: `Joiners[j].joined_at_epoch := K`, `Joiners[j].history_start_message_id := Floor`.
+11. `IntegrityErr := FLUSH()` (обмеження `uq_chat_epoch`, `uq_open_epoch_per_chat`). Якщо `IntegrityErr ≠ NULL`, то ROLLBACK транзакції зміни складу, `Code := 500`.
 12. `Epoch := (K, H, N)`; ініціатор фіксує COMMIT разом зі зміною складу і публікує подію `key_epoch_started(ChatId, K, H)` учасникам.
 
 <a id="diagram-alg-rotation"></a>
@@ -966,7 +969,7 @@ flowchart TD
   d1 -- Ні --> d2{"Reason = member_added AND<br/>S.history_visibility = shared"}
   d2 -- Так --> r0
   d2 -- Ні --> lock["pg_advisory_xact_lock(hashtext(ChatId))"]
-  lock --> ros["R := Roster(ChatId), впорядкований за device_id<br/>N := |R|"]
+  lock --> ros["R := SortBy(Roster(ChatId), device_id)<br/>N := |R|"]
   ros --> lp1{{"i := 1, N"}}
   lp1 -- "i ≤ N" --> rec["Rec[i] := Join(':', R[i].device_id, R[i].identity_public_key,<br/>R[i].signing_public_key, R[i].signed_prekey_public)"]
   rec -- "i := i + 1" --> lp1
@@ -976,18 +979,18 @@ flowchart TD
   k --> st["S.current_epoch := K<br/>S.last_rotated_at := now()"]
   st --> d3{"M > 0 AND<br/>S.history_visibility = joined"}
   d3 -- Ні --> fl
-  d3 -- Так --> fm["Floor := NewestMessageId(ChatId)"]
-  fm --> d4{"MongoDB повернув помилку"}
+  d3 -- Так --> fm["(Floor, MongoErr) := NewestMessageId(ChatId)"]
+  fm --> d4{"MongoErr ≠ NULL"}
   d4 -- Так --> rb
   d4 -- Ні --> lp2{{"j := 1, M"}}
   lp2 -- "j ≤ M" --> up["Joiners[j].joined_at_epoch := K<br/>Joiners[j].history_start_message_id := Floor"]
   up -- "j := j + 1" --> lp2
-  lp2 -- "j > M" --> fl["FLUSH"]
-  fl --> d5{"Порушено uq_chat_epoch OR<br/>uq_open_epoch_per_chat"}
-  d5 -- Так --> rb["ROLLBACK транзакції зміни складу<br/>Code := 500 INTERNAL_SERVER_ERROR"]
+  lp2 -- "j > M" --> fl["IntegrityErr := FLUSH()"]
+  fl --> d5{"IntegrityErr ≠ NULL"}
+  d5 -- Так --> rb["ROLLBACK<br/>Code := 500 INTERNAL_SERVER_ERROR"]
   rb --> eo[/"Вивід: ErrorResponse(Code)"/]
-  d5 -- Ні --> ok["Epoch := (K, H, N)<br/>COMMIT разом зі зміною складу ініціатором"]
-  ok --> ev["PUBLISH key_epoch_started(ChatId, K, H) учасникам"]
+  d5 -- Ні --> ok["Epoch := (K, H, N)<br/>COMMIT"]
+  ok --> ev["PUBLISH(key_epoch_started(ChatId, K, H))"]
   ev --> out[/"Вивід: Epoch"/]
   r0 --> out
   out --> f([Кінець])
@@ -1004,17 +1007,17 @@ flowchart TD
 
 1. Якщо `Cache[ChatId, Epoch] ≠ NULL`, то `Chain := Cache[ChatId, Epoch]`, вихід.
 2. `Attempt := 1`; `MaxAttempts := 3`.
-3. `R := GET /crypto/chats/ChatId/roster`. Якщо помилка мережі `OR` статус ≥ 500, то перехід до кроку 12.
+3. `(R, NetErr) := GET /crypto/chats/ChatId/roster`. Якщо `NetErr ≠ NULL OR R.status ≥ 500`, то перехід до кроку 12.
 4. `Epoch := R.current_epoch`; `N := |R.members|`. Якщо `N = 0 OR N > 256`, то `Code := ROSTER_INVALID`.
 5. Для `i := 1, N`: `Ok := VerifyIdentityBinding(R.members[i]) AND (R.members[i].signed_prekey_public = NULL OR VerifyPrekey(R.members[i]))`. Якщо `NOT Ok`, то `Code := ROSTER_VERIFICATION_FAILED`.
 6. `H := MemberSetHash(R.members)`. Якщо `H ≠ R.member_set_hash`, то `Code := MEMBER_SET_MISMATCH` – захист від «пристрою-привида», доданого сервером.
 7. `CK := Random(32)`; `SKID := UUIDv4()`; `(SigPriv, SigPub) := Ed25519.Generate()`.
-8. Для `j := 1, N`: `PK := R.members[j].signed_prekey_public`, якщо він ≠ NULL, інакше `R.members[j].identity_public_key`; `G[j] := WrapX25519(CK, PK, ChatId, Epoch, SKID, DeviceId, R.members[j].device_id)`.
+8. Для `j := 1, N`: `PK := COALESCE(R.members[j].signed_prekey_public, R.members[j].identity_public_key)`; `G[j] := WrapX25519(CK, PK, ChatId, Epoch, SKID, DeviceId, R.members[j].device_id)`.
 9. `Sig := Ed25519.Sign(IdentitySigPriv, DS_SENDER_KEY ∥ ChatId ∥ Epoch ∥ SKID ∥ SigPub ∥ 0)`.
-10. `Resp := POST /crypto/chats/ChatId/epochs/Epoch/sender-keys` з `G[1..N]`.
-11. Якщо `Resp.status ∈ {200, 201}`, то `Chain := (SKID, CK, SigPriv, Index := 0)`, `Cache[ChatId, Epoch] := Chain`, вихід.
-12. Якщо `(Resp.error_code ∈ {EPOCH_CLOSED, GRANT_SET_MISMATCH} OR Resp.status ≥ 500 OR помилка мережі) AND Attempt < MaxAttempts`, то `Attempt := Attempt + 1`, очікування `2^Attempt × 250` мс і перехід до кроку 3; інакше `Code := RETRY_LIMIT_EXCEEDED` або `Code := Resp.error_code`.
-13. Вивід помилки `Code` в інтерфейсі; надсилання заблоковано, відкритий текст не передається.
+10. `(Resp, NetErr) := POST /crypto/chats/ChatId/epochs/Epoch/sender-keys` з `G[1..N]`.
+11. Якщо `NetErr = NULL AND Resp.status ∈ {200, 201}`, то `Chain := (SKID, CK, SigPriv, Index := 0)`, `Cache[ChatId, Epoch] := Chain`, вихід.
+12. Якщо `(NetErr ≠ NULL OR Resp.status ≥ 500 OR Resp.error_code ∈ {EPOCH_CLOSED, GRANT_SET_MISMATCH}) AND Attempt < MaxAttempts`, то `Attempt := Attempt + 1`, `Delay(2^Attempt × 250 мс)` і перехід до кроку 3; інакше `Code := RETRY_LIMIT_EXCEEDED` або `Code := Resp.error_code`.
+13. Вивід `Code`; `Blocked := TRUE` – надсилання заблоковано, відкритий текст не передається.
 
 <a id="diagram-alg-sender-key"></a>
 
@@ -1025,35 +1028,35 @@ flowchart TD
   d0 -- Так --> rc["Chain := Cache[ChatId, Epoch]"]
   rc --> c_b1((B))
   d0 -- Ні --> init["Attempt := 1; MaxAttempts := 3"]
-  init --> get["R := GET /crypto/chats/ChatId/roster"]
-  get --> dn{"Помилка мережі OR 5xx"}
+  init --> get["(R, NetErr) := GET /crypto/chats/ChatId/roster"]
+  get --> dn{"NetErr ≠ NULL OR R.status ≥ 500"}
   dn -- Так --> c_c1((C))
   dn -- Ні --> ep["Epoch := R.current_epoch<br/>N := |R.members|"]
   ep --> d1{"N = 0 OR N > 256"}
-  d1 -- Так --> eb["Code := ROSTER_INVALID<br/>Розсилання заблоковано"]
+  d1 -- Так --> eb["Code := ROSTER_INVALID"]
   d1 -- Ні --> lp1{{"i := 1, N"}}
   lp1 -- "i ≤ N" --> v["Ok := VerifyIdentityBinding(R.members[i]) AND<br/>(R.members[i].signed_prekey_public = NULL OR VerifyPrekey(R.members[i]))"]
   v --> dv{"NOT Ok"}
-  dv -- Так --> eb2["Code := ROSTER_VERIFICATION_FAILED<br/>Розсилання заблоковано"]
+  dv -- Так --> eb2["Code := ROSTER_VERIFICATION_FAILED"]
   dv -- "Ні; i := i + 1" --> lp1
   lp1 -- "i > N" --> h["H := MemberSetHash(R.members)"]
   h --> dh{"H ≠ R.member_set_hash"}
-  dh -- Так --> eb3["Code := MEMBER_SET_MISMATCH<br/>Розсилання заблоковано"]
+  dh -- Так --> eb3["Code := MEMBER_SET_MISMATCH"]
   dh -- Ні --> gen["CK := Random(32); SKID := UUIDv4()<br/>(SigPriv, SigPub) := Ed25519.Generate()"]
   gen --> lp2{{"j := 1, N"}}
-  lp2 -- "j ≤ N" --> w["PK := R.members[j].signed_prekey_public, якщо ≠ NULL, інакше R.members[j].identity_public_key<br/>G[j] := WrapX25519(CK, PK, ChatId, Epoch, SKID, DeviceId, R.members[j].device_id)"]
+  lp2 -- "j ≤ N" --> w["PK := COALESCE(R.members[j].signed_prekey_public, R.members[j].identity_public_key)<br/>G[j] := WrapX25519(CK, PK, ChatId, Epoch, SKID, DeviceId, R.members[j].device_id)"]
   w -- "j := j + 1" --> lp2
   lp2 -- "j > N" --> sig["Sig := Ed25519.Sign(IdentitySigPriv, DS_SENDER_KEY ∥ ChatId ∥ Epoch ∥ SKID ∥ SigPub ∥ 0)"]
-  sig --> post["Resp := POST /crypto/chats/ChatId/epochs/Epoch/sender-keys<br/>(DeviceId, SKID, SigPub, Sig, G[1..N])"]
-  post --> d2{"Resp.status ∈ {200, 201}"}
+  sig --> post["(Resp, NetErr) := POST /crypto/chats/ChatId/epochs/Epoch/sender-keys<br/>(DeviceId, SKID, SigPub, Sig, G[1..N])"]
+  post --> d2{"NetErr = NULL AND<br/>Resp.status ∈ {200, 201}"}
   d2 -- Так --> ok["Chain := (SKID, CK, SigPriv, Index := 0)<br/>Cache[ChatId, Epoch] := Chain"]
   ok --> out[/"Вивід: Chain"/]
   c_b((B)) --> out
-  d2 -- Ні --> d3{"Resp.error_code ∈ {EPOCH_CLOSED, GRANT_SET_MISMATCH}<br/>OR Resp.status ≥ 500"}
+  d2 -- Ні --> d3{"NetErr ≠ NULL OR Resp.status ≥ 500 OR<br/>Resp.error_code ∈ {EPOCH_CLOSED, GRANT_SET_MISMATCH}"}
   d3 -- Ні --> ef["Code := Resp.error_code"]
   d3 -- Так --> dr{"Attempt < MaxAttempts"}
   c_c((C)) --> dr
-  dr -- Так --> inc["Attempt := Attempt + 1<br/>Очікування 2^Attempt × 250 мс"]
+  dr -- Так --> inc["Attempt := Attempt + 1<br/>Delay(2^Attempt × 250 мс)"]
   inc --> c_d1((D))
   c_d((D)) --> get
   dr -- Ні --> ex["Code := RETRY_LIMIT_EXCEEDED"]
@@ -1062,7 +1065,7 @@ flowchart TD
   eb3 --> c_eb3((A))
   ef --> c_ef((A))
   ex --> c_ex((A))
-  cA((A)) --> eo[/"Вивід: помилка Code у UI, відправлення заблоковано"/]
+  cA((A)) --> eo[/"Вивід: Code; Blocked := TRUE"/]
   out --> f([Кінець])
   eo --> f
 ```
@@ -1080,7 +1083,7 @@ flowchart TD
 | Поле контракту | Тип і обмеження в `openapi.yaml` | Тип у сховищі | Результат |
 |---|---|---|---|
 | `chat_id`, `sender_id`, `user_id`, `device_id`, `skid` | `string`, `format: uuid` | `uuid` (PostgreSQL), Binary UUID (MongoDB); `envelope.skid` – String | Узгоджено; текстове `skid` прийнято, оскільки поле не використовується в запитах MongoDB |
-| `_id`, `reply_to_message_id`, `before_id`, `last_read_message_id` | `^[0-9a-f]{24}$` | ObjectId; `char(24)` (To-Be, було `varchar` без довжини) | Виправлено |
+| `_id`, `reply_to_message_id`, `before_id`, `last_read_message_id` | `^[0-9a-f]{24}$` | ObjectId (`_id`); String → ObjectId (`reply_to_message_id`, To-Be); `char(24)` (To-Be, було `varchar` без довжини) | Виправлено |
 | `identity_public_key`, `signing_public_key`, `ephemeral_public_key` | `^[A-Za-z0-9_-]{43}$` | `char(43)` + CHECK (To-Be, було `text`) | Виправлено |
 | `signature`, `identity_key_signature`, `envelope.sig` | `^[A-Za-z0-9_-]{86}$` | `char(86)`; String | Виправлено |
 | `member_set_hash` | `^[0-9a-f]{64}$` | `char(64)` + CHECK (To-Be, було `text`) | Виправлено |
