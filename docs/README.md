@@ -41,13 +41,16 @@
 
 Кожен Pull Request у `main` перевіряє робочий процес GitHub Actions [docs-linter.yml](../.github/workflows/docs-linter.yml): markdownlint за правилами [.markdownlint.json](../.markdownlint.json) і власне правило [no-transliteration](../.markdownlint-rules/no-transliteration.js), яке забороняє кириличну транслітерацію англомовних термінів і символ довгого тире (U+2014).
 
-## Робочий документ Розділу 1
+## Робочі документи розділів
 
-Зведену версію Розділу 1 для рецензування викладачем і науковим керівником розміщено в Google Docs з доступом «Can comment»:
+Зведені версії розділів для рецензування викладачем і науковим керівником розміщено в Google Docs з доступом «Can comment»:
 
-[F2_Diploma_Chapter1_Zaloha](https://docs.google.com/document/d/1AIUML3DU8Cm5zgQbdR6n3Sgu3XXqXCxWx7DBklFwNRI/edit)
+| Розділ | Документ | Джерело істини |
+|---|---|---|
+| Розділ 1 | [F2_Diploma_Chapter1_Zaloha](https://docs.google.com/document/d/1AIUML3DU8Cm5zgQbdR6n3Sgu3XXqXCxWx7DBklFwNRI/edit) | [1_analysis.md](1_analysis.md) |
+| Розділ 2 | [F2_Diploma_Chapter2_Zaloha](https://docs.google.com/document/d/1S4RG0ErShjN4vgnKgb4gfjgN86WCFK6ndZU625NShKw/edit) | [2_design.md](2_design.md) |
 
-Джерелом істини залишається [1_analysis.md](1_analysis.md). Зміни, внесені за коментарями в документі, переносяться в Markdown через Pull Request.
+Діаграми Mermaid у документі Розділу 2 вбудовано як зображення з каталогу [img/](img/). Зміни, внесені за коментарями в документах, переносяться в Markdown через Pull Request.
 
 ## Матриця нефункціональних вимог (NFRs)
 
