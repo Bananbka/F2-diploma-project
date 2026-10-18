@@ -1,0 +1,6 @@
+{
+  // Rules live in .markdownlint.json; this file only wires the custom language rule and scope.
+  "customRules": ["./.markdownlint-rules/no-transliteration.js"],
+  "globs": ["docs/**/*.md"],
+  "ignores": ["**/node_modules/**"]
+}
