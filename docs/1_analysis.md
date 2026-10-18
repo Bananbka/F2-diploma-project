@@ -277,26 +277,26 @@ Telegram є централізованою розподіленою систем
 
 ### 1.5.2 Функціональні вимоги (Core Features)
 
-**Модуль users (автентифікація та сесії)**
+#### Модуль users (автентифікація та сесії)
 
 - **F1.** Реєструвати обліковий запис із підтвердженням email одноразовим кодом (TTL 15 хв, не більше 5 спроб) і видавати пару JWT (access 30 хв, refresh 7 днів) в HttpOnly-cookie з можливістю примусового відкликання сесії.
 
-**Модуль crypto (ідентичність і ключі)**
+#### Модуль crypto (ідентичність і ключі)
 
 - **F2.** Генерувати на клієнті ключі ідентичності пристрою (X25519, Ed25519) і підписаний prekey, публікувати відкриті частини та зберігати приватні лише як пакет, зашифрований AES-256-GCM під ключем Argon2id. Ротувати signed prekey з перевіркою підпису на сервері.
 - **F3.** Створювати епохи групового ключа й атомарно ротувати їх у таких випадках: видалення або додавання учасника, відкликання пристрою, а також за розкладом Celery beat (інтервал 30 днів, неактивні чати пропускаються). Гранти X25519 розсилаються учасникам, гранти закритих епох видаляються через 30 днів.
 
-**Модуль messages (обмін повідомленнями)**
+#### Модуль messages (обмін повідомленнями)
 
 - **F4.** Шифрувати й підписувати повідомлення на клієнті (sender-key ratchet, AES-256-GCM, Ed25519, AAD-прив’язка до чату й епохи) та відхиляти на сервері конверти з невідповідною епохою або недійсним підписом.
 - **F5.** Доставляти події (повідомлення, редагування, реакції, індикатор набору, присутність) через WebSocket і підтримувати персональну чергу доставки Redis Streams із підтвердженням, повторною доставкою та серверною дедуплікацією за `client_message_id`.
 
-**Модуль chats (керування чатами)**
+#### Модуль chats (керування чатами)
 
 - **F6.** Створювати особисті чати, групи (до 256 учасників) і канали, керувати ролями OWNER, ADMIN та MEMBER з перевіркою рангу, а також перевіряти склад групи на клієнті за `member_set_hash`.
 - **F7.** Підписувати публікації каналів Ed25519 і перевіряти підпис на сервері під час публікації.
 
-**Модуль files (вкладення)**
+#### Модуль files (вкладення)
 
 - **F8.** Шифрувати вкладення на клієнті (AES-256-GCM, до 50 МБ на файл), зберігати шифротекст у S3-сумісному сховищі RustFS і видавати вкладення пакетами до 50 об’єктів за один запит.
 
@@ -365,32 +365,32 @@ Telegram є централізованою розподіленою систем
 
 ## Список джерел до розділу 1
 
-1. Signal-Server. – URL: https://github.com/signalapp/Signal-Server
-2. The PQXDH Key Agreement Protocol. – URL: https://signal.org/docs/specifications/pqxdh/
-3. Triple Threat: Signal’s Ratchet Goes Post-Quantum. – URL: https://blog.quarkslab.com/triple-threat-signals-ratchet-goes-post-quantum.html
-4. Technology preview: Sealed sender for Signal. – URL: https://signal.org/blog/sealed-sender/
-5. Connell G. et al. Secret Key Recovery in a Global-Scale End-to-End Encryption System // USENIX OSDI 2024. – URL: https://www.usenix.org/conference/osdi24/presentation/connell
-6. How WhatsApp enables multi-device capability. – URL: https://engineering.fb.com/2021/07/14/security/whatsapp-multi-device/
-7. Deploying key transparency at WhatsApp. – URL: https://engineering.fb.com/2023/04/13/security/whatsapp-key-transparency/
-8. Rust at Scale: An Added Layer of Security for WhatsApp. – URL: https://engineering.fb.com/2026/01/27/security/rust-at-scale-security-whatsapp/
-9. Reed R. That’s ‘Billion’ with a ‘B’: Scaling to the Next Level at WhatsApp // Erlang Factory 2014. – URL: https://www.erlang-factory.com/sfbay2014/rick-reed
-10. Zhang Z. Scalability and Infrastructure of RPC in WhatsApp Using Erlang // Code BEAM 2024. – URL: https://elixirmerge.com/p/scalability-and-infrastructure-of-rpc-in-whatsapp-using-erlang
-11. MTProto Mobile Protocol. – URL: https://core.telegram.org/mtproto
-12. Working with Updates. – URL: https://core.telegram.org/api/updates
-13. End-to-End Encryption, Secret Chats. – URL: https://core.telegram.org/api/end-to-end
-14. Albrecht M. R., Mareková L., Paterson K. G., Stepanovs I. Four Attacks and a Proof for Telegram // IEEE S&P 2022. – URL: https://eprint.iacr.org/2023/469
-15. Marlinspike M., Perrin T. The X3DH Key Agreement Protocol. – URL: https://signal.org/docs/specifications/x3dh/
-16. Perrin T., Marlinspike M. The Double Ratchet Algorithm. – URL: https://signal.org/docs/specifications/doubleratchet/
-17. RFC 9420. The Messaging Layer Security (MLS) Protocol. – URL: https://www.rfc-editor.org/rfc/rfc9420
-18. RFC 5869. HMAC-based Extract-and-Expand Key Derivation Function (HKDF). – URL: https://www.rfc-editor.org/rfc/rfc5869
-19. RFC 7748. Elliptic Curves for Security. – URL: https://www.rfc-editor.org/rfc/rfc7748
-20. RFC 8032. Edwards-Curve Digital Signature Algorithm (EdDSA). – URL: https://www.rfc-editor.org/rfc/rfc8032
-21. RFC 9106. Argon2 Memory-Hard Function for Password Hashing and Proof-of-Work Applications. – URL: https://www.rfc-editor.org/rfc/rfc9106
-22. RFC 8446. The Transport Layer Security (TLS) Protocol Version 1.3. – URL: https://www.rfc-editor.org/rfc/rfc8446
-23. NIST SP 800-38D. Recommendation for Block Cipher Modes of Operation: Galois/Counter Mode (GCM) and GMAC. – URL: https://csrc.nist.gov/pubs/sp/800/38/d/final
-24. Регламент (ЄС) 2016/679 (General Data Protection Regulation). – URL: https://eur-lex.europa.eu/eli/reg/2016/679/oj
-25. Регламент (ЄС) 2022/1925 (Digital Markets Act). – URL: https://eur-lex.europa.eu/eli/reg/2022/1925/oj
-26. OWASP Application Security Verification Standard 5.0. – URL: https://owasp.org/www-project-application-security-verification-standard/
-27. GSMA RCS Universal Profile 3.0. – URL: https://www.gsma.com/solutions-and-impact/technologies/networks/rcs/
-28. iMessage with PQ3: The new state of the art in quantum-secure messaging at scale. – URL: https://security.apple.com/blog/imessage-pq3/
-29. Redis Streams. – URL: https://redis.io/docs/latest/develop/data-types/streams/
+1. Signal-Server. – URL: <https://github.com/signalapp/Signal-Server>
+2. The PQXDH Key Agreement Protocol. – URL: <https://signal.org/docs/specifications/pqxdh/>
+3. Triple Threat: Signal’s Ratchet Goes Post-Quantum. – URL: <https://blog.quarkslab.com/triple-threat-signals-ratchet-goes-post-quantum.html>
+4. Technology preview: Sealed sender for Signal. – URL: <https://signal.org/blog/sealed-sender/>
+5. Connell G. et al. Secret Key Recovery in a Global-Scale End-to-End Encryption System // USENIX OSDI 2024. – URL: <https://www.usenix.org/conference/osdi24/presentation/connell>
+6. How WhatsApp enables multi-device capability. – URL: <https://engineering.fb.com/2021/07/14/security/whatsapp-multi-device/>
+7. Deploying key transparency at WhatsApp. – URL: <https://engineering.fb.com/2023/04/13/security/whatsapp-key-transparency/>
+8. Rust at Scale: An Added Layer of Security for WhatsApp. – URL: <https://engineering.fb.com/2026/01/27/security/rust-at-scale-security-whatsapp/>
+9. Reed R. That’s ‘Billion’ with a ‘B’: Scaling to the Next Level at WhatsApp // Erlang Factory 2014. – URL: <https://www.erlang-factory.com/sfbay2014/rick-reed>
+10. Zhang Z. Scalability and Infrastructure of RPC in WhatsApp Using Erlang // Code BEAM 2024. – URL: <https://elixirmerge.com/p/scalability-and-infrastructure-of-rpc-in-whatsapp-using-erlang>
+11. MTProto Mobile Protocol. – URL: <https://core.telegram.org/mtproto>
+12. Working with Updates. – URL: <https://core.telegram.org/api/updates>
+13. End-to-End Encryption, Secret Chats. – URL: <https://core.telegram.org/api/end-to-end>
+14. Albrecht M. R., Mareková L., Paterson K. G., Stepanovs I. Four Attacks and a Proof for Telegram // IEEE S&P 2022. – URL: <https://eprint.iacr.org/2023/469>
+15. Marlinspike M., Perrin T. The X3DH Key Agreement Protocol. – URL: <https://signal.org/docs/specifications/x3dh/>
+16. Perrin T., Marlinspike M. The Double Ratchet Algorithm. – URL: <https://signal.org/docs/specifications/doubleratchet/>
+17. RFC 9420. The Messaging Layer Security (MLS) Protocol. – URL: <https://www.rfc-editor.org/rfc/rfc9420>
+18. RFC 5869. HMAC-based Extract-and-Expand Key Derivation Function (HKDF). – URL: <https://www.rfc-editor.org/rfc/rfc5869>
+19. RFC 7748. Elliptic Curves for Security. – URL: <https://www.rfc-editor.org/rfc/rfc7748>
+20. RFC 8032. Edwards-Curve Digital Signature Algorithm (EdDSA). – URL: <https://www.rfc-editor.org/rfc/rfc8032>
+21. RFC 9106. Argon2 Memory-Hard Function for Password Hashing and Proof-of-Work Applications. – URL: <https://www.rfc-editor.org/rfc/rfc9106>
+22. RFC 8446. The Transport Layer Security (TLS) Protocol Version 1.3. – URL: <https://www.rfc-editor.org/rfc/rfc8446>
+23. NIST SP 800-38D. Recommendation for Block Cipher Modes of Operation: Galois/Counter Mode (GCM) and GMAC. – URL: <https://csrc.nist.gov/pubs/sp/800/38/d/final>
+24. Регламент (ЄС) 2016/679 (General Data Protection Regulation). – URL: <https://eur-lex.europa.eu/eli/reg/2016/679/oj>
+25. Регламент (ЄС) 2022/1925 (Digital Markets Act). – URL: <https://eur-lex.europa.eu/eli/reg/2022/1925/oj>
+26. OWASP Application Security Verification Standard 5.0. – URL: <https://owasp.org/www-project-application-security-verification-standard/>
+27. GSMA RCS Universal Profile 3.0. – URL: <https://www.gsma.com/solutions-and-impact/technologies/networks/rcs/>
+28. iMessage with PQ3: The new state of the art in quantum-secure messaging at scale. – URL: <https://security.apple.com/blog/imessage-pq3/>
+29. Redis Streams. – URL: <https://redis.io/docs/latest/develop/data-types/streams/>

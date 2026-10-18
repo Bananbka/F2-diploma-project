@@ -18,7 +18,7 @@ code change. Enabling HSTS before certificates exist would lock users out of a w
 deployment, and sending it over plain HTTP is ignored by browsers anyway.
 
 **What it costs today.** Cookies carry `Secure` only when `COOKIE_SECURE` is on, which local
-development turns off. Over plain HTTP the transport is readable — the *message* contents are not,
+development turns off. Over plain HTTP the transport is readable – the *message* contents are not,
 because they are sealed client-side, but metadata, cookies and the wrapped key bundle are.
 
 **To close it.** Terminate TLS at nginx, set `COOKIE_SECURE=true`, uncomment the HSTS line.
@@ -68,8 +68,8 @@ interop vector, the spec section) is already correct and should be kept.
 
 ## 4. Test coverage is uneven
 
-`src/api/tests/crypto/` covers the crypto surface, authorization, the rate limiter, and — as of
-the last pass — folders, contacts and files. What that leaves:
+`src/api/tests/crypto/` covers the crypto surface, authorization, the rate limiter, and – as of
+the last pass – folders, contacts and files. What that leaves:
 
 - **The chats domain has no dedicated suite.** Chat creation, participant RBAC and the chat list
   are exercised only incidentally, as setup for other tests. The rank-comparison rules in
@@ -83,7 +83,7 @@ the last pass — folders, contacts and files. What that leaves:
 - **Nothing exercises the Celery tasks end to end** except `test_rotation_tasks.py`.
 
 **The awkward part.** The integration suite has to run with `RATE_LIMIT_ENABLED=false`, because it
-registers dozens of accounts from one address — exactly the pattern the registration limit exists
+registers dozens of accounts from one address – exactly the pattern the registration limit exists
 to stop. The limiter has its own unit tests that turn it back on, so it is not left uncovered, but
 the suite cannot prove the limits are wired into the endpoints. A per-test limiter reset, or a
 test-only allowlisted address, would let the suite run with limits on.
@@ -103,7 +103,7 @@ test-only allowlisted address, would let the suite run with limits on.
 - **`ReceiverChain.skipped` is memory-only.** A reload loses the retained keys, so a genuinely
   late message that arrives after a refresh reports `failed` rather than opening. Persisting chain
   state in IndexedDB under a key wrapped by the KEK is the documented intent.
-- **Two `Cache-Control` headers on static assets** — nginx emits one from `expires 1y` and one from
+- **Two `Cache-Control` headers on static assets** – nginx emits one from `expires 1y` and one from
   `add_header`. Harmless (browsers take the first) but untidy.
 - **No account deletion.** A user can be disabled via `is_active`, but nothing exposes it and
   there is no way to erase an account.
@@ -120,4 +120,4 @@ These look like gaps and are deliberate:
 - **`forwarded_from` is unverifiable.** A forward under E2E is a re-send sealed by the forwarder,
   so provenance is the forwarder's claim. The UI must never render it as verified.
 - **No reactions, pinning, mute, invite links, polls or scheduled messages.** No backend exists for
-  any of them, so the UI does not offer them — a control that cannot work is worse than none.
+  any of them, so the UI does not offer them – a control that cannot work is worse than none.
