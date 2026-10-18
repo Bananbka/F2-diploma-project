@@ -1,6 +1,6 @@
 import { ChangeDetectionStrategy, Component, computed, inject, input, signal } from '@angular/core';
 import { Router } from '@angular/router';
-import { FolderPlus, Hash, Lock, LucideAngularModule, Plus, Search, ShieldOff, Users } from 'lucide-angular';
+import { BellOff, FolderPlus, Hash, Lock, LucideAngularModule, Plus, Search, ShieldOff, Users } from 'lucide-angular';
 import { firstValueFrom } from 'rxjs';
 
 import { Chat, UserSearchResult } from '../../../core/models/chat.model';
@@ -141,6 +141,7 @@ export class ChatSidebarComponent {
     readonly lockIcon = Lock;
     readonly shieldOffIcon = ShieldOff;
     readonly folderIcon = FolderPlus;
+    readonly bellOffIcon = BellOff;
 
     isChatInFolder(folder: Folder, chatId: string): boolean {
         return folder.items.some((item) => item.chat_id === chatId);

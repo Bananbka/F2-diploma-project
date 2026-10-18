@@ -1,8 +1,9 @@
+import { HttpErrorResponse } from '@angular/common/http';
 import { TestBed } from '@angular/core/testing';
-import { Subject } from 'rxjs';
+import { of, Subject, throwError } from 'rxjs';
 
 import { Chat } from '../models/chat.model';
-import { ChatKeys, MessageResponse } from '../models/crypto.model';
+import { ChatKeys, MessageAttachment, MessageResponse } from '../models/crypto.model';
 import { ChatApiService } from './chat-api.service';
 import { ChatStoreService } from './chat-store.service';
 import { CryptoApiService } from './crypto-api.service';
@@ -27,6 +28,8 @@ function decrypted(id: string, status: DecryptStatus): DecryptedMessage {
         forwardedFrom: null,
         attachments: [],
         senderVerified: false,
+        reactions: [],
+        isPinned: false,
     };
 }
 
@@ -41,6 +44,32 @@ function chat(overrides: Partial<Chat> = {}): Chat {
         created_at: '2026-01-01T00:00:00Z',
         updated_at: null,
         participants: [],
+        muted_until: null,
+        is_muted: false,
+        ...overrides,
+    };
+}
+
+function messageResponse(overrides: Partial<MessageResponse> = {}): MessageResponse {
+    return {
+        _id: 'a',
+        chat_id: CHAT,
+        sender_id: 'peer',
+        encrypted_content: null,
+        envelope: null,
+        channel_post: null,
+        content_format: 'sender_keys_v1',
+        reply_to_message_id: null,
+        forwarded_from: null,
+        created_at: '2026-01-01T00:00:00Z',
+        attachments: null,
+        reactions: [],
+        is_read: false,
+        is_pinned: false,
+        pinned_at: null,
+        pinned_by: null,
+        is_edited: false,
+        is_encrypted: true,
         ...overrides,
     };
 }
@@ -52,7 +81,20 @@ describe('ChatStoreService', () => {
         TestBed.configureTestingModule({
             providers: [
                 ChatStoreService,
-                { provide: ChatApiService, useValue: jasmine.createSpyObj('ChatApiService', ['getChats', 'getChat']) },
+                {
+                    provide: ChatApiService,
+                    useValue: jasmine.createSpyObj('ChatApiService', [
+                        'getChats',
+                        'getChat',
+                        'toggleReaction',
+                        'removeReaction',
+                        'pinMessage',
+                        'unpinMessage',
+                        'getPinnedMessages',
+                        'muteChat',
+                        'getReadState',
+                    ]),
+                },
                 {
                     provide: CryptoApiService,
                     useValue: jasmine.createSpyObj('CryptoApiService', ['getChatKeys', 'enableEncryption']),
@@ -66,6 +108,8 @@ describe('ChatStoreService', () => {
                         'sendText',
                         'sendChannelPost',
                         'recordOutgoing',
+                        'patchMeta',
+                        'editText',
                     ]),
                 },
                 {
@@ -194,6 +238,80 @@ describe('ChatStoreService', () => {
         });
     });
 
+    describe('openChat', () => {
+        /**
+         * The fix this guards: `openChat` used to let `loadMessages` fetch this chat's keys a
+         * second time, immediately after `ensureEncryptionEnabled` had already fetched them. For a
+         * non-channel chat, the `ChatKeys` returned by `ensureEncryptionEnabled` (here, via the
+         * mocked `cryptoApi.getChatKeys`) must be threaded straight through as `loadMessages`'
+         * fourth argument instead of being dropped.
+         */
+        it('passes the ChatKeys fetched for this chat through to loadMessages as the 4th argument', async () => {
+            const chatApi = TestBed.inject(ChatApiService) as jasmine.SpyObj<ChatApiService>;
+            const cryptoApi = TestBed.inject(CryptoApiService) as jasmine.SpyObj<CryptoApiService>;
+            const messages = TestBed.inject(MessageService) as jasmine.SpyObj<MessageService>;
+
+            const keys: ChatKeys = {
+                crypto_mode: 'sender_keys_v1',
+                history_visibility: 'joined',
+                current_epoch: 1,
+                my_join_epoch: 1,
+                epochs: [],
+                distributions: [],
+            };
+
+            chatApi.getChat.and.returnValue(of(chat()));
+            cryptoApi.getChatKeys.and.returnValue(of(keys));
+            chatApi.getPinnedMessages.and.returnValue(of([]));
+            chatApi.getReadState.and.returnValue(of([]));
+            messages.loadMessages.and.resolveTo({ raw: [], messages: [] });
+
+            store.chats.set([chat()]);
+            store.activeChatId.set(CHAT);
+
+            // Flushes the microtask queue (and the effect's scheduling) so openChat's whole async
+            // chain — hydrateChat, ensureEncryptionEnabled, loadMessages — has actually run.
+            await new Promise((resolve) => setTimeout(resolve, 0));
+
+            expect(messages.loadMessages).toHaveBeenCalledWith(CHAT, 50, undefined, keys);
+        });
+    });
+
+    describe('editMessage', () => {
+        it('threads the caller-supplied attachment list through to MessageService.editText', async () => {
+            const messages = TestBed.inject(MessageService) as jasmine.SpyObj<MessageService>;
+            const attachment: MessageAttachment = {
+                url: 'files/attachments/a/new.png',
+                name: 'new.png',
+                size: 10,
+                content_type: 'image/png',
+            };
+
+            store.chats.set([chat()]);
+            store.activeChatId.set(CHAT);
+            store.messages.set([decrypted('a', 'ok')]);
+            messages.editText.and.resolveTo({ ...decrypted('a', 'ok'), text: 'edited', attachments: [attachment] });
+
+            await store.editMessage('a', 'edited', [attachment]);
+
+            expect(messages.editText).toHaveBeenCalledWith(CHAT, 'a', 'edited', [attachment]);
+        });
+
+        it('falls back to the message’s existing attachments when none are supplied', async () => {
+            const messages = TestBed.inject(MessageService) as jasmine.SpyObj<MessageService>;
+            const existing = { ...decrypted('a', 'ok'), attachments: [] };
+
+            store.chats.set([chat()]);
+            store.activeChatId.set(CHAT);
+            store.messages.set([existing]);
+            messages.editText.and.resolveTo({ ...existing, text: 'edited' });
+
+            await store.editMessage('a', 'edited');
+
+            expect(messages.editText).toHaveBeenCalledWith(CHAT, 'a', 'edited', existing.attachments);
+        });
+    });
+
     describe('selection', () => {
         beforeEach(() => {
             store.chats.set([chat()]);
@@ -258,6 +376,209 @@ describe('ChatStoreService', () => {
 
         it('says so when a chat has no messages at all', () => {
             expect(store.preview(chat()).text).toBe('No messages yet');
+        });
+    });
+
+    describe('reactions and pins', () => {
+        let chatApi: jasmine.SpyObj<ChatApiService>;
+        let messages: jasmine.SpyObj<MessageService>;
+
+        beforeEach(() => {
+            chatApi = TestBed.inject(ChatApiService) as jasmine.SpyObj<ChatApiService>;
+            messages = TestBed.inject(MessageService) as jasmine.SpyObj<MessageService>;
+
+            store.chats.set([chat()]);
+            store.activeChatId.set(CHAT);
+            store.messages.set([decrypted('a', 'ok')]);
+        });
+
+        /** The endpoint itself toggles, so react() only ever calls the one method. */
+        it('patches the message in place after reacting, without re-decrypting', async () => {
+            const raw = messageResponse({ _id: 'a', reactions: [{ user_id: 'me', emoji: '👍', created_at: 'now' }] });
+            chatApi.toggleReaction.and.returnValue(of(raw));
+            messages.patchMeta.and.returnValue({ ...decrypted('a', 'ok'), reactions: raw.reactions, isPinned: false });
+
+            await store.react('a', '👍');
+
+            expect(chatApi.toggleReaction).toHaveBeenCalledWith('a', '👍');
+            expect(store.messages()[0].reactions).toEqual(raw.reactions);
+        });
+
+        /** A permission refusal must surface, not disappear silently. */
+        it('reports PIN_FORBIDDEN as a readable message', async () => {
+            chatApi.pinMessage.and.returnValue(
+                throwError(
+                    () =>
+                        new HttpErrorResponse({
+                            status: 403,
+                            error: { error_code: 'PIN_FORBIDDEN' },
+                        })
+                )
+            );
+
+            await store.pinMessage('a');
+
+            expect(store.realtimeError()).toContain('permission');
+        });
+
+        it('reports PIN_LIMIT_REACHED as a readable message', async () => {
+            chatApi.pinMessage.and.returnValue(
+                throwError(
+                    () =>
+                        new HttpErrorResponse({
+                            status: 400,
+                            error: { error_code: 'PIN_LIMIT_REACHED' },
+                        })
+                )
+            );
+
+            await store.pinMessage('a');
+
+            expect(store.realtimeError()).toContain('maximum');
+        });
+
+        /** Only an owner/admin may pin in a group; either participant may in a private chat. */
+        it('gates pinning by role in a group but not in a private chat', () => {
+            store.chats.set([
+                chat({ chat_type: 'group', participants: [{ user_id: 'me', role: 'member', joined_at: '' }] }),
+            ]);
+            expect(store.canPinMessages()).toBeFalse();
+
+            store.chats.set([chat({ chat_type: 'private' })]);
+            expect(store.canPinMessages()).toBeTrue();
+        });
+
+        it('updates local mute state from the server response', async () => {
+            const future = new Date(Date.now() + 86_400_000).toISOString();
+            chatApi.muteChat.and.returnValue(of({ chat_id: CHAT, muted_until: future }));
+
+            await store.setMuted(CHAT, future);
+
+            expect(store.chats()[0].is_muted).toBeTrue();
+            expect(store.chats()[0].muted_until).toBe(future);
+        });
+    });
+
+    describe('read receipts', () => {
+        const ME = 'me';
+        const PEER = 'peer';
+        const OTHER = 'other';
+
+        beforeEach(() => {
+            const session = TestBed.inject(SessionService) as unknown as { user: () => { id: string } | null };
+            session.user = () => ({ id: ME });
+        });
+
+        it('reports an unread private-chat message as read by no one', () => {
+            store.chats.set([
+                chat({
+                    chat_type: 'private',
+                    participants: [
+                        { user_id: ME, role: 'member', joined_at: '' },
+                        { user_id: PEER, role: 'member', joined_at: '' },
+                    ],
+                }),
+            ]);
+            store.activeChatId.set(CHAT);
+            store.readState.set(new Map([[PEER, null]]));
+
+            expect(store.readReceipt(decrypted('b', 'ok'))).toEqual({ readCount: 0, total: 1 });
+        });
+
+        /** ObjectId strings sort lexicographically in creation order, so `>=` is the read test. */
+        it('reports a private-chat message as read once the peer catches up to it', () => {
+            store.chats.set([
+                chat({
+                    chat_type: 'private',
+                    participants: [
+                        { user_id: ME, role: 'member', joined_at: '' },
+                        { user_id: PEER, role: 'member', joined_at: '' },
+                    ],
+                }),
+            ]);
+            store.activeChatId.set(CHAT);
+            store.readState.set(new Map([[PEER, 'b']]));
+
+            expect(store.readReceipt(decrypted('a', 'ok'))).toEqual({ readCount: 1, total: 1 });
+            expect(store.readReceipt(decrypted('c', 'ok'))).toEqual({ readCount: 0, total: 1 });
+        });
+
+        it('counts "read by N of M" across a group, excluding the sender', () => {
+            store.chats.set([
+                chat({
+                    chat_type: 'group',
+                    participants: [
+                        { user_id: ME, role: 'member', joined_at: '' },
+                        { user_id: PEER, role: 'member', joined_at: '' },
+                        { user_id: OTHER, role: 'member', joined_at: '' },
+                    ],
+                }),
+            ]);
+            store.activeChatId.set(CHAT);
+            store.readState.set(
+                new Map([
+                    [PEER, 'b'],
+                    [OTHER, null],
+                ])
+            );
+
+            expect(store.readReceipt(decrypted('b', 'ok'))).toEqual({ readCount: 1, total: 2 });
+        });
+
+        it('advances the read map only for the active chat on a message_read broadcast', () => {
+            const ws = TestBed.inject(WebSocketService) as unknown as { messages: Subject<unknown> };
+            store.chats.set([chat({ chat_type: 'private' })]);
+            store.activeChatId.set(CHAT);
+            store.bindRealtime();
+
+            ws.messages.next({
+                event_type: 'message_read',
+                chat_id: 'some-other-chat',
+                user_id: PEER,
+                payload: { last_read_message_id: 'z' },
+            });
+            expect(store.readState().get(PEER)).toBeUndefined();
+
+            ws.messages.next({
+                event_type: 'message_read',
+                chat_id: CHAT,
+                user_id: PEER,
+                payload: { last_read_message_id: 'z' },
+            });
+            expect(store.readState().get(PEER)).toBe('z');
+        });
+
+        /**
+         * `GET /chats/` always returns `participants: []` (`enrich_chats_with_mongo_data` has no
+         * participants key to give). Refreshing the list after a membership change must not clobber
+         * the roster a prior `GET /chats/{id}` already hydrated for the open chat — otherwise
+         * `readReceipt` loses its "other participants" and read receipts go dark until the chat is
+         * reopened.
+         */
+        it('preserves a hydrated roster across a loadChats() refresh triggered by participants_added', async () => {
+            const chatApi = TestBed.inject(ChatApiService) as jasmine.SpyObj<ChatApiService>;
+            const ws = TestBed.inject(WebSocketService) as unknown as { messages: Subject<unknown> };
+
+            const hydrated = chat({
+                chat_type: 'private',
+                participants: [
+                    { user_id: ME, role: 'member', joined_at: '' },
+                    { user_id: PEER, role: 'member', joined_at: '' },
+                ],
+            });
+            store.chats.set([hydrated]);
+            store.activeChatId.set(CHAT);
+            store.readState.set(new Map([[PEER, 'b']]));
+            store.bindRealtime();
+
+            // The list endpoint's shape: same chat, but with the roster the endpoint never populates.
+            chatApi.getChats.and.returnValue(of([chat({ chat_type: 'private', participants: [] })]));
+
+            ws.messages.next({ event_type: 'participants_added', chat_id: CHAT });
+            await Promise.resolve();
+
+            expect(store.activeChat()?.participants).toEqual(hydrated.participants);
+            expect(store.readReceipt(decrypted('a', 'ok'))).toEqual({ readCount: 1, total: 1 });
         });
     });
 });

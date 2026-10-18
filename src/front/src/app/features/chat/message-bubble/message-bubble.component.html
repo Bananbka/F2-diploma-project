@@ -50,7 +50,10 @@
                 (click)="jumpRequested.emit(quoted.id)"
             >
                 <span class="quote-author">{{ quotedAuthor() }}</span>
-                <span class="quote-text">{{ quoted.text ?? 'Unreadable message' }}</span>
+                <span
+                    class="quote-text"
+                    [innerHTML]="quoted.text ?? 'Unreadable message' | twemoji"
+                ></span>
             </button>
         } @else {
             <!-- Not a button: the quoted message is not loaded, so there is nowhere to jump to.
@@ -72,7 +75,10 @@
         </p>
     }
 
-    <div class="bubble">
+    <div
+        class="bubble"
+        [class.is-sticker-only]="isStickerOnly()"
+    >
         @if (view().icon; as statusIcon) {
             <lucide-icon
                 [img]="statusIcon"
@@ -81,10 +87,15 @@
         }
 
         <div class="content">
-            @if (message().text !== null) {
-                <p class="text">{{ message().text }}</p>
-            } @else {
-                <p class="text is-placeholder">{{ view().placeholder }}</p>
+            @if (!isStickerOnly()) {
+                @if (message().text !== null) {
+                    <p
+                        class="text"
+                        [innerHTML]="message().text | twemoji"
+                    ></p>
+                } @else {
+                    <p class="text is-placeholder">{{ view().placeholder }}</p>
+                }
             }
 
             <!-- The reason is spelled out rather than encoded in a colour. A user cannot act on
@@ -94,28 +105,239 @@
             }
 
             <!-- Fetched through the API rather than from the URL the upload returned: the message
-                 bucket is private, so only an authorised request can read it. The bytes arrive
-                 encrypted — the browser saves them, it cannot open them. -->
+                 bucket is private, so only an authorised request can read it. Media kinds are
+                 decrypted client-side before rendering; only a message we actually opened
+                 (`canRenderMedia`) is ever offered that treatment — see docs/ui-states.md. -->
             @if (message().attachments.length) {
                 <ul class="attachments">
                     @for (file of message().attachments; track file.url) {
-                        <li>
-                            <a
-                                class="attachment"
-                                [href]="downloadUrl(file)"
-                                [download]="file.name"
-                                rel="noopener"
-                            >
-                                <lucide-icon [img]="paperclipIcon" />
-                                <span class="attachment-name">{{ file.name }}</span>
-                                <span class="attachment-size">{{ readableSize(file.size) }}</span>
-                            </a>
-                        </li>
+                        @switch (canRenderMedia() ? (file.kind ?? 'file') : 'file') {
+                            @case ('image') {
+                                <li
+                                    class="media-tile"
+                                    appVisibleOnce
+                                    (visible)="onMediaVisible(file)"
+                                >
+                                    @switch (mediaStatus(file.url)) {
+                                        @case ('ready') {
+                                            <img
+                                                class="media-image"
+                                                [src]="mediaObjectUrl(file.url)"
+                                                [alt]="file.name"
+                                            />
+                                        }
+                                        @case ('error') {
+                                            <div class="media-error">
+                                                <lucide-icon [img]="alertIcon" />
+                                                Could not decrypt this image
+                                            </div>
+                                        }
+                                        @default {
+                                            <div class="media-skeleton">Decrypting…</div>
+                                        }
+                                    }
+                                </li>
+                            }
+                            @case ('gif') {
+                                <li
+                                    class="media-tile"
+                                    appVisibleOnce
+                                    (visible)="onMediaVisible(file)"
+                                >
+                                    @switch (mediaStatus(file.url)) {
+                                        @case ('ready') {
+                                            <img
+                                                class="media-image"
+                                                [src]="mediaObjectUrl(file.url)"
+                                                [alt]="file.name"
+                                            />
+                                            <span class="tile-badge">GIF</span>
+                                        }
+                                        @case ('error') {
+                                            <div class="media-error">
+                                                <lucide-icon [img]="alertIcon" />
+                                                Could not decrypt this GIF
+                                            </div>
+                                        }
+                                        @default {
+                                            <div class="media-skeleton">Decrypting…</div>
+                                        }
+                                    }
+                                </li>
+                            }
+                            @case ('video') {
+                                <li
+                                    class="media-tile video-tile"
+                                    appVisibleOnce
+                                    (visible)="onMediaVisible(file)"
+                                >
+                                    @switch (mediaStatus(file.url)) {
+                                        @case ('ready') {
+                                            <video
+                                                class="media-video"
+                                                [src]="mediaObjectUrl(file.url)"
+                                                controls
+                                                preload="metadata"
+                                            ></video>
+                                        }
+                                        @case ('error') {
+                                            <div class="media-error">
+                                                <lucide-icon [img]="alertIcon" />
+                                                Could not decrypt this video
+                                            </div>
+                                        }
+                                        @default {
+                                            <div class="video-placeholder">
+                                                <lucide-icon
+                                                    [img]="playIcon"
+                                                    class="play-overlay"
+                                                />
+                                                @if (file.duration_ms) {
+                                                    <span class="duration-badge">{{
+                                                        formatDuration(file.duration_ms)
+                                                    }}</span>
+                                                }
+                                            </div>
+                                        }
+                                    }
+                                </li>
+                            }
+                            @case ('audio') {
+                                <li class="audio-row">
+                                    <button
+                                        type="button"
+                                        class="audio-play"
+                                        [disabled]="mediaStatus(file.url) !== 'ready'"
+                                        [attr.aria-label]="playingUrl() === file.url ? 'Pause' : 'Play'"
+                                        (click)="toggleAudio(file)"
+                                    >
+                                        <lucide-icon [img]="playingUrl() === file.url ? pauseIcon : playIcon" />
+                                    </button>
+                                    <span class="audio-waveform">
+                                        @for (bar of waveform(file); track $index) {
+                                            <span
+                                                class="wave-bar"
+                                                [style.height.%]="barHeight(bar)"
+                                            ></span>
+                                        }
+                                    </span>
+                                    <span class="audio-time">{{ formatDuration(file.duration_ms) }}</span>
+                                    @if (mediaStatus(file.url) === 'ready') {
+                                        <audio
+                                            [attr.data-audio-url]="file.url"
+                                            [src]="mediaObjectUrl(file.url)"
+                                            (ended)="onAudioEnded(file)"
+                                        ></audio>
+                                    } @else if (mediaStatus(file.url) === 'error') {
+                                        <lucide-icon
+                                            [img]="alertIcon"
+                                            class="audio-error"
+                                            title="Could not decrypt this voice message"
+                                        />
+                                    }
+                                </li>
+                            }
+                            @case ('sticker') {
+                                <li class="sticker-tile">
+                                    <img
+                                        class="sticker-image"
+                                        [src]="file.url"
+                                        [alt]="file.name"
+                                    />
+                                </li>
+                            }
+                            @default {
+                                <li>
+                                    <a
+                                        class="attachment"
+                                        [href]="downloadUrl(file)"
+                                        [download]="file.name"
+                                        rel="noopener"
+                                    >
+                                        <lucide-icon [img]="paperclipIcon" />
+                                        <span class="attachment-name">{{ file.name }}</span>
+                                        <span class="attachment-size">{{ readableSize(file.size) }}</span>
+                                    </a>
+                                </li>
+                            }
+                        }
                     }
                 </ul>
             }
         </div>
     </div>
+
+    <!-- Reactions are plaintext metadata, not sealed content, so they render even for a message we
+         could not decrypt — a reaction says nothing about the content itself. -->
+    @if (reactionGroups().length || !selecting()) {
+        <div class="reactions">
+            @for (group of reactionGroups(); track group.emoji) {
+                <button
+                    type="button"
+                    class="reaction-pill"
+                    [class.is-mine]="group.mine"
+                    [attr.aria-pressed]="group.mine"
+                    [attr.aria-label]="group.emoji + ' reaction, ' + group.count"
+                    (click)="onPillClick(group.emoji)"
+                >
+                    <span
+                        class="reaction-emoji"
+                        [innerHTML]="group.emoji | twemoji"
+                    ></span>
+                    <span class="reaction-count">{{ group.count }}</span>
+                </button>
+            }
+
+            @if (!selecting()) {
+                <span class="reaction-add-wrap">
+                    <button
+                        type="button"
+                        class="reaction-add react-trigger"
+                        aria-label="Add a reaction"
+                        aria-haspopup="menu"
+                        [attr.aria-expanded]="pickerOpen()"
+                        (click)="togglePicker($event)"
+                    >
+                        <lucide-icon [img]="smilePlusIcon" />
+                    </button>
+
+                    @if (pickerOpen()) {
+                        <div
+                            class="reactions-picker"
+                            role="menu"
+                        >
+                            @for (emoji of quickReactions; track emoji) {
+                                <button
+                                    type="button"
+                                    role="menuitem"
+                                    class="picker-emoji"
+                                    (click)="pickReaction(emoji)"
+                                    [innerHTML]="emoji | twemoji"
+                                ></button>
+                            }
+                            <input
+                                type="text"
+                                class="picker-custom"
+                                placeholder="Other…"
+                                maxlength="8"
+                                aria-label="Enter a custom emoji reaction"
+                                [value]="customEmoji()"
+                                (input)="customEmoji.set($any($event.target).value)"
+                                (keydown.enter)="submitCustomEmoji()"
+                            />
+                        </div>
+                    }
+                </span>
+            }
+        </div>
+    }
+
+    @if (message().isPinned) {
+        <p class="pinned-tag">
+            <lucide-icon [img]="pinIcon" />
+            Pinned
+        </p>
+    }
 
     <p class="meta">
         <span class="time">{{ time() }}</span>
@@ -134,11 +356,17 @@
         }
 
         @if (isOwn()) {
-            <lucide-icon
-                [img]="deliveryIcon()"
-                class="mark is-sent"
-                [title]="delivery() === 'sending' ? 'Sending' : delivery() === 'failed' ? 'Not sent' : 'Sent'"
-            />
+            <span class="receipt">
+                <lucide-icon
+                    [img]="deliveryIcon()"
+                    class="mark is-sent"
+                    [class.is-read]="isFullyRead()"
+                    [title]="deliveryTitle()"
+                />
+                @if (showReadCount()) {
+                    <span class="receipt-count">{{ readReceipt()!.readCount }}/{{ readReceipt()!.total }}</span>
+                }
+            </span>
         }
 
         <!-- Actions live in the right-click menu rather than here. Hover buttons on every row compete

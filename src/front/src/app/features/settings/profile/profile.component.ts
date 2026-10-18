@@ -2,7 +2,7 @@ import { DatePipe } from '@angular/common';
 import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
 import { AbstractControl, FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { Router } from '@angular/router';
-import { ArrowLeft, Camera, KeyRound, LucideAngularModule } from 'lucide-angular';
+import { ArrowLeft, Camera, KeyRound, LucideAngularModule, RefreshCw, Sticker } from 'lucide-angular';
 import { firstValueFrom } from 'rxjs';
 
 import { CryptoApiService } from '../../../core/services/crypto-api.service';
@@ -19,6 +19,8 @@ interface DeviceRow {
     version: number;
     created_at: string;
     isThis: boolean;
+    /** Owner-only field; used to show when this device's signed prekey was last rotated. */
+    signed_prekey_created_at: string | null;
 }
 
 @Component({
@@ -66,6 +68,12 @@ export class ProfileComponent {
     readonly arrowLeftIcon = ArrowLeft;
     readonly cameraIcon = Camera;
     readonly keyIcon = KeyRound;
+    readonly rotateIcon = RefreshCw;
+    readonly stickerIcon = Sticker;
+
+    readonly rotatingPrekey = signal(false);
+    readonly prekeyRotated = signal(false);
+    readonly prekeyError = signal<string | null>(null);
 
     messageFor(name: keyof typeof this.form.controls): string | null {
         return errorTextFor(this.form.controls[name], {
@@ -146,6 +154,10 @@ export class ProfileComponent {
         await this.router.navigate(['/settings/password']);
     }
 
+    async goToStickers(): Promise<void> {
+        await this.router.navigate(['/stickers/manage']);
+    }
+
     private async loadDevices(): Promise<void> {
         this.devicesLoading.set(true);
         try {
@@ -159,6 +171,7 @@ export class ProfileComponent {
                     version: identity.version,
                     created_at: identity.created_at,
                     isThis: identity.device_id === thisDevice,
+                    signed_prekey_created_at: identity.signed_prekey_created_at,
                 }))
             );
         } catch {
@@ -197,5 +210,32 @@ export class ProfileComponent {
 
     cancelRevoke(): void {
         this.confirmingDevice.set(null);
+    }
+
+    /**
+     * Rotate this device's medium-term signed prekey.
+     *
+     * Only offered for "This device": rotation re-seals the private bundle with the KEK held in
+     * memory from unlock, which only the device that unlocked it has — there is no way to rotate a
+     * prekey for a device this session did not unlock.
+     */
+    async rotatePrekey(): Promise<void> {
+        if (this.rotatingPrekey()) {
+            return;
+        }
+
+        this.rotatingPrekey.set(true);
+        this.prekeyError.set(null);
+        this.prekeyRotated.set(false);
+
+        try {
+            await this.keyStore.rotatePrekey();
+            this.prekeyRotated.set(true);
+            await this.loadDevices();
+        } catch {
+            this.prekeyError.set('Could not rotate the signed prekey. Please try again shortly.');
+        } finally {
+            this.rotatingPrekey.set(false);
+        }
     }
 }

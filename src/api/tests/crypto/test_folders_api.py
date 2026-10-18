@@ -11,7 +11,7 @@ import uuid
 import httpx
 
 from tests.crypto.test_epoch_api import _group_with
-from tests.crypto.test_identity_api import _register_user
+from tests.crypto.test_identity_api import _register_user, rate_limit_bypass_headers
 
 BASE = "http://localhost:8000"
 
@@ -172,6 +172,6 @@ async def test_unknown_folder_is_a_404_not_a_crash():
 
 
 async def test_folders_require_authentication():
-    async with httpx.AsyncClient(base_url=BASE, timeout=30.0) as anon:
+    async with httpx.AsyncClient(base_url=BASE, timeout=30.0, headers=rate_limit_bypass_headers()) as anon:
         r = await anon.get("/chat-folder/")
         assert r.status_code == 401, r.text

@@ -122,6 +122,22 @@ export interface IdentityPublishRequest {
     kdf_params: Record<string, unknown>;
 }
 
+/**
+ * Rotate a device's medium-term signed prekey — `PUT /crypto/identity/prekey`.
+ *
+ * Unlike `IdentityPublishRequest`, this never touches the identity keypair or its version. The
+ * bundle here is the client's *entire* re-sealed private bundle (now carrying the freshly
+ * generated prekey's private half), submitted atomically with the new public prekey and its
+ * signature — see `KeyStoreService.rotatePrekey` and crypto-spec-v1.md §2.1.2.
+ */
+export interface PrekeyRotateRequest {
+    device_id: string;
+    signed_prekey_public: string;
+    signed_prekey_signature: string;
+    encrypted_private_bundle: string;
+    kdf_params: Record<string, unknown>;
+}
+
 export interface ChannelPostPayload {
     v: number;
     alg: string;
@@ -130,17 +146,34 @@ export interface ChannelPostPayload {
     sig: string;
 }
 
+/** What kind of media an attachment is, for per-kind rendering. Metadata only, server never looks. */
+export type AttachmentKind = 'file' | 'image' | 'video' | 'gif' | 'audio' | 'sticker';
+
 /**
  * An uploaded file referenced by a message.
  *
- * The bytes are encrypted by the client before upload — the server stores an opaque blob and the
- * `content_type` describes the original, not what is stored.
+ * The bytes really are encrypted by the client before upload now: a random per-attachment
+ * AES-256-GCM key encrypts the file, the server stores `nonce || ciphertext` as one opaque blob,
+ * and `content_type` describes the original, not what is stored. The key is delivered to
+ * recipients inside the message envelope's own sealed plaintext — see `MessageService` — never as
+ * part of this HTTP-visible shape.
  */
 export interface MessageAttachment {
     url: string;
     name: string;
     size: number;
     content_type: string;
+    kind?: AttachmentKind;
+    duration_ms?: number | null;
+    width?: number | null;
+    height?: number | null;
+    waveform?: number[] | null;
+    /**
+     * In-memory only, populated after decrypting the containing message's envelope and matching
+     * this attachment's `url` against the `attachmentKeys` carried in its plaintext. Never
+     * serialized back to the server — the server never holds this key.
+     */
+    decryptionKey?: Uint8Array;
 }
 
 /**
@@ -151,6 +184,19 @@ export interface MessageAttachment {
  */
 export interface ForwardOrigin {
     user_id: string;
+    created_at: string;
+}
+
+/**
+ * One user's reaction to a message. Plaintext metadata, not covered by E2E: reactions and pins are
+ * never part of the sealed envelope, so the server can read and enforce them directly.
+ *
+ * A user may hold several different emoji reactions on the same message at once (Telegram/Discord
+ * convention), but at most one of each — sending the same emoji twice toggles it off.
+ */
+export interface MessageReaction {
+    user_id: string;
+    emoji: string;
     created_at: string;
 }
 
@@ -166,8 +212,11 @@ export interface MessageResponse {
     forwarded_from: ForwardOrigin | null;
     created_at: string;
     attachments: MessageAttachment[] | null;
+    reactions: MessageReaction[];
     is_read: boolean;
     is_pinned: boolean;
+    pinned_at: string | null;
+    pinned_by: string | null;
     is_edited: boolean;
     is_encrypted: boolean;
 }

@@ -23,7 +23,12 @@ from app.domains.messages.schemas.messages_schemas import (
     MessageResponse,
     MessageUpdateRequest,
 )
+from app.domains.stickers.models import Sticker, StickerPack, StickerPackSubscription
 from app.infrastructure.minio import minio_manager
+
+# Many messengers cap simultaneous pins (Telegram allows unlimited but most others bound it); a
+# small cap keeps the pinned list actually skimmable and bounds the size of the listing query.
+MAX_PINNED_MESSAGES_PER_CHAT = 5
 
 
 async def is_user_in_chat(
@@ -98,6 +103,44 @@ async def get_and_validate_message(
         raise AppException(403, "FORBIDDEN", "You are not sender of this message.")
 
     return msg
+
+
+async def get_message_for_participant(
+    db: AsyncSession, collection, msg_id: str, user_id: uuid.UUID
+) -> tuple[dict, Chat]:
+    """Look up a message and authorise the caller as a chat participant, not necessarily its sender.
+
+    Reactions and pins are actions any member may take on any message in a chat they belong to,
+    unlike edit/delete which `get_and_validate_message` restricts to the sender. This still goes
+    through the mandatory `get_chat_or_403` chokepoint before anything in Mongo is written.
+    """
+    obj_id = objectify_id(msg_id)
+    msg = await get_message_by_id(collection, obj_id)
+
+    chat = await get_chat_or_403(db, msg["chat_id"], user_id)
+    return msg, chat
+
+
+async def _authorize_pin_action(db: AsyncSession, chat: Chat, user_id: uuid.UUID) -> None:
+    """Gate pin/unpin on role, except in private chats.
+
+    A private chat has exactly two participants, both stored with role MEMBER — there is no admin
+    to defer to, and both sides are equal parties to the conversation, so either may pin. In groups
+    and channels, pinning is a moderation action visible to everyone in a shared space, so it is
+    restricted to admins and the owner, matching the convention most messengers use.
+    """
+    if chat.chat_type == ChatType.PRIVATE:
+        return
+
+    participant = await is_user_in_chat(db, user_id, chat.id)
+    if participant is None or chat_services.role_rank(
+        participant.role
+    ) < chat_services.role_rank(ParticipantRole.ADMIN):
+        raise AppException(
+            403,
+            "PIN_FORBIDDEN",
+            "Only admins and the owner can pin messages in this chat.",
+        )
 
 
 def resolve_content_format(doc: dict, chat: Chat) -> ContentFormat:
@@ -232,6 +275,45 @@ async def _validate_channel_post(db, chat, user_id, post) -> None:
         )
 
 
+async def _authorize_sticker_attachment(
+    db: AsyncSession, user_id: uuid.UUID, url: str
+) -> None:
+    """Verify a sticker-bucket attachment url names a real sticker in a pack the sender may see.
+
+    The server trusts that a URL pointing at the sticker bucket needs no secrecy check, but it
+    must not trust that the URL names anything real: without this, any sticker-shaped URL (one
+    the client simply made up, or one copied from a pack the sender cannot see) would be accepted
+    on the strength of its prefix alone.
+    """
+    stmt = (
+        select(StickerPack)
+        .join(Sticker, Sticker.pack_id == StickerPack.id)
+        .where(Sticker.image_url == url)
+    )
+    pack = (await db.execute(stmt)).scalars().first()
+
+    if pack is None:
+        raise AppException(
+            400, "ATTACHMENT_UNKNOWN", "That sticker does not exist."
+        )
+
+    if pack.owner_id == user_id or pack.is_public:
+        return
+
+    subscribed = await db.execute(
+        select(StickerPackSubscription.pack_id).where(
+            StickerPackSubscription.pack_id == pack.id,
+            StickerPackSubscription.user_id == user_id,
+        )
+    )
+    if subscribed.scalar_one_or_none() is None:
+        raise AppException(
+            403,
+            "ATTACHMENT_FORBIDDEN",
+            "You cannot attach a sticker from a pack you cannot see.",
+        )
+
+
 async def _authorize_attachments(
     db: AsyncSession,
     mongo_db: AsyncIOMotorDatabase,
@@ -253,11 +335,30 @@ async def _authorize_attachments(
         forwarding a message with attachments work — a forward is a re-send of the same object.
 
     A user removed from a chat satisfies neither, which is the case that mattered.
+
+    Attachments actually pointing at the STICKER bucket skip this check entirely: a sticker is a
+    public asset once its pack exists, never something "uploaded" by the sender in the
+    message-bucket sense, so there is no secrecy requirement to enforce and the
+    ownership/visibility question this check answers does not apply to it. Which bucket an
+    attachment points at is derived from its `url` here, never trusted from the client-supplied
+    `kind` field — `kind == 'sticker'` used to be the only gate, which let a sender claim that
+    kind on a URL that actually named a MESSAGE-bucket object and skip the check entirely,
+    reopening the cross-chat attachment leak this function exists to close. `Attachment`'s own
+    model validator also now rejects a `kind`/bucket mismatch at the schema layer, so the two
+    checks are redundant on purpose.
+
+    Even once a URL is confirmed to point at the sticker bucket, it must name a real row in the
+    `stickers` table whose pack is visible to the sender (owned, public, or subscribed) — a
+    sticker-shaped URL with no backing row, or one belonging to a pack the sender cannot see,
+    is rejected rather than silently allowed through.
     """
     if not attachments:
         return
 
-    prefix = f"{settings.MINIO_URL}/{settings.MINIO_MESSAGE_BUCKET}/"
+    message_prefix = f"{settings.MINIO_URL}/{settings.MINIO_MESSAGE_BUCKET}/"
+    # Stickers are a public bucket, so stored urls are built from MINIO_PUBLIC_URL (see
+    # MinioClient.upload_file), not the internal MINIO_URL used for the message bucket above.
+    sticker_prefix = f"{settings.MINIO_PUBLIC_URL}/{settings.MINIO_STICKER_BUCKET}/"
     collection = mongo_db["messages"]
 
     # Resolved at most once, and only if some attachment is not the caller's own upload. Fetching
@@ -266,7 +367,14 @@ async def _authorize_attachments(
 
     for attachment in attachments:
         url = attachment.url
-        object_key = url[len(prefix) :]
+
+        if url.startswith(sticker_prefix):
+            await _authorize_sticker_attachment(db, user_id, url)
+            continue
+
+        # Schema validation (`Attachment.validate_url`) already guarantees every url starts with
+        # one of these two prefixes, so falling through here means the message-bucket prefix.
+        object_key = url[len(message_prefix) :]
 
         exists, owner = await minio_manager.get_object_owner(
             object_key, settings.MINIO_MESSAGE_BUCKET
@@ -328,7 +436,11 @@ async def send_message(
         await _validate_envelope(db, chat, user_id, settings, message_in.envelope)
         content_format = ContentFormat.SENDER_KEYS_V1
     elif message_in.envelope is not None:
-        content_format = ContentFormat.SENDER_KEYS_V1
+        raise AppException(
+            400,
+            "ENVELOPE_NOT_ALLOWED",
+            "This chat is not end-to-end encrypted; an envelope cannot be verified here.",
+        )
     elif chat.chat_type == ChatType.PRIVATE:
         content_format = ContentFormat.LEGACY_RSA
     else:
@@ -411,15 +523,14 @@ async def update_message(
     chat_id = msg.get("chat_id")
     chat = await get_chat_or_403(db, chat_id, user_id)
 
-    chat_settings = await epoch_service.get_settings(db, chat_id)
-    is_encrypted_chat = (
-        chat_settings is not None
-        and chat_settings.crypto_mode is CryptoMode.SENDER_KEYS_V1
-    )
-
     # A channel post is signed over its own content, so replacing that content through the edit
     # path would leave a document whose stored signature covers something else entirely — an
     # "authenticated" post nobody actually authored. Editing a broadcast post is not supported.
+    # Checked before anything else in this function (including attachment authorization below):
+    # a channel post can never be edited regardless of what else the request changes, so there is
+    # no reason to do authorization or DB work for a request that was always going to be rejected
+    # on chat-type grounds alone, and the error reported should be about the chat type, not
+    # incidentally about attachments.
     if chat.chat_type == ChatType.CHANNEL:
         raise AppException(
             400,
@@ -427,13 +538,29 @@ async def update_message(
             "Channel posts cannot be edited; delete the post and publish a new one.",
         )
 
+    # `attachments` distinguishes "field omitted" (leave the existing list untouched) from
+    # "field explicitly set, even to [] or null" (replace it wholesale, with both meaning "no
+    # attachments") — the same PATCH convention CLAUDE.md documents for `PATCH /chat-folder/{id}`.
+    # `model_fields_set` is what makes that distinction resolvable; `message_in.attachments` alone
+    # cannot tell "omitted" apart from "explicitly cleared", since both read as `None`.
+    attachments_supplied = "attachments" in message_in.model_fields_set
+
+    if attachments_supplied:
+        await _authorize_attachments(db, mongo_db, user_id, message_in.attachments)
+
+    chat_settings = await epoch_service.get_settings(db, chat_id)
+    is_encrypted_chat = (
+        chat_settings is not None
+        and chat_settings.crypto_mode is CryptoMode.SENDER_KEYS_V1
+    )
+
     # The send path gates every envelope on the live epoch, on owning the sender key it names, and
     # on the signature verifying. None of that ran here, so an edit was a complete bypass: a member
     # could re-seal under a superseded epoch — readable by whoever was just removed — claim another
     # member's chain, or attach a signature that verifies against nothing.
     if is_encrypted_chat:
         await _validate_envelope(db, chat, user_id, chat_settings, message_in.envelope)
-    elif message_in.envelope is not None and chat_settings is not None:
+    elif message_in.envelope is not None:
         raise AppException(
             400,
             "ENVELOPE_NOT_ALLOWED",
@@ -472,6 +599,15 @@ async def update_message(
         }
     else:
         update = {"encrypted_content": message_in.encrypted_content, "is_edited": True}
+
+    if attachments_supplied:
+        # Whole-list replacement, not a merge — mirrors `PATCH /chat-folder/{id}` replacing
+        # `chat_ids` wholesale. `[]` is a legitimate "remove every attachment" edit.
+        update["attachments"] = (
+            [a.model_dump(mode="json") for a in message_in.attachments]
+            if message_in.attachments
+            else []
+        )
 
     await collection.update_one({"_id": obj_id}, {"$set": update})
 
@@ -524,6 +660,13 @@ async def mark_messages_as_read(
     Takes `db` purely to authorise. Mongo carries no ownership information of its own, so a write
     that reaches it without a Postgres membership check is unauthorised by construction — and this
     one is reachable from the WebSocket, where `chat_id` arrives straight from the client.
+
+    The `is_read` flip below is DEPRECATED — it is one boolean shared by every participant, so the
+    first member to read a group message marks it read for everyone else too. It is left in place
+    (rather than migrated away in one step, which would mean a write against a schema-less Mongo
+    collection with no rollback) purely for whatever still reads it; the caller
+    (`ws_router.websocket_endpoint`) separately calls `chat_services.update_participant_last_read`,
+    which is the per-user source of truth surfaced by `GET /chats/{id}/read-state`.
     """
     if await is_user_in_chat(db, user_id, chat_id) is None:
         raise AppException(403, "FORBIDDEN", "You are not a participant of this chat.")
@@ -543,3 +686,188 @@ async def mark_messages_as_read(
     )
 
     return result.modified_count
+
+
+async def toggle_reaction(
+    db: AsyncSession,
+    mongo_db: AsyncIOMotorDatabase,
+    user_id: uuid.UUID,
+    msg_id: str,
+    emoji: str,
+) -> tuple[MessageResponse, bool]:
+    """Add or remove the caller's reaction with this emoji on a message.
+
+    One reaction per (user, message, emoji): reacting with an emoji you already placed on that
+    message removes it again — a toggle, the behaviour Telegram and Discord both use — while
+    reacting with a *different* emoji adds an additional, independent reaction rather than
+    replacing the first. Returns whether the reaction was added (True) or removed (False), so the
+    caller can pick the right WS event.
+
+    Atomic by construction rather than read-then-decide-then-write: a `$pull` is attempted first,
+    and only if it removed nothing (`modified_count == 0`, meaning the caller had not reacted with
+    this emoji) does a `$push` follow — and that `$push`'s own filter re-checks non-existence of the
+    same `(user_id, emoji)` pair in the same round trip, so it cannot land twice even if two
+    identical requests both fall through to it concurrently. This closes the double-tap race where
+    two near-simultaneous toggles could otherwise both read "not reacted yet" and both append,
+    leaving a duplicate entry that only a later toggle's `$pull` (which removes every match) would
+    clean up.
+    """
+    collection = mongo_db["messages"]
+    msg, chat = await get_message_for_participant(db, collection, msg_id, user_id)
+
+    pull_result = await collection.update_one(
+        {"_id": msg["_id"]},
+        {"$pull": {"reactions": {"user_id": user_id, "emoji": emoji}}},
+    )
+
+    if pull_result.modified_count > 0:
+        added = False
+    else:
+        await collection.update_one(
+            {
+                "_id": msg["_id"],
+                "reactions": {"$not": {"$elemMatch": {"user_id": user_id, "emoji": emoji}}},
+            },
+            {
+                "$push": {
+                    "reactions": {
+                        "user_id": user_id,
+                        "emoji": emoji,
+                        "created_at": datetime.now(timezone.utc),
+                    }
+                }
+            },
+        )
+        # If the filter matched nothing, a concurrent request already added this exact
+        # (user_id, emoji) pair between our `$pull` and this `$push` — the reaction is present
+        # either way, so this call still reports it as added rather than erroring or no-op'ing
+        # into a stale "removed" state.
+        added = True
+
+    updated = await collection.find_one({"_id": msg["_id"]})
+    updated["_id"] = str(updated["_id"])
+    updated["content_format"] = resolve_content_format(updated, chat)
+
+    return MessageResponse(**updated), added
+
+
+async def remove_reaction(
+    db: AsyncSession,
+    mongo_db: AsyncIOMotorDatabase,
+    user_id: uuid.UUID,
+    msg_id: str,
+    emoji: str,
+) -> MessageResponse:
+    """Explicit removal, distinct from the toggle above. Idempotent: a no-op if the caller had not
+    reacted with that emoji, so a client retrying a request that already succeeded is not punished
+    with an error."""
+    collection = mongo_db["messages"]
+    msg, chat = await get_message_for_participant(db, collection, msg_id, user_id)
+
+    await collection.update_one(
+        {"_id": msg["_id"]},
+        {"$pull": {"reactions": {"user_id": user_id, "emoji": emoji}}},
+    )
+
+    updated = await collection.find_one({"_id": msg["_id"]})
+    updated["_id"] = str(updated["_id"])
+    updated["content_format"] = resolve_content_format(updated, chat)
+
+    return MessageResponse(**updated)
+
+
+async def pin_message(
+    db: AsyncSession,
+    mongo_db: AsyncIOMotorDatabase,
+    user_id: uuid.UUID,
+    msg_id: str,
+) -> MessageResponse:
+    """Pin a message, subject to role (see `_authorize_pin_action`) and the per-chat pin cap.
+
+    Idempotent if already pinned — pinning an already-pinned message does not touch `pinned_at` or
+    `pinned_by` again and does not count against the cap a second time.
+    """
+    collection = mongo_db["messages"]
+    msg, chat = await get_message_for_participant(db, collection, msg_id, user_id)
+    await _authorize_pin_action(db, chat, user_id)
+
+    if not msg.get("is_pinned"):
+        pinned_count = await collection.count_documents(
+            {"chat_id": chat.id, "is_pinned": True}
+        )
+        if pinned_count >= MAX_PINNED_MESSAGES_PER_CHAT:
+            raise AppException(
+                400,
+                "PIN_LIMIT_REACHED",
+                f"At most {MAX_PINNED_MESSAGES_PER_CHAT} messages may be pinned in a chat at "
+                f"once; unpin one before pinning another.",
+            )
+
+        await collection.update_one(
+            {"_id": msg["_id"]},
+            {
+                "$set": {
+                    "is_pinned": True,
+                    "pinned_at": datetime.now(timezone.utc),
+                    "pinned_by": user_id,
+                }
+            },
+        )
+
+    updated = await collection.find_one({"_id": msg["_id"]})
+    updated["_id"] = str(updated["_id"])
+    updated["content_format"] = resolve_content_format(updated, chat)
+
+    return MessageResponse(**updated)
+
+
+async def unpin_message(
+    db: AsyncSession,
+    mongo_db: AsyncIOMotorDatabase,
+    user_id: uuid.UUID,
+    msg_id: str,
+) -> MessageResponse:
+    """Unpin a message. Idempotent: unpinning an unpinned message is a no-op, not an error."""
+    collection = mongo_db["messages"]
+    msg, chat = await get_message_for_participant(db, collection, msg_id, user_id)
+    await _authorize_pin_action(db, chat, user_id)
+
+    await collection.update_one(
+        {"_id": msg["_id"]},
+        {"$set": {"is_pinned": False, "pinned_at": None, "pinned_by": None}},
+    )
+
+    updated = await collection.find_one({"_id": msg["_id"]})
+    updated["_id"] = str(updated["_id"])
+    updated["content_format"] = resolve_content_format(updated, chat)
+
+    return MessageResponse(**updated)
+
+
+async def get_pinned_messages(
+    db: AsyncSession,
+    mongo_db: AsyncIOMotorDatabase,
+    user_id: uuid.UUID,
+    chat_id: uuid.UUID,
+) -> list[MessageResponse]:
+    chat = await get_chat_or_403(db, chat_id, user_id)
+
+    collection = mongo_db["messages"]
+    query: dict = {"chat_id": chat_id, "is_pinned": True}
+
+    # Same history floor as `get_chat_messages`: a member holds no keys for messages pinned before
+    # they joined, so those must not surface even as an unreadable pinned entry.
+    participant = await is_user_in_chat(db, user_id, chat_id)
+    if participant is not None and participant.history_start_message_id:
+        query["_id"] = {"$gt": objectify_id(participant.history_start_message_id)}
+
+    crs = collection.find(query).sort("_id", -1).limit(MAX_PINNED_MESSAGES_PER_CHAT)
+    messages = await crs.to_list(length=MAX_PINNED_MESSAGES_PER_CHAT)
+
+    res = []
+    for msg in messages:
+        msg["_id"] = str(msg["_id"])
+        msg["content_format"] = resolve_content_format(msg, chat)
+        res.append(MessageResponse(**msg))
+
+    return res

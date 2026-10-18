@@ -21,6 +21,8 @@ import {
     LucideAngularModule,
     MessageSquare,
     Pencil,
+    Pin,
+    PinOff,
     RefreshCw,
     Reply,
     Shield,
@@ -33,10 +35,16 @@ import {
 } from 'lucide-angular';
 
 import { Chat } from '../../../core/models/chat.model';
-import { ChatStoreService, ConversationItem, PendingMessage } from '../../../core/services/chat-store.service';
+import {
+    ChatStoreService,
+    ConversationItem,
+    MessageReadReceipt,
+    PendingMessage,
+} from '../../../core/services/chat-store.service';
 import { DirectoryService } from '../../../core/services/directory.service';
 import { DecryptedMessage } from '../../../core/services/message.service';
 import { SessionService } from '../../../core/services/session.service';
+import { VoiceRecorderService } from '../../../core/services/voice-recorder.service';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
 import {
     ContextMenuComponent,
@@ -72,6 +80,10 @@ export class ChatViewComponent {
     private readonly directory = inject(DirectoryService);
     private readonly session = inject(SessionService);
     private readonly router = inject(Router);
+    // Root-scoped, like the composer's own instance — injected here too so edit-start can refuse
+    // to fire while a voice note is in flight, rather than threading a new output through the
+    // composer just to observe its recording state.
+    private readonly voiceRecorder = inject(VoiceRecorderService);
 
     /** Bound from the `:chatId` route parameter. */
     readonly chatId = input<string | undefined>(undefined);
@@ -85,8 +97,13 @@ export class ChatViewComponent {
     readonly memberVerificationError = this.store.memberVerificationError;
     readonly encryptionUnavailable = this.store.encryptionUnavailable;
     readonly sendBlockedReason = this.store.sendBlockedReason;
+    readonly pinnedMessages = this.store.pinnedMessages;
+    readonly canPinMessages = this.store.canPinMessages;
 
     readonly bannerDismissed = signal(false);
+    /** The pinned-messages bar is dismissible per chat visit, not permanently. */
+    readonly pinnedBannerDismissed = signal(false);
+    readonly pinnedPanelOpen = signal(false);
     readonly replyingTo = signal<DecryptedMessage | null>(null);
     readonly editing = signal<DecryptedMessage | null>(null);
 
@@ -186,6 +203,8 @@ export class ChatViewComponent {
     readonly editIcon = Pencil;
     readonly forwardIcon = Forward;
     readonly trashIcon = Trash2;
+    readonly pinIcon = Pin;
+    readonly pinOffIcon = PinOff;
 
     quotedName(message: DecryptedMessage): string {
         return this.directory.isMe(message.senderId) ? 'yourself' : this.directory.lookup(message.senderId).name;
@@ -196,6 +215,8 @@ export class ChatViewComponent {
             const id = this.chatId() ?? null;
             this.store.activeChatId.set(id);
             this.bannerDismissed.set(false);
+            this.pinnedBannerDismissed.set(false);
+            this.pinnedPanelOpen.set(false);
             this.pinToBottom = true;
             this.atNewest = false;
         });
@@ -262,6 +283,8 @@ export class ChatViewComponent {
             forwardedFrom: null,
             attachments: [],
             senderVerified: true,
+            reactions: [],
+            isPinned: false,
         };
     }
 
@@ -300,6 +323,11 @@ export class ChatViewComponent {
         }
     }
 
+    /** How many other participants have read up to this message. Only meaningful on our own sends. */
+    readReceipt(message: DecryptedMessage): MessageReadReceipt | null {
+        return this.store.readReceipt(message);
+    }
+
     /** The message a reply quotes, if it is among the ones we have loaded and opened. */
     quotedFor(message: DecryptedMessage): DecryptedMessage | null {
         if (!message.replyToId) {
@@ -333,6 +361,16 @@ export class ChatViewComponent {
         }
 
         items.push({ icon: CheckCheck, label: 'Select', action: () => this.store.toggleSelected(message.id) });
+
+        // Server-enforced role gate — this is UX only, so a member simply does not see the option
+        // rather than seeing it fail.
+        if (this.canPinMessages()) {
+            items.push(
+                message.isPinned
+                    ? { icon: PinOff, label: 'Unpin', action: () => void this.store.unpinMessage(message.id) }
+                    : { icon: Pin, label: 'Pin', action: () => void this.store.pinMessage(message.id) }
+            );
+        }
 
         if (this.canDelete(message.senderId)) {
             items.push({
@@ -488,8 +526,19 @@ export class ChatViewComponent {
         this.replyingTo.set(message);
     }
 
-    /** Load the message back into the composer. Sending replaces it rather than posting anew. */
+    /**
+     * Load the message back into the composer. Sending replaces it rather than posting anew.
+     *
+     * Refuses to start while a voice note is mid-recording: the composer's recording row stays up
+     * regardless of `editing()`, so without this check a confirmed recording would route into
+     * `editMessage` against whatever message this just switched to, silently replacing its text
+     * and attachments with the unrelated voice note. Cancelling the recording first is a safer
+     * default than quietly discarding the edit request, since the user explicitly asked to edit.
+     */
     startEdit(message: DecryptedMessage): void {
+        if (this.voiceRecorder.recordingState() === 'recording') {
+            this.voiceRecorder.cancel();
+        }
         this.replyingTo.set(null);
         this.editing.set(message);
     }
@@ -508,7 +557,7 @@ export class ChatViewComponent {
 
         if (editing) {
             try {
-                await this.store.editMessage(editing.id, composed.text);
+                await this.store.editMessage(editing.id, composed.text, composed.attachments);
             } catch {
                 this.store.realtimeError.set('Could not edit that message.');
             }
@@ -540,6 +589,36 @@ export class ChatViewComponent {
 
     canDelete(senderId: string): boolean {
         return this.directory.isMe(senderId);
+    }
+
+    react(messageId: string, emoji: string): void {
+        // The endpoint itself toggles — the same emoji from the same user removes it — so both
+        // "add" and "remove your own" go through this one call.
+        void this.store.react(messageId, emoji);
+    }
+
+    /** The most recently pinned message, for the collapsed banner. */
+    readonly latestPinned = computed(() => this.pinnedMessages().at(-1) ?? null);
+
+    dismissPinnedBanner(): void {
+        this.pinnedBannerDismissed.set(true);
+    }
+
+    openPinnedPanel(): void {
+        this.pinnedPanelOpen.set(true);
+    }
+
+    closePinnedPanel(): void {
+        this.pinnedPanelOpen.set(false);
+    }
+
+    jumpToPinned(messageId: string): void {
+        this.pinnedPanelOpen.set(false);
+        this.jumpToMessage(messageId);
+    }
+
+    async unpinFromPanel(messageId: string): Promise<void> {
+        await this.store.unpinMessage(messageId);
     }
 
     async openSafetyNumber(): Promise<void> {

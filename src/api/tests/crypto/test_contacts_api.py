@@ -10,7 +10,7 @@ import uuid
 
 import httpx
 
-from tests.crypto.test_identity_api import _register_user
+from tests.crypto.test_identity_api import _register_user, rate_limit_bypass_headers
 
 BASE = "http://localhost:8000"
 
@@ -158,6 +158,6 @@ async def test_deleting_a_contact_that_is_not_there_is_a_404():
 
 
 async def test_contacts_require_authentication():
-    async with httpx.AsyncClient(base_url=BASE, timeout=30.0) as anon:
+    async with httpx.AsyncClient(base_url=BASE, timeout=30.0, headers=rate_limit_bypass_headers()) as anon:
         r = await anon.get("/contact/")
         assert r.status_code == 401, r.text

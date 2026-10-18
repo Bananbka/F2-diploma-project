@@ -13,7 +13,11 @@ class MinioClient:
         self.endpoint_url = settings.MINIO_URL
         self.access_key = settings.MINIO_USER
         self.secret_key = settings.MINIO_PASSWORD
-        self.buckets = [settings.MINIO_MESSAGE_BUCKET, settings.MINIO_AVATAR_BUCKET]
+        self.buckets = [
+            settings.MINIO_MESSAGE_BUCKET,
+            settings.MINIO_AVATAR_BUCKET,
+            settings.MINIO_STICKER_BUCKET,
+        ]
 
     def get_client(self):
         return self.session.create_client(
@@ -37,7 +41,10 @@ class MinioClient:
                         )
                         await client.create_bucket(Bucket=bucket_name)
 
-                        if bucket_name == settings.MINIO_AVATAR_BUCKET:
+                        if bucket_name in (
+                            settings.MINIO_AVATAR_BUCKET,
+                            settings.MINIO_STICKER_BUCKET,
+                        ):
                             policy = {
                                 "Version": "2012-10-17",
                                 "Statement": [
@@ -87,6 +94,7 @@ class MinioClient:
         bucket_name: str,
         force_octet_stream: bool = False,
         owner_id: str | None = None,
+        public: bool = False,
     ) -> str:
         """Store one object under a server-generated key.
 
@@ -94,6 +102,14 @@ class MinioClient:
         dot-segment verbatim let a name like `a.b/../x` produce a key containing `/`, which the
         attachment-url validator then rejects — leaving an object nothing could ever reference,
         download or delete.
+
+        `public` selects which base the returned `file_url` is built from. The S3 client itself
+        always talks to `self.endpoint_url` (the compose-network hostname) to actually reach the
+        store — that part never changes. But avatars and stickers are rendered directly as
+        `<img src>` in the browser, which cannot resolve that hostname, so for those two buckets
+        the *returned, stored* url needs to be the browser-reachable `MINIO_PUBLIC_URL` instead.
+        Message-bucket attachments are never rendered as a raw url (the client always fetches them
+        through the authenticated download proxy), so they stay on the internal base.
         """
         extension = (
             original_filename.rsplit(".", 1)[-1] if "." in original_filename else "enc"
@@ -113,7 +129,8 @@ class MinioClient:
                 Metadata={"owner-id": owner_id} if owner_id else {},
             )
 
-            file_url = f"{self.endpoint_url}/{bucket_name}/{unique_filename}"
+            base_url = settings.MINIO_PUBLIC_URL if public else self.endpoint_url
+            file_url = f"{base_url}/{bucket_name}/{unique_filename}"
             return file_url
 
     async def stream_object(self, object_key: str, bucket_name: str):

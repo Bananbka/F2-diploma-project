@@ -3,7 +3,7 @@ import { computed, effect, inject, Injectable, signal, untracked } from '@angula
 import { Router } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
 
-import { Chat } from '../models/chat.model';
+import { Chat, ParticipantReadState } from '../models/chat.model';
 import { ChatKeys, MessageAttachment, MessageResponse } from '../models/crypto.model';
 import { ChatApiService } from './chat-api.service';
 import { CryptoApiService } from './crypto-api.service';
@@ -60,6 +60,19 @@ export interface ChatPreview {
 }
 
 /**
+ * How many of the *other* participants have read up to a given message, derived from the active
+ * chat's read-state map.
+ *
+ * `total` is the chat's other-participant count, not the whole roster — a private chat has one
+ * counterpart, and a group's own sender never needs to read their own message. `readCount` never
+ * includes the sender.
+ */
+export interface MessageReadReceipt {
+    readCount: number;
+    total: number;
+}
+
+/**
  * The conversation state the UI reads.
  *
  * Most of this service exists to keep the states in `docs/ui-states.md` distinguishable. The
@@ -87,6 +100,43 @@ export class ChatStoreService {
     readonly pending = signal<PendingMessage[]>([]);
     readonly messagesLoading = signal(false);
     readonly hasMoreHistory = signal(false);
+
+    /**
+     * Pinned messages for the open chat, newest pin last. Loaded alongside the conversation and
+     * refreshed on `message_pinned`/`message_unpinned` for whichever chat is active.
+     */
+    readonly pinnedMessages = signal<DecryptedMessage[]>([]);
+
+    /**
+     * Every participant's own read high-water mark for the open chat, keyed by user id.
+     *
+     * Loaded alongside the conversation and refreshed on `message_read` broadcasts for whichever
+     * chat is active — the same "refetch/patch on the WS event, scoped to the active chat" pattern
+     * `loadPinned` follows. A missing entry means we have not fetched read-state for that user yet;
+     * `null` means they have genuinely never marked anything read, which `readReceipt` treats the
+     * same way (nothing counts as read).
+     */
+    readonly readState = signal<Map<string, string | null>>(new Map());
+
+    /**
+     * Whether the current user could pin a message in the active chat.
+     *
+     * Private chats have no admin/owner distinction — either participant may pin. Groups and
+     * channels restrict it to admin/owner, matching the server; this is UX only, the real
+     * enforcement is `PIN_FORBIDDEN` from the API.
+     */
+    readonly canPinMessages = computed(() => {
+        const chat = this.activeChat();
+        if (!chat) {
+            return false;
+        }
+        if (chat.chat_type === 'private') {
+            return true;
+        }
+        const me = this.session.user()?.id;
+        const role = chat.participants.find((p) => p.user_id === me)?.role;
+        return role === 'admin' || role === 'owner';
+    });
 
     readonly chatKeys = signal<ChatKeys | null>(null);
 
@@ -240,6 +290,20 @@ export class ChatStoreService {
                 case 'key_epoch_started':
                     this.onEpochStarted(event.chat_id);
                     break;
+                case 'message_reaction_added':
+                case 'message_reaction_removed':
+                    this.onMessageMetaChanged(event.chat_id, event.payload);
+                    break;
+                case 'message_pinned':
+                case 'message_unpinned':
+                    this.onMessageMetaChanged(event.chat_id, event.payload);
+                    if (event.chat_id && event.chat_id === this.activeChatId()) {
+                        void this.loadPinned(event.chat_id);
+                    }
+                    break;
+                case 'message_read':
+                    this.onReadReceipt(event.chat_id, event.user_id, event.payload);
+                    break;
                 case 'typing_start':
                     this.setTyping(event.chat_id, event.user_id, true);
                     break;
@@ -294,13 +358,40 @@ export class ChatStoreService {
 
         try {
             const chats = await firstValueFrom(this.chatApi.getChats());
-            this.chats.set(chats);
+            const merged = this.preserveKnownParticipants(chats);
+            this.chats.set(merged);
             this.warmDirectoryFromChats(chats);
         } catch {
             this.chatsError.set('Could not load your chats.');
         } finally {
             this.chatsLoading.set(false);
         }
+    }
+
+    /**
+     * `GET /chats/` always returns `participants: []` (see the doc comment on `Chat.participants`) —
+     * `enrich_chats_with_mongo_data` builds plain dicts with no participants key, so Pydantic falls
+     * back to the field default. A prior `hydrateChat`/`openChat` may have already populated the real
+     * roster for a chat via `GET /chats/{id}`; without this, any `loadChats()` refresh — including the
+     * one triggered by `participants_added`/`participants_removed` — would clobber that roster back to
+     * empty, silently breaking read receipts (and anything else keyed on `activeChat().participants`)
+     * for the currently open chat.
+     */
+    private preserveKnownParticipants(chats: Chat[]): Chat[] {
+        const known = this.chats();
+
+        return chats.map((chat) => {
+            if (chat.participants.length > 0) {
+                return chat;
+            }
+
+            const existing = known.find((c) => c.id === chat.id);
+            if (existing && existing.participants.length > 0) {
+                return { ...chat, participants: existing.participants };
+            }
+
+            return chat;
+        });
     }
 
     /**
@@ -330,6 +421,8 @@ export class ChatStoreService {
         this.rawMessages.clear();
         this.messages.set([]);
         this.pending.set([]);
+        this.pinnedMessages.set([]);
+        this.readState.set(new Map());
         this.realtimeError.set(null);
         this.clearSelection();
         this.chatKeys.set(null);
@@ -348,19 +441,36 @@ export class ChatStoreService {
 
             // Channels are signed rather than encrypted, so they have no epochs, no roster and no
             // grants. Asking for their keys always 404s.
+            //
+            // `knownKeys` starts `undefined` (a channel never fetched its keys at all) rather than
+            // `null`, so `loadMessages` falls back to fetching for itself — it still needs to know
+            // whether a non-channel chat has crypto settings, which only `ensureEncryptionEnabled`
+            // below has actually checked for this open.
+            let knownKeys: ChatKeys | null | undefined;
             if (chat?.chat_type !== 'channel') {
                 // Fetched before the history so the roster and grants are in place; otherwise every
                 // message from a sender we have not ingested yet would report no_key on first paint.
-                this.chatKeys.set(await this.ensureEncryptionEnabled(chatId));
+                knownKeys = await this.ensureEncryptionEnabled(chatId);
+                this.chatKeys.set(knownKeys);
             }
 
-            const { raw, messages: decrypted } = await this.messages_.loadMessages(chatId, PAGE_SIZE);
+            // Pass through what `ensureEncryptionEnabled` just fetched instead of asking
+            // `loadMessages` to fetch the same chat's keys again — this used to fire the identical
+            // `GET /crypto/chats/{id}/keys` request twice on every chat open.
+            const { raw, messages: decrypted } = await this.messages_.loadMessages(
+                chatId,
+                PAGE_SIZE,
+                undefined,
+                knownKeys
+            );
             raw.forEach((message) => this.rawMessages.set(message._id, message));
 
             this.messages.set(decrypted);
             this.hasMoreHistory.set(decrypted.length === PAGE_SIZE);
             this.cachePreview(chatId, decrypted);
             this.scheduleGrantRetry(chatId);
+            void this.loadPinned(chatId);
+            void this.loadReadState(chatId);
 
             await this.markRead(chatId, decrypted);
         } catch {
@@ -512,7 +622,7 @@ export class ChatStoreService {
             // Bump before recording: bumping clears the preview override, and our own message is one
             // we can always read, so it should end up as the override rather than be wiped by it.
             this.bumpChatPreview(chatId, sent);
-            this.appendDecrypted(this.messages_.recordOutgoing(sent, text));
+            this.appendDecrypted(this.messages_.recordOutgoing(sent, text, attachments));
         } catch (error) {
             if (this.isMemberVerificationFailure(error)) {
                 // Blocking, not retryable: we refused to hand keys to a roster we cannot verify.
@@ -639,14 +749,28 @@ export class ChatStoreService {
         return sent;
     }
 
-    /** Edit one of our own messages. Only the sender may, and only in an encrypted chat. */
-    async editMessage(messageId: string, text: string): Promise<void> {
+    /**
+     * Edit one of our own messages. Only the sender may, and only in an encrypted chat.
+     *
+     * `attachments`, when passed, is the composer's current attachment list for this edit session
+     * — reflecting whatever was added or removed while editing — and replaces the stored list
+     * wholesale. When omitted, the message's existing attachments travel unchanged, which keeps
+     * callers that only ever change text (there are none left, but the parameter stays optional)
+     * from having to resupply a list they never touched.
+     */
+    async editMessage(messageId: string, text: string, attachments?: MessageAttachment[]): Promise<void> {
         const chatId = this.activeChatId();
         if (!chatId || !text.trim()) {
             return;
         }
 
-        const edited = await this.messages_.editText(chatId, messageId, text.trim());
+        const existing = this.messages().find((m) => m.id === messageId);
+        const edited = await this.messages_.editText(
+            chatId,
+            messageId,
+            text.trim(),
+            attachments ?? existing?.attachments
+        );
         this.messages.update((list) => list.map((m) => (m.id === edited.id ? edited : m)));
         this.cachePreview(chatId, [edited]);
     }
@@ -654,6 +778,185 @@ export class ChatStoreService {
     async deleteMessage(messageId: string): Promise<void> {
         await firstValueFrom(this.chatApi.deleteMessage(messageId));
         this.messages.update((list) => list.filter((m) => m.id !== messageId));
+    }
+
+    /** Toggle the caller's reaction: the same emoji again removes it, a different one adds another. */
+    async react(messageId: string, emoji: string): Promise<void> {
+        try {
+            const raw = await firstValueFrom(this.chatApi.toggleReaction(messageId, emoji));
+            this.applyMeta(raw);
+        } catch {
+            this.realtimeError.set('Could not react to that message.');
+        }
+    }
+
+    /** Explicit removal — used by the "remove your reaction" affordance rather than the toggle. */
+    async unreact(messageId: string, emoji: string): Promise<void> {
+        try {
+            const raw = await firstValueFrom(this.chatApi.removeReaction(messageId, emoji));
+            this.applyMeta(raw);
+        } catch {
+            this.realtimeError.set('Could not remove that reaction.');
+        }
+    }
+
+    /**
+     * Pin a message. `canPinMessages` is the UX gate; `PIN_FORBIDDEN`/`PIN_LIMIT_REACHED` from the
+     * API are the real one and are surfaced here rather than swallowed.
+     */
+    async pinMessage(messageId: string): Promise<void> {
+        try {
+            const raw = await firstValueFrom(this.chatApi.pinMessage(messageId));
+            this.applyMeta(raw);
+            await this.loadPinned(raw.chat_id);
+        } catch (error) {
+            this.realtimeError.set(this.pinErrorMessage(error));
+        }
+    }
+
+    async unpinMessage(messageId: string): Promise<void> {
+        try {
+            const raw = await firstValueFrom(this.chatApi.unpinMessage(messageId));
+            this.applyMeta(raw);
+            await this.loadPinned(raw.chat_id);
+        } catch {
+            this.realtimeError.set('Could not unpin that message.');
+        }
+    }
+
+    private pinErrorMessage(error: unknown): string {
+        const code =
+            error instanceof HttpErrorResponse && typeof error.error?.error_code === 'string'
+                ? error.error.error_code
+                : null;
+        if (code === 'PIN_LIMIT_REACHED') {
+            return 'This chat already has the maximum number of pinned messages. Unpin one first.';
+        }
+        if (code === 'PIN_FORBIDDEN') {
+            return 'You do not have permission to pin messages in this chat.';
+        }
+        return 'Could not pin that message.';
+    }
+
+    /** Mute this chat until a future timestamp, or unmute by passing `null`. */
+    async setMuted(chatId: string, mutedUntil: string | null): Promise<void> {
+        try {
+            const result = await firstValueFrom(this.chatApi.muteChat(chatId, mutedUntil));
+            this.chats.update((list) =>
+                list.map((c) =>
+                    c.id === chatId
+                        ? {
+                              ...c,
+                              muted_until: result.muted_until,
+                              is_muted: result.muted_until !== null && new Date(result.muted_until) > new Date(),
+                          }
+                        : c
+                )
+            );
+        } catch {
+            this.realtimeError.set('Could not update mute for this chat.');
+        }
+    }
+
+    /** Refresh the pinned-messages list for one chat, decrypting through the usual cache. */
+    private async loadPinned(chatId: string): Promise<void> {
+        try {
+            const raw = await firstValueFrom(this.chatApi.getPinnedMessages(chatId));
+            const decrypted: DecryptedMessage[] = [];
+            for (const message of raw) {
+                decrypted.push(await this.messages_.decrypt(chatId, message));
+            }
+            this.pinnedMessages.set(decrypted);
+        } catch {
+            this.pinnedMessages.set([]);
+        }
+    }
+
+    /** Refresh the read-state map for one chat. */
+    private async loadReadState(chatId: string): Promise<void> {
+        try {
+            const rows = await firstValueFrom(this.chatApi.getReadState(chatId));
+            this.readState.set(
+                new Map(rows.map((row: ParticipantReadState) => [row.user_id, row.last_read_message_id]))
+            );
+        } catch {
+            this.readState.set(new Map());
+        }
+    }
+
+    /**
+     * A participant's own read mark genuinely advanced — the server gates this broadcast on that,
+     * so every arrival here is real progress, never a no-op re-announcement.
+     */
+    private onReadReceipt(chatId: string | null, userId: string | null, payload: Record<string, unknown>): void {
+        if (!chatId || !userId || chatId !== this.activeChatId()) {
+            return;
+        }
+
+        const lastReadId = payload['last_read_message_id'];
+        if (typeof lastReadId !== 'string') {
+            return;
+        }
+
+        this.readState.update((map) => {
+            const next = new Map(map);
+            next.set(userId, lastReadId);
+            return next;
+        });
+    }
+
+    /**
+     * How many of the chat's other participants have read up to `message`, derived from
+     * `readState`.
+     *
+     * ObjectId strings sort correctly under plain `>=` only when both sides are the same case and
+     * length — `GET /chats/{id}/read-state` and the `message_read` broadcast both carry the
+     * canonical lowercase-hex form the server now guarantees, and message ids come from the same
+     * Mongo documents, so the comparison is safe here without re-canonicalizing.
+     */
+    readReceipt(message: DecryptedMessage): MessageReadReceipt | null {
+        const chat = this.activeChat();
+        const me = this.session.user()?.id;
+        if (!chat || !me) {
+            return null;
+        }
+
+        const others = chat.participants.filter((p) => p.user_id !== me);
+        if (others.length === 0) {
+            return null;
+        }
+
+        const state = this.readState();
+        const readCount = others.filter((p) => {
+            const lastRead = state.get(p.user_id);
+            return lastRead != null && lastRead >= message.id;
+        }).length;
+
+        return { readCount, total: others.length };
+    }
+
+    /**
+     * Apply a reaction/pin change returned by our own request, without re-decrypting the message.
+     *
+     * `MessageService.patchMeta` updates the plaintext cache in place; this mirrors that onto the
+     * signal the conversation renders, and onto the raw cache retries read from.
+     */
+    private applyMeta(raw: MessageResponse): void {
+        this.rawMessages.set(raw._id, raw);
+        const patched = this.messages_.patchMeta(raw);
+        if (patched) {
+            this.messages.update((list) => list.map((m) => (m.id === patched.id ? patched : m)));
+        }
+        this.pinnedMessages.update((list) => list.map((m) => (m.id === raw._id ? (patched ?? m) : m)));
+    }
+
+    /** A reaction or pin changed elsewhere — patch the message in place if we hold it. */
+    private onMessageMetaChanged(chatId: string | null, payload: Record<string, unknown>): void {
+        const raw = payload as unknown as MessageResponse;
+        if (!chatId || !raw?._id || chatId !== this.activeChatId()) {
+            return;
+        }
+        this.applyMeta(raw);
     }
 
     /** Retry key ingestion for a chat — the usual cure for a screen full of `no_key`. */

@@ -162,7 +162,21 @@ async def rotate_prekey(
     user_id: uuid.UUID,
     data: PrekeyRotateRequest,
 ) -> UserIdentityKey:
-    """Rotate only the medium-term prekey. Does not supersede the identity key or void grants."""
+    """Rotate the medium-term prekey. Does not supersede the identity key or bump the version.
+
+    Does not void *ingested* grants, and gives a grant published just before rotation but not yet
+    ingested exactly one further rotation cycle to still be opened, via the `prev_prekey_private`
+    grace-window key the client carries in the re-sealed bundle. A grant that survives two
+    rotations un-ingested is not guaranteed openable — see crypto-spec-v1.md §2.1.1/§2.1.2. The
+    server never opens the bundle, so none of this is enforced or even visible here; it is purely
+    a client-side property of what it chooses to keep in the re-sealed private bundle it submits.
+
+    This also swaps in the re-sealed private bundle the client submits alongside the new public
+    prekey, atomically with the public-key update. Writing the two separately is exactly the bug
+    that disabled this endpoint the first time: a public prekey rotated with no private half
+    anywhere (or with the bundle still holding the previous one) makes every grant addressed to
+    this device unopenable, because grants are wrapped to the prekey once one is present.
+    """
     key = await get_active_key_for_device(db, data.device_id)
 
     if key is None or key.user_id != user_id:
@@ -193,6 +207,12 @@ async def rotate_prekey(
     key.signed_prekey_public = data.signed_prekey_public
     key.signed_prekey_signature = data.signed_prekey_signature
     key.signed_prekey_created_at = datetime.now(timezone.utc)
+    # The server cannot verify this opens, or that it actually contains the new prekey_private —
+    # the blob is opaque by design. What it CAN guarantee is that this write and the public-key
+    # write above land in the same transaction, so there is no interval in which the public prekey
+    # is rotated but the stored bundle does not yet match it.
+    key.encrypted_private_bundle = data.encrypted_private_bundle
+    key.kdf_params = data.kdf_params
 
     await db.commit()
     await db.refresh(key)

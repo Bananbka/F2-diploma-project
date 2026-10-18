@@ -2,7 +2,7 @@ import uuid
 
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from sqlalchemy import Integer, and_, delete, func, insert, select, update
+from sqlalchemy import Integer, Row, and_, collate, delete, func, insert, select, update
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
@@ -161,7 +161,12 @@ async def get_user_chats(
     other = aliased(ChatParticipant)
 
     stmt = (
-        select(Chat, me.last_read_message_id, Contact.alias_name.label("partner_alias"))
+        select(
+            Chat,
+            me.last_read_message_id,
+            me.muted_until,
+            Contact.alias_name.label("partner_alias"),
+        )
         .join(me, and_(Chat.id == me.chat_id, me.user_id == user_id))
         # Restricted to PRIVATE. The counterpart join exists only to resolve the other party in a
         # two-person chat, but it was unrestricted, so a group of N produced N-1 rows for the same
@@ -193,6 +198,7 @@ async def get_user_chats(
     for row in res.all():
         chat = row.Chat
         chat.last_read_message_id = row.last_read_message_id
+        chat.muted_until = row.muted_until
         chat.partner_alias = row.partner_alias
         chats.append(chat)
 
@@ -223,20 +229,102 @@ async def get_chat_participants_ids(db: AsyncSession, chat_id: uuid.UUID):
     return res.scalars().all()
 
 
+async def get_chat_read_state(
+    db: AsyncSession, chat_id: uuid.UUID
+) -> list[Row[tuple[uuid.UUID, str | None]]]:
+    """Per-participant read state for a chat: `user_id` paired with `last_read_message_id`.
+
+    Deliberately returns every participant's own high-water mark rather than a single shared
+    flag. `MessageDocument.is_read` is a single boolean per message, so one member reading a group
+    message marked it read for everyone else too — this is the per-user replacement. The caller
+    (and the client) derives "has user X read message Y" by comparing `last_read_message_id`
+    against the message's ObjectId, the same `$lte` comparison `mark_messages_as_read` already
+    uses — ObjectId monotonicity is the ordering key throughout this codebase, so no extra sort
+    field is needed here either.
+
+    Does not authorise — callers must check `is_user_in_chat`/`get_chat_or_403` first, same as
+    every other chat-scoped Mongo-adjacent read.
+    """
+    stmt = select(ChatParticipant.user_id, ChatParticipant.last_read_message_id).where(
+        ChatParticipant.chat_id == chat_id
+    )
+    res = await db.execute(stmt)
+    return res.all()
+
+
 async def update_participant_last_read(
     db: AsyncSession, chat_id: uuid.UUID, user_id: uuid.UUID, last_read_message_id: str
-):
+) -> bool:
+    """Advance this participant's read high-water mark, and report whether it actually moved.
+
+    `last_read_message_id` must already be a validated, canonical (lowercase, 24-hex-char)
+    ObjectId string — the caller (`ws_router`) is responsible for running it through
+    `messages_service.objectify_id` before this is ever called, so that a malformed id is
+    rejected before it can reach Postgres at all, and a case-variant but valid id (e.g.
+    uppercase hex) is normalized rather than stored verbatim.
+
+    Guarded to be monotonic: only applied when there is no existing mark, or the new id sorts
+    after it. Mongo ObjectIds are 24 hex characters of fixed width, so plain string comparison
+    orders them exactly like `$lte`/`$lt` do against the BSON values elsewhere in this codebase —
+    no need to round-trip through `ObjectId` here. The comparison is pinned to the `C` collation
+    explicitly (rather than relying on the database's default) because plain `<` over ASCII hex
+    is only guaranteed byte-ordered under a byte-comparing collation; a locale-aware default could
+    order hex digits differently. Without the monotonicity guard, a `MESSAGE_READ` frame that is
+    delivered out of order (the socket has no dedup or sequencing of its own) could regress a
+    reader's mark backwards, which would both under-report their progress to peers and make the
+    `_id: {"$lte": ...}` filter in `mark_messages_as_read` re-scan messages already settled.
+
+    The return value is what the caller uses to decide whether the `message_read` broadcast is
+    worth publishing — see `ws_router`. It must not depend on `mark_messages_as_read`'s modified
+    count instead: that count is scoped to *other* people's messages (and to the legacy `is_read`
+    flag), so a participant who reads only their own sent messages, or catches up to a point
+    another reader already flipped, would otherwise never announce their own advancing mark.
+    """
+    stmt = (
+        update(ChatParticipant)
+        .where(
+            ChatParticipant.chat_id == chat_id,
+            ChatParticipant.user_id == user_id,
+            (ChatParticipant.last_read_message_id.is_(None))
+            | (
+                collate(ChatParticipant.last_read_message_id, "C")
+                < collate(last_read_message_id, "C")
+            ),
+        )
+        .values(last_read_message_id=last_read_message_id)
+    )
+
+    res = await db.execute(stmt)
+    await db.commit()
+    return res.rowcount > 0
+
+
+async def set_chat_mute(
+    db: AsyncSession,
+    chat_id: uuid.UUID,
+    user_id: uuid.UUID,
+    muted_until,
+) -> ChatParticipant:
+    """Mute or unmute a chat for one user only. Purely local state: no WebSocket event fires,
+    because muting a chat is not something any other participant needs to learn about."""
     stmt = (
         update(ChatParticipant)
         .where(
             ChatParticipant.chat_id == chat_id,
             ChatParticipant.user_id == user_id,
         )
-        .values(last_read_message_id=last_read_message_id)
+        .values(muted_until=muted_until)
+        .returning(ChatParticipant)
     )
 
-    await db.execute(stmt)
+    res = await db.execute(stmt)
+    participant = res.scalar_one_or_none()
+
+    if participant is None:
+        raise AppException(403, "ACCESS_DENIED", "You are not a participant of this chat.")
+
     await db.commit()
+    return participant
 
 
 async def get_chat_participants_by_user(db: AsyncSession, user_id: uuid.UUID):
@@ -311,6 +399,7 @@ async def enrich_chats_with_mongo_data(
                 "chat_type": chat.chat_type,
                 "unread_count": stats["unread_count"],
                 "last_message": last_msg,
+                "muted_until": getattr(chat, "muted_until", None),
                 "created_at": chat.created_at,
                 "updated_at": chat.updated_at,
             }
@@ -320,8 +409,21 @@ async def enrich_chats_with_mongo_data(
 
 
 async def get_chat_by_id(db, chat_id: uuid.UUID) -> Chat | None:
+    """Fetch a chat with its participants eagerly loaded.
+
+    `populate_existing=True` matters whenever this runs after a participant mutation earlier in
+    the *same* request/session (`add_participants`, `delete_participants`): without it, a `Chat`
+    already in the session's identity map from an earlier query keeps its previously-loaded
+    `participants` collection, and `selectinload` silently declines to refresh an already-loaded
+    collection on a cache hit. The database write itself is correct either way — only the response
+    payload returned from this same request was stale, still listing a participant who had just
+    been removed (or omitting one just added) until the caller made a second, fresh request.
+    """
     stmt = (
-        select(Chat).where(Chat.id == chat_id).options(selectinload(Chat.participants))
+        select(Chat)
+        .where(Chat.id == chat_id)
+        .options(selectinload(Chat.participants))
+        .execution_options(populate_existing=True)
     )
     res = await db.execute(stmt)
 

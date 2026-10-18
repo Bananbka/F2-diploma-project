@@ -55,6 +55,22 @@ export const routes: Routes = [
     // leaving them below it would rely on the router backtracking out of a parent whose children all
     // failed — which works, but is a subtle thing to depend on.
     {
+        path: 'stickers/manage',
+        canActivate: [authGuard],
+        loadComponent: () =>
+            import('./features/chat/stickers/sticker-pack-manager/sticker-pack-manager.component').then(
+                (m) => m.StickerPackManagerComponent
+            ),
+    },
+    {
+        path: 'stickers/discover',
+        canActivate: [authGuard],
+        loadComponent: () =>
+            import('./features/chat/stickers/sticker-discovery/sticker-discovery.component').then(
+                (m) => m.StickerDiscoveryComponent
+            ),
+    },
+    {
         path: 'new/group',
         canActivate: [authGuard],
         loadComponent: () =>
@@ -70,6 +86,20 @@ export const routes: Routes = [
         path: 'chats/:chatId/info',
         canActivate: [authGuard],
         loadComponent: () => import('./features/chat/chat-info/chat-info.component').then((m) => m.ChatInfoComponent),
+    },
+    {
+        // What a shared invite link actually resolves to client-side. The server's own
+        // `GET /invite-links/{token}` is path-addressed for the same shareable-link reason, but the
+        // SPA never links straight at the API — this route calls it and renders the join decision.
+        //
+        // Guarded like every other route in this app (see CLAUDE.md: no anonymous routes at all),
+        // which means an unauthenticated visitor is bounced to `/login` and the token is dropped —
+        // there is no return-url mechanism anywhere in this app to preserve it through that round
+        // trip. That is a known gap, not specific to this route.
+        path: 'join/:token',
+        canActivate: [authGuard],
+        loadComponent: () =>
+            import('./features/chat/join-invite/join-invite.component').then((m) => m.JoinInviteComponent),
     },
     {
         // The safety number is the only defence against the server substituting a public key, so it

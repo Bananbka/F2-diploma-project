@@ -30,7 +30,9 @@ class ProfileRequestSchema(BaseModel):
         if v is None:
             return v
 
-        prefix = f"{settings.MINIO_URL}/{settings.MINIO_AVATAR_BUCKET}/"
+        # Avatars are a public-bucket image, so the stored url is built from MINIO_PUBLIC_URL (see
+        # MinioClient.upload_file), not the internal MINIO_URL.
+        prefix = f"{settings.MINIO_PUBLIC_URL}/{settings.MINIO_AVATAR_BUCKET}/"
         if not v.startswith(prefix):
             raise ValueError("avatar_url must point at the avatar bucket.")
 

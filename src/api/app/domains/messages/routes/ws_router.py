@@ -193,18 +193,33 @@ async def websocket_endpoint(
                     if not ws_event.chat_id or not last_read_id:
                         continue
 
+                    # Validate and canonicalize before anything touches Postgres or Mongo.
+                    # `objectify_id` raises AppException (caught below) on a malformed id, and
+                    # the canonical `str(ObjectId(...))` form is what both the monotonicity
+                    # guard and the Mongo read-mark write must compare against — otherwise a
+                    # case-variant but valid id (e.g. uppercase hex) would be stored verbatim
+                    # and no longer byte-compare consistently against genuine lowercase-hex
+                    # ObjectId strings.
+                    last_read_id = str(messages_service.objectify_id(last_read_id))
+                    ws_event.payload["last_read_message_id"] = last_read_id
+
                     if not await _may_act_on(db, user.id, ws_event.chat_id, websocket):
                         continue
 
-                    await update_participant_last_read(
+                    advanced = await update_participant_last_read(
                         db, ws_event.chat_id, user.id, last_read_id
                     )
 
-                    updated_count = await messages_service.mark_messages_as_read(
+                    # Still called for its (deprecated) side effect on the legacy shared `is_read`
+                    # flag — see the note on `mark_messages_as_read`. Its modified count must not
+                    # gate the broadcast below: it is scoped to other members' messages, so a
+                    # reader catching up on only their own sends, or on a range another reader
+                    # already flipped, would otherwise never announce their own advancing mark.
+                    await messages_service.mark_messages_as_read(
                         db, mongo_db, ws_event.chat_id, user.id, last_read_id
                     )
 
-                    if updated_count > 0:
+                    if advanced:
                         stmt = select(ChatParticipant.user_id).where(
                             ChatParticipant.chat_id == ws_event.chat_id
                         )

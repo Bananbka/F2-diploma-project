@@ -1,12 +1,21 @@
-"""End-to-end: a sealed message survives the round trip and the server never sees plaintext."""
+"""End-to-end: a sealed message survives the round trip and the server never sees plaintext.
+
+Every envelope here goes through a real `/crypto/chats/{id}/enable` + published sender key, the
+same path `test_rotation_api.py` and `test_authorization.py` use. A private chat has no
+`ChatCryptoSettings` row until `enable` is called, and `send_message`/`update_message` now reject
+any envelope on a chat without one (`ENVELOPE_NOT_ALLOWED`) rather than accepting it unverified —
+so an ad hoc envelope sealed without going through `enable` would no longer be accepted here, and
+testing that shape would be testing the bug the fix closes, not the feature.
+"""
 import uuid
 
-from app.domains.crypto.reference.envelope import open_message, seal_message
-from app.domains.crypto.reference.identity import generate_identity
-from app.domains.crypto.reference.ratchet import ReceiverChain, SenderChain, generate_chain_key
+from app.domains.crypto.reference.envelope import open_message
+from app.domains.crypto.reference.ratchet import ReceiverChain, SenderChain
 from app.infrastructure.mongo import connect_to_mongo, mongo_client
 
+from tests.crypto.test_epoch_api import _publish_identity
 from tests.crypto.test_identity_api import _register_user
+from tests.crypto.test_rotation_api import _publish_chain, _seal
 
 SECRET = b"the treasure is buried under the old oak"
 
@@ -17,24 +26,35 @@ async def _private_chat_between(alice, bob_id):
     return uuid.UUID(r.json()["data"]["id"])
 
 
+async def _encrypted_private_chat(alice, alice_id, bob, bob_id):
+    """Register identities, create a private chat, enable encryption, publish Alice's chain.
+
+    Returns (chat_id, epoch, chain_key, skid, chain_identity) ready for `_seal`.
+    """
+    alice_device, alice_keys = await _publish_identity(alice, alice_id)
+    await _publish_identity(bob, bob_id)
+
+    chat_id = await _private_chat_between(alice, bob_id)
+
+    r = await alice.post(f"/crypto/chats/{chat_id}/enable")
+    assert r.status_code == 200, r.text
+    epoch = r.json()["data"]["epoch"]
+
+    chain_key, skid, chain_identity = await _publish_chain(
+        alice, chat_id, epoch, alice_id, alice_device, alice_keys
+    )
+    return chat_id, epoch, chain_key, skid, chain_identity
+
+
 async def test_sealed_message_round_trip_and_storage_is_opaque():
     alice, alice_id = await _register_user()
     bob, bob_id = await _register_user()
     try:
-        chat_id = await _private_chat_between(alice, bob_id)
-
-        identity = generate_identity(alice_id, uuid.uuid4())
-        chain_key = generate_chain_key()
-        sender = SenderChain(chain_key)
-        skid = uuid.uuid4()
-        epoch = 1
-
-        mk, nonce, idx = sender.next_message_key()
-        envelope = seal_message(
-            message_key=mk, nonce=nonce, signing_private=identity.signing_private,
-            chat_id=chat_id, epoch=epoch, sender_id=alice_id,
-            sender_key_id=skid, chain_index=idx, plaintext=SECRET,
+        chat_id, epoch, chain_key, skid, chain_identity = await _encrypted_private_chat(
+            alice, alice_id, bob, bob_id
         )
+        chain = SenderChain(chain_key)
+        envelope = _seal(chain, chat_id, epoch, alice_id, skid, chain_identity, body=SECRET)
 
         r = await alice.post("/messages/", json={"chat_id": str(chat_id), "envelope": envelope})
         assert r.status_code == 200, r.text
@@ -53,7 +73,7 @@ async def test_sealed_message_round_trip_and_storage_is_opaque():
         recovered = open_message(
             message_key=ReceiverChain(chain_key).message_key_for(fetched["envelope"]["idx"])[0],
             envelope=fetched["envelope"], chat_id=chat_id, sender_id=alice_id,
-            signing_public=identity.signing_public,
+            signing_public=chain_identity.signing_public,
         )
         assert recovered == SECRET
 
@@ -101,16 +121,12 @@ async def test_chat_list_survives_envelope_messages():
     alice, alice_id = await _register_user()
     bob, bob_id = await _register_user()
     try:
-        chat_id = await _private_chat_between(alice, bob_id)
-
-        identity = generate_identity(alice_id, uuid.uuid4())
-        sender = SenderChain(generate_chain_key())
-        mk, nonce, idx = sender.next_message_key()
-        envelope = seal_message(
-            message_key=mk, nonce=nonce, signing_private=identity.signing_private,
-            chat_id=chat_id, epoch=1, sender_id=alice_id,
-            sender_key_id=uuid.uuid4(), chain_index=idx, plaintext=SECRET,
+        chat_id, epoch, chain_key, skid, chain_identity = await _encrypted_private_chat(
+            alice, alice_id, bob, bob_id
         )
+        chain = SenderChain(chain_key)
+        envelope = _seal(chain, chat_id, epoch, alice_id, skid, chain_identity, body=SECRET)
+
         r = await alice.post("/messages/", json={"chat_id": str(chat_id), "envelope": envelope})
         assert r.status_code == 200, r.text
 
@@ -156,39 +172,30 @@ async def test_edit_rejects_reused_chain_index():
     alice, alice_id = await _register_user()
     bob, bob_id = await _register_user()
     try:
-        chat_id = await _private_chat_between(alice, bob_id)
-
-        identity = generate_identity(alice_id, uuid.uuid4())
-        sender = SenderChain(generate_chain_key())
-        skid = uuid.uuid4()
-
-        mk, nonce, idx = sender.next_message_key()
-        envelope = seal_message(
-            message_key=mk, nonce=nonce, signing_private=identity.signing_private,
-            chat_id=chat_id, epoch=1, sender_id=alice_id,
-            sender_key_id=skid, chain_index=idx, plaintext=b"original",
+        chat_id, epoch, chain_key, skid, chain_identity = await _encrypted_private_chat(
+            alice, alice_id, bob, bob_id
         )
+        sender = SenderChain(chain_key)
+
+        envelope = _seal(sender, chat_id, epoch, alice_id, skid, chain_identity, body=b"original")
         r = await alice.post("/messages/", json={"chat_id": str(chat_id), "envelope": envelope})
         assert r.status_code == 200, r.text
         # FastAPI serialises response models by alias, so the id field comes back as "_id".
         message_id = r.json()["data"]["_id"]
 
-        # Edit re-using index 0.
-        r = await alice.put(f"/messages/{message_id}", json={"envelope": dict(envelope, ct="QUJD")})
+        # Edit re-using index 0. Resubmit the exact same, still-validly-signed envelope: tampering
+        # the ciphertext would also break its signature, and `_validate_envelope` checks that
+        # before the reuse rule ever runs, so it would mask the thing this test is for.
+        r = await alice.put(f"/messages/{message_id}", json={"envelope": envelope})
         assert r.status_code == 400
         assert r.json()["error_code"] == "CHAIN_INDEX_REUSED"
 
         # A fresh index is accepted.
-        mk2, nonce2, idx2 = sender.next_message_key()
-        edited = seal_message(
-            message_key=mk2, nonce=nonce2, signing_private=identity.signing_private,
-            chat_id=chat_id, epoch=1, sender_id=alice_id,
-            sender_key_id=skid, chain_index=idx2, plaintext=b"edited",
-        )
+        edited = _seal(sender, chat_id, epoch, alice_id, skid, chain_identity, body=b"edited")
         r = await alice.put(f"/messages/{message_id}", json={"envelope": edited})
         assert r.status_code == 200, r.text
         assert r.json()["data"]["is_edited"] is True
-        assert r.json()["data"]["envelope"]["idx"] == idx2
+        assert r.json()["data"]["envelope"]["idx"] == edited["idx"]
     finally:
         await alice.aclose()
         await bob.aclose()
@@ -206,44 +213,51 @@ async def test_edit_from_a_fresh_chain_is_accepted():
     alice, alice_id = await _register_user()
     bob, bob_id = await _register_user()
     try:
-        chat_id = await _private_chat_between(alice, bob_id)
-        identity = generate_identity(alice_id, uuid.uuid4())
+        chat_id, epoch, first_chain_key, first_skid, chain_identity = await _encrypted_private_chat(
+            alice, alice_id, bob, bob_id
+        )
 
         # Original, sent well into the first chain so its index is comfortably above zero.
-        first_chain = SenderChain(generate_chain_key())
-        first_skid = uuid.uuid4()
+        first_chain = SenderChain(first_chain_key)
         for _ in range(4):
             first_chain.next_message_key()
 
-        mk, nonce, idx = first_chain.next_message_key()
-        assert idx > 0
-        envelope = seal_message(
-            message_key=mk, nonce=nonce, signing_private=identity.signing_private,
-            chat_id=chat_id, epoch=1, sender_id=alice_id,
-            sender_key_id=first_skid, chain_index=idx, plaintext=b"original",
-        )
+        envelope = _seal(first_chain, chat_id, epoch, alice_id, first_skid, chain_identity, body=b"original")
+        assert envelope["idx"] > 0
         r = await alice.post("/messages/", json={"chat_id": str(chat_id), "envelope": envelope})
         assert r.status_code == 200, r.text
         message_id = r.json()["data"]["_id"]
 
-        # The client reloaded: new chain, new key, index back to 0.
-        second_chain = SenderChain(generate_chain_key())
-        second_skid = uuid.uuid4()
-        mk2, nonce2, idx2 = second_chain.next_message_key()
-        assert idx2 == 0
+        # The client reloaded: new chain, new key, index back to 0. Registering a new device
+        # changes the member set, so it rotates every encrypted chat alice is in
+        # (`rotate_chats_for_new_device`) — the second chain is published, and the edit sealed,
+        # under the epoch that rotation opens, not the one fetched before it.
+        alice_device, alice_keys = await _publish_identity(alice, alice_id)
 
-        edited = seal_message(
-            message_key=mk2, nonce=nonce2, signing_private=identity.signing_private,
-            chat_id=chat_id, epoch=1, sender_id=alice_id,
-            sender_key_id=second_skid, chain_index=idx2, plaintext=b"edited",
+        r = await alice.get(f"/crypto/chats/{chat_id}/keys")
+        assert r.status_code == 200, r.text
+        second_epoch = r.json()["data"]["current_epoch"]
+        assert second_epoch > epoch, "a new device must rotate the epoch"
+
+        second_chain_key, second_skid, second_chain_identity = await _publish_chain(
+            alice, chat_id, second_epoch, alice_id, alice_device, alice_keys
         )
+        second_chain = SenderChain(second_chain_key)
+
+        edited = _seal(
+            second_chain, chat_id, second_epoch, alice_id, second_skid, second_chain_identity,
+            body=b"edited",
+        )
+        assert edited["idx"] == 0
+
         r = await alice.put(f"/messages/{message_id}", json={"envelope": edited})
         assert r.status_code == 200, r.text
         assert r.json()["data"]["is_edited"] is True
         assert r.json()["data"]["envelope"]["skid"] == str(second_skid)
 
-        # Reuse within that new chain is still refused — the rule is scoped, not removed.
-        r = await alice.put(f"/messages/{message_id}", json={"envelope": dict(edited, ct="QUJD")})
+        # Reuse within that new chain is still refused — the rule is scoped, not removed. Resubmit
+        # the same valid envelope rather than tampering ct, for the same reason as above.
+        r = await alice.put(f"/messages/{message_id}", json={"envelope": edited})
         assert r.status_code == 400
         assert r.json()["error_code"] == "CHAIN_INDEX_REUSED"
     finally:

@@ -4,7 +4,7 @@
     display: flex;
     flex-direction: column;
     flex-shrink: 0;
-    width: 20rem;
+    width: 100%;
     height: 100%;
     background: var(--secondary);
     border-right: 1px solid var(--border);
@@ -308,6 +308,13 @@
     flex-shrink: 0;
     color: var(--muted-foreground);
     font-size: 0.6875rem;
+}
+
+.mute-icon {
+    flex-shrink: 0;
+    width: 0.75rem;
+    height: 0.75rem;
+    color: var(--muted-foreground);
 }
 
 .preview {

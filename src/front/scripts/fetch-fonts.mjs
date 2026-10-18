@@ -1,5 +1,16 @@
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+
+// Run automatically (`postinstall` / `prebuild` in package.json) so a fresh checkout's build
+// never silently depends on a developer having run this by hand. `public/fonts/` and
+// `src/styles/_fonts.scss` are committed to the repo already, so in the common case this is a
+// no-op — skip the network round-trips unless those outputs are actually missing, or `--force`
+// is passed (e.g. to pick up a Google Fonts update).
+const FORCE = process.argv.includes('--force');
+if (!FORCE && existsSync('public/fonts') && readdirSync('public/fonts').length > 0 && existsSync('src/styles/_fonts.scss')) {
+    console.log('public/fonts and src/styles/_fonts.scss already present, skipping font fetch');
+    process.exit(0);
+}
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
 // Latin for the UI, Cyrillic because the app is Ukrainian-facing. Greek and Vietnamese are

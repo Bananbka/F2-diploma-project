@@ -7,32 +7,61 @@ import pytest
 import redis.asyncio as aioredis
 
 from app.core.config import settings
+from app.core.rate_limit import TEST_BYPASS_HEADER
 from app.domains.crypto.reference.identity import generate_identity, wrap_private_bundle
 from app.domains.crypto.reference.primitives import b64u_encode
 
 BASE = "http://localhost:8000"
 
 
+def rate_limit_bypass_headers() -> dict[str, str]:
+    """Headers that exempt this request from IP-keyed rate limits, see `rate_limit.py`.
+
+    Every client this suite creates should carry these: the suite runs with
+    RATE_LIMIT_ENABLED=true and registers dozens of accounts from one address, which is exactly
+    what `register`/`verify-email`/`login-ip`/`forgot-ip`/`reset-ip` exist to stop. A no-op dict
+    when RATE_LIMIT_TEST_BYPASS_TOKEN is not set on the server, so this is harmless to send even
+    against a deployment that never configured it.
+    """
+    token = settings.RATE_LIMIT_TEST_BYPASS_TOKEN
+    return {TEST_BYPASS_HEADER: token} if token else {}
+
+
 async def _register_user() -> tuple[httpx.AsyncClient, uuid.UUID]:
-    """Register + verify + login, returning an authenticated client."""
+    """Register + verify + login, returning an authenticated client.
+
+    The phone number is drawn from a 10,000,000-value space and nothing in this suite ever
+    deletes a registered user, so repeated runs against the same database accumulate rows
+    forever and the birthday-paradox collision probability climbs with them — independent of
+    rate limiting, which is why this retries on `INVALID_PHONE` (409) rather than widening the
+    space: a real Ukrainian mobile number is only 7 subscriber digits wide regardless, so a wider
+    generator would just collide less often, not stop colliding.
+    """
     suffix = uuid.uuid4().hex[:10]
     email = f"crypto{suffix}@example.com"
     password = "TestPassw0rd!"
 
-    client = httpx.AsyncClient(base_url=BASE, timeout=30.0)
-
-    r = await client.post(
-        "/auth/register",
-        json={
-            "full_name": "Crypto Test",
-            "username": f"crypto{suffix}",
-            "password": password,
-            "email": email,
-            "phone_number": f"+38050{uuid.uuid4().int % 10_000_000:07d}",
-            "public_key": "legacy",
-            "encrypted_private_key": "legacy",
-        },
+    client = httpx.AsyncClient(
+        base_url=BASE, timeout=30.0, headers=rate_limit_bypass_headers()
     )
+
+    for attempt in range(5):
+        r = await client.post(
+            "/auth/register",
+            json={
+                "full_name": "Crypto Test",
+                "username": f"crypto{suffix}",
+                "password": password,
+                "email": email,
+                "phone_number": f"+38050{uuid.uuid4().int % 10_000_000:07d}",
+                "public_key": "legacy",
+                "encrypted_private_key": "legacy",
+            },
+        )
+        if r.status_code == 409 and r.json().get("error_code") == "INVALID_PHONE":
+            continue
+        break
+
     assert r.status_code == 200, r.text
     user_id = uuid.UUID(r.json()["data"]["id"])
 
@@ -293,18 +322,7 @@ async def test_prekey_rotation_requires_a_valid_signature():
         bundle.identity_public
     )
 
-    # Rotation stays disabled until the sealed bundle can carry `prekey_private`. Until then a
-    # rotated prekey has no private half anywhere, so every grant wrapped to it is unopenable.
-    # A 410 rather than a 404 so a client built against the old contract gets a real answer.
-    r = await client.put(
-        "/crypto/identity/prekey",
-        json={
-            "device_id": str(device_id),
-            "signed_prekey_public": b64u_encode(prekey_public),
-            "signed_prekey_signature": b64u_encode(good_sig),
-        },
-    )
-    assert r.status_code == 410, r.text
-    assert r.json()["error_code"] == "PREKEY_ROTATION_DISABLED"
+    # Rotation itself is covered end-to-end in test_prekey_rotation.py, including the same
+    # signature-verification failures as above but against `PUT /crypto/identity/prekey`.
 
     await client.aclose()

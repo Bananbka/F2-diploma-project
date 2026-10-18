@@ -4,7 +4,16 @@ import { map, Observable } from 'rxjs';
 
 import { MessageEnvelope } from '../crypto/envelope';
 import { SuccessResponse } from '../models/api.model';
-import { Chat, ChatParticipant, ParticipantRole, UserSearchResult } from '../models/chat.model';
+import {
+    Chat,
+    ChatParticipant,
+    InviteLink,
+    InviteLinkJoinResult,
+    InviteLinkPreview,
+    ParticipantReadState,
+    ParticipantRole,
+    UserSearchResult,
+} from '../models/chat.model';
 import { ChannelPostPayload, ForwardOrigin, MessageAttachment, MessageResponse } from '../models/crypto.model';
 import { ConfigService } from './config.service';
 
@@ -21,12 +30,34 @@ export class ChatApiService {
         return this.configService.apiUrl + 'messages/';
     }
 
+    /**
+     * The token-scoped invite-link endpoints (`preview`/`join`/`revoke`) are not addressed by chat
+     * id at all — see `invite_link_routes.py`'s `router`, kept deliberately separate from the
+     * chat-scoped create/list pair.
+     */
+    private get inviteLinksUrl(): string {
+        return this.configService.apiUrl + 'invite-links/';
+    }
+
     getChats(): Observable<Chat[]> {
         return this.http.get<SuccessResponse<Chat[]>>(this.chatsUrl).pipe(map((r) => r.data));
     }
 
     getChat(chatId: string): Observable<Chat> {
         return this.http.get<SuccessResponse<Chat>>(`${this.chatsUrl}${chatId}`).pipe(map((r) => r.data));
+    }
+
+    /**
+     * Every participant's own read high-water mark for this chat, in one payload.
+     *
+     * Refetched on `openChat` and on a `message_read` broadcast for the active chat, rather than
+     * queried per message — the client already holds every rendered message's id, so it derives
+     * read status (and a group's "read by N of M") locally by comparing ids.
+     */
+    getReadState(chatId: string): Observable<ParticipantReadState[]> {
+        return this.http
+            .get<SuccessResponse<ParticipantReadState[]>>(`${this.chatsUrl}${chatId}/read-state`)
+            .pipe(map((r) => r.data));
     }
 
     createPrivateChat(targetUserId: string): Observable<Chat> {
@@ -102,6 +133,16 @@ export class ChatApiService {
     }
 
     /**
+     * The object key a stored attachment URL points at.
+     *
+     * Shared by `attachmentUrl` (single-fetch) and `AttachmentBatchService` (batched fetch), so
+     * the two transports never disagree about how a key is derived from the stored URL.
+     */
+    attachmentObjectKey(storedUrl: string): string {
+        return storedUrl.split('/').pop() ?? '';
+    }
+
+    /**
      * Where to fetch an attachment.
      *
      * Not the URL the upload returned: that points straight at MinIO, and the message bucket is
@@ -109,8 +150,12 @@ export class ChatApiService {
      * re-addressed through it.
      */
     attachmentUrl(chatId: string, storedUrl: string): string {
-        const objectKey = storedUrl.split('/').pop() ?? '';
-        return `${this.configService.apiUrl}files/attachments/${chatId}/${objectKey}`;
+        return `${this.configService.apiUrl}files/attachments/${chatId}/${this.attachmentObjectKey(storedUrl)}`;
+    }
+
+    /** Where the batched attachment-fetch endpoint lives — see `AttachmentBatchService`. */
+    attachmentsBatchUrl(): string {
+        return `${this.configService.apiUrl}files/attachments/batch`;
     }
 
     /** Send a signed broadcast post. Channels are authenticated but not confidential. */
@@ -161,10 +206,28 @@ export class ChatApiService {
         return this.http.delete<SuccessResponse<unknown>>(`${this.chatsUrl}${chatId}`).pipe(map((r) => r.data));
     }
 
-    /** Edit a message. The envelope must carry a FRESH chain index; reuse is rejected. */
-    editMessage(messageId: string, envelope: MessageEnvelope): Observable<MessageResponse> {
+    /**
+     * Edit a message. The envelope must carry a FRESH chain index; reuse is rejected.
+     *
+     * `attachments` follows the same omit/replace convention as `PATCH /chat-folder/{id}`:
+     * `undefined` (the parameter not passed at all) omits the key from the body entirely, which
+     * the server reads as "leave the stored attachment list untouched" — the common, text-only
+     * edit. Passing `[]` explicitly clears every attachment. Callers must have already stripped
+     * each attachment's `decryptionKey` (see `stripDecryptionKeys` in `message.service.ts`) — that
+     * field is in-memory-only and must never reach the wire.
+     */
+    editMessage(
+        messageId: string,
+        envelope: MessageEnvelope,
+        attachments?: MessageAttachment[]
+    ): Observable<MessageResponse> {
+        const body: { envelope: MessageEnvelope; attachments?: MessageAttachment[] } = { envelope };
+        if (attachments !== undefined) {
+            body.attachments = attachments;
+        }
+
         return this.http
-            .put<SuccessResponse<MessageResponse>>(`${this.messagesUrl}${messageId}`, { envelope })
+            .put<SuccessResponse<MessageResponse>>(`${this.messagesUrl}${messageId}`, body)
             .pipe(map((r) => r.data));
     }
 
@@ -173,6 +236,102 @@ export class ChatApiService {
             .get<SuccessResponse<UserSearchResult[]>>(`${this.configService.apiUrl}users/search`, {
                 params: new HttpParams().set('query', query).set('limit', limit),
             })
+            .pipe(map((r) => r.data));
+    }
+
+    /**
+     * Toggle the caller's reaction with this emoji: the same emoji from the same user removes it,
+     * a different one adds an additional, independent reaction.
+     */
+    toggleReaction(messageId: string, emoji: string): Observable<MessageResponse> {
+        return this.http
+            .post<SuccessResponse<MessageResponse>>(`${this.messagesUrl}${messageId}/reactions`, { emoji })
+            .pipe(map((r) => r.data));
+    }
+
+    /** Explicit removal, distinct from the toggle above and idempotent. */
+    removeReaction(messageId: string, emoji: string): Observable<MessageResponse> {
+        return this.http
+            .delete<SuccessResponse<MessageResponse>>(
+                `${this.messagesUrl}${messageId}/reactions/${encodeURIComponent(emoji)}`
+            )
+            .pipe(map((r) => r.data));
+    }
+
+    /** Role-gated server-side (open in private chats, admin/owner only in groups and channels). */
+    pinMessage(messageId: string): Observable<MessageResponse> {
+        return this.http
+            .post<SuccessResponse<MessageResponse>>(`${this.messagesUrl}${messageId}/pin`, {})
+            .pipe(map((r) => r.data));
+    }
+
+    unpinMessage(messageId: string): Observable<MessageResponse> {
+        return this.http
+            .post<SuccessResponse<MessageResponse>>(`${this.messagesUrl}${messageId}/unpin`, {})
+            .pipe(map((r) => r.data));
+    }
+
+    getPinnedMessages(chatId: string): Observable<MessageResponse[]> {
+        return this.http
+            .get<SuccessResponse<MessageResponse[]>>(`${this.chatsUrl}${chatId}/pinned-messages`)
+            .pipe(map((r) => r.data));
+    }
+
+    /**
+     * Mute or unmute a chat for the calling user only. A future timestamp mutes until then; `null`
+     * unmutes. There is no distinct "forever" flag server-side, so an indefinite mute is expressed
+     * as a timestamp far enough in the future.
+     */
+    muteChat(chatId: string, mutedUntil: string | null): Observable<{ chat_id: string; muted_until: string | null }> {
+        return this.http
+            .patch<SuccessResponse<{ chat_id: string; muted_until: string | null }>>(`${this.chatsUrl}${chatId}/mute`, {
+                muted_until: mutedUntil,
+            })
+            .pipe(map((r) => r.data));
+    }
+
+    /** ADMIN/OWNER only, rejected server-side for PRIVATE chats. Omit both bounds for no limit. */
+    createInviteLink(chatId: string, expiresAt?: string, maxUses?: number): Observable<InviteLink> {
+        return this.http
+            .post<SuccessResponse<InviteLink>>(`${this.chatsUrl}${chatId}/invite-links`, {
+                expires_at: expiresAt ?? null,
+                max_uses: maxUses ?? null,
+            })
+            .pipe(map((r) => r.data));
+    }
+
+    /** Active links for a chat. Same ADMIN/OWNER gate as create. */
+    listInviteLinks(chatId: string): Observable<InviteLink[]> {
+        return this.http
+            .get<SuccessResponse<InviteLink[]>>(`${this.chatsUrl}${chatId}/invite-links`)
+            .pipe(map((r) => r.data));
+    }
+
+    /**
+     * Preview a chat by invite-link token, without membership or roster exposure. The token is in
+     * the URL here — unlike join/revoke — because this is the one meant to be a real clickable,
+     * shareable link.
+     */
+    previewInviteLink(token: string): Observable<InviteLinkPreview> {
+        return this.http
+            .get<SuccessResponse<InviteLinkPreview>>(`${this.inviteLinksUrl}${encodeURIComponent(token)}`)
+            .pipe(map((r) => r.data));
+    }
+
+    /**
+     * Join the chat an invite link points at. The token goes in the body, not the URL — a
+     * deliberate choice on the server so it never appears in an access log line for this endpoint.
+     */
+    joinInviteLink(token: string): Observable<InviteLinkJoinResult> {
+        return this.http
+            .post<SuccessResponse<InviteLinkJoinResult>>(`${this.inviteLinksUrl}join`, { token })
+            .pipe(map((r) => r.data));
+    }
+
+    /** Revoke a link. Scoped server-side to the chat it belongs to, resolved from the token itself. */
+    revokeInviteLink(token: string): Observable<InviteLink> {
+        return this.http
+            .post<SuccessResponse<InviteLink>>(`${this.inviteLinksUrl}revoke`, { token })
             .pipe(map((r) => r.data));
     }
 }

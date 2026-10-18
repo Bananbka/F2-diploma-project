@@ -60,18 +60,28 @@ services:
       timeout: 3s
       retries: 5
 
-  minio:
-    image: minio/minio
+  # MinIO's dev volume ended up in a broken state (objects missing independent of any app bug),
+  # so the object store is RustFS instead. It speaks the same S3 API `minio_manager`
+  # (app/infrastructure/minio.py) already talks over aiobotocore, so this is an endpoint/credential
+  # swap, not an application-code rewrite — the Python client class is still named `MinioClient`.
+  rustfs:
+    image: rustfs/rustfs:latest
     restart: always
-    command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD}
+      RUSTFS_ACCESS_KEY: ${MINIO_USER}
+      RUSTFS_SECRET_KEY: ${MINIO_PASSWORD}
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ADDRESS: ":9001"
+      RUSTFS_CONSOLE_ENABLE: "true"
     ports:
       - "127.0.0.1:9000:9000"
       - "127.0.0.1:9001:9001"
     volumes:
-      - minio_data:/data
+      - rustfs_data:/data
+    # RustFS runs as non-root uid 10001 inside the container. A fresh named Docker volume is
+    # usually fine (Docker initialises it with the image's filesystem permissions on first use),
+    # but if this container fails to start with a permissions error on /data, that uid/ownership
+    # mismatch is the first thing to check.
 
   api:
     build:
@@ -79,9 +89,10 @@ services:
       dockerfile: Dockerfile
     restart: always
     ports:
-      # Loopback only. nginx on 4200 is the single origin the browser uses, and it is where
-      # the security headers and the first layer of rate limiting live — reaching the API
-      # directly from the network would bypass both. Swagger still works at localhost:8000/docs.
+      # Loopback only. The gateway container on 4200 is the single origin the browser uses, and
+      # it is where the security headers and the first layer of rate limiting live — reaching
+      # the API directly from the network would bypass both. Swagger still works at
+      # localhost:8000/docs.
       - "127.0.0.1:8000:8000"
     volumes:
       - ./api:/app
@@ -94,9 +105,14 @@ services:
         condition: service_started
       redis:
         condition: service_started
-      minio:
+      rustfs:
         condition: service_started
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    # --no-access-log: uvicorn's default access logger writes the full request path — including
+    # the invite-link token in `/invite-links/{token}` — verbatim to stdout, which `docker compose
+    # logs` captures. `app.main`'s own `log_requests` middleware already logs every
+    # request/response with loguru and redacts that token, so uvicorn's separate, unredacted
+    # access log is disabled here rather than patched.
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --no-access-log
 
   frontend:
     build:
@@ -104,15 +120,31 @@ services:
       dockerfile: Dockerfile
       target: ${FRONTEND_TARGET:-production}
     restart: always
-    ports:
-      - "4200:80"
+    # No `ports:` here — this container is internal-only now. The gateway service is the single
+    # published entry point on 4200 and is the only thing that reaches this one, over the compose
+    # network.
     environment:
-      # nginx proxies /api and /ws to the api service, so the browser sees a single origin and
-      # the auth cookies stay same-site.
+      # Still relative: the browser's requests go through the gateway regardless of which
+      # container actually answers them, so the auth cookies stay same-site either way.
       - API_URL=/api/
       - WS_URL=/ws
     depends_on:
       - api
+
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      # The single published entry point. nginx here owns security headers, rate limiting, and
+      # all /api, /ws and /objects routing — the frontend container no longer does either of
+      # those jobs, it only serves the Angular build, and it is reached only from here.
+      - "4200:80"
+    depends_on:
+      - frontend
+      - api
+      - rustfs
 
   celery-worker:
     build:
@@ -141,4 +173,4 @@ volumes:
   postgres_data:
   mongo_data:
   redis_data:
-  minio_data:
+  rustfs_data:

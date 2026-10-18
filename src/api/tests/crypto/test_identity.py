@@ -4,6 +4,7 @@ These pin the wire format. If a change here breaks a test, that is a protocol ch
 client must be updated in lockstep — it is not a test to "fix".
 """
 import uuid
+from dataclasses import replace
 
 import pytest
 
@@ -12,6 +13,7 @@ from app.domains.crypto.reference.identity import (
     safety_number,
     unwrap_private_bundle,
     verify_identity_binding,
+    verify_signed_prekey,
     wrap_private_bundle,
 )
 from app.domains.crypto.reference.primitives import b64u_decode, b64u_encode
@@ -73,6 +75,108 @@ def test_private_bundle_round_trip():
 
     assert out["signing_private"] == b.signing_private
     assert out["identity_private"] == b.identity_private
+
+
+def test_generate_identity_includes_a_signed_prekey_by_default():
+    """A real client mints the prekey at registration, alongside the identity keypair, so its
+    private half is in the sealed bundle from the start — see crypto-spec-v1.md §2.2."""
+    b = generate_identity(USER_A, DEVICE_A)
+
+    assert b.prekey_private is not None
+    assert len(b.prekey_private) == 32
+    assert len(b.prekey_public) == 32
+    assert len(b.signed_prekey_signature) == 64
+    assert verify_signed_prekey(
+        USER_A, DEVICE_A, b.prekey_public, b.signing_public, b.signed_prekey_signature
+    )
+
+
+def test_generate_identity_without_prekey_models_a_pre_fix_bundle():
+    """`with_prekey=False` is how these tests model a bundle sealed before rotation existed."""
+    b = generate_identity(USER_A, DEVICE_A, with_prekey=False)
+
+    assert b.prekey_private is None
+    assert b.prekey_public is None
+    assert b.signed_prekey_signature is None
+
+
+def test_private_bundle_round_trip_includes_prekey_private():
+    """The fix in one assertion: the sealed bundle now carries the prekey's private half, so it
+    survives being written to storage and read back — which is the entire point of the change."""
+    b = generate_identity(USER_A, DEVICE_A)
+    wrapped, params = wrap_private_bundle(b, "correct horse battery staple")
+
+    out = unwrap_private_bundle(wrapped, params, "correct horse battery staple")
+
+    assert out["prekey_private"] == b.prekey_private
+
+
+def test_private_bundle_without_a_prekey_omits_the_field_rather_than_erroring():
+    """Backward compatibility: a bundle sealed with no prekey (modelling one sealed before this
+    fix existed) must unwrap cleanly, simply without a `prekey_private` entry — never a KeyError.
+    There is nothing for the server to migrate, since it never opens the blob; the next re-seal
+    (a rotation, or a change-password re-wrap) is what adds the field."""
+    b = generate_identity(USER_A, DEVICE_A, with_prekey=False)
+    wrapped, params = wrap_private_bundle(b, "pw")
+
+    out = unwrap_private_bundle(wrapped, params, "pw")
+
+    assert "prekey_private" not in out
+    assert out["signing_private"] == b.signing_private
+    assert out["identity_private"] == b.identity_private
+
+
+def test_private_bundle_round_trip_includes_prev_prekey_private_during_the_grace_window():
+    """After a rotation, the client carries the outgoing prekey's private half forward as
+    `prev_prekey_private` for exactly one further cycle, so a grant wrapped to it just before
+    rotation but not yet ingested can still be opened. That extra field must round-trip too."""
+    b = generate_identity(USER_A, DEVICE_A)
+    rotated = replace(b, prev_prekey_private=b.prekey_private)
+    wrapped, params = wrap_private_bundle(rotated, "correct horse battery staple")
+
+    out = unwrap_private_bundle(wrapped, params, "correct horse battery staple")
+
+    assert out["prekey_private"] == rotated.prekey_private
+    assert out["prev_prekey_private"] == b.prekey_private
+
+
+def test_private_bundle_without_a_rotation_yet_omits_prev_prekey_private():
+    """Right after registration (or before a device's first rotation) there is no previous
+    generation to retain, so `prev_prekey_private` must be absent, never present-but-null."""
+    b = generate_identity(USER_A, DEVICE_A)
+    wrapped, params = wrap_private_bundle(b, "pw")
+
+    out = unwrap_private_bundle(wrapped, params, "pw")
+
+    assert "prev_prekey_private" not in out
+    assert out["prekey_private"] == b.prekey_private
+
+
+def test_second_rotation_discards_the_older_generation_rather_than_accumulating():
+    """`prev_prekey_private` is a one-cycle grace window, not a history. Modelling two rotations in
+    a row: the bundle re-sealed after the second rotation must carry only the *first* rotation's
+    outgoing prekey as `prev_prekey_private` — the original registration prekey is gone."""
+    registered = generate_identity(USER_A, DEVICE_A)
+
+    first_rotation = replace(
+        registered,
+        prekey_private=b"1" * 32,
+        prekey_public=b"1" * 32,
+        prev_prekey_private=None,  # nothing to retain yet at the first rotation
+    )
+    second_rotation = replace(
+        first_rotation,
+        prekey_private=b"2" * 32,
+        prekey_public=b"2" * 32,
+        prev_prekey_private=registered.prekey_private,  # the generation first_rotation superseded
+    )
+
+    wrapped, params = wrap_private_bundle(second_rotation, "pw")
+    out = unwrap_private_bundle(wrapped, params, "pw")
+
+    assert out["prekey_private"] == b"2" * 32
+    assert out["prev_prekey_private"] == registered.prekey_private
+    assert out["prev_prekey_private"] != first_rotation.prekey_private
 
 
 def test_private_bundle_rejects_wrong_password():

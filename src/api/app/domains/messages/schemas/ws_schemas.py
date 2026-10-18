@@ -25,6 +25,12 @@ class WSEventType(str, Enum):
     # A new key epoch opened. Clients should publish a sender key before their next send, and
     # fetch grants so they can read what others send under it.
     KEY_EPOCH_STARTED = "key_epoch_started"
+    # Reactions and pins are chat-scoped, so every member is notified, unlike mute which is
+    # per-user local state and never broadcast.
+    MESSAGE_REACTION_ADDED = "message_reaction_added"
+    MESSAGE_REACTION_REMOVED = "message_reaction_removed"
+    MESSAGE_PINNED = "message_pinned"
+    MESSAGE_UNPINNED = "message_unpinned"
     ERROR = "error"
 
 

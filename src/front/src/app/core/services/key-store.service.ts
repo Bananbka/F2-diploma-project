@@ -13,7 +13,10 @@ import {
 } from '../crypto/grants';
 import {
     generateIdentity,
+    generateSignedPrekey,
+    KdfParams,
     safetyNumber,
+    sealPrivateBundle,
     unwrapPrivateBundle,
     userFingerprintMaterial,
     verifyIdentityBinding,
@@ -23,7 +26,7 @@ import {
 } from '../crypto/identity';
 import { b64uDecode, b64uEncode } from '../crypto/primitives';
 import { generateChainKey, ReceiverChain, SenderChain } from '../crypto/ratchet';
-import { ChatRoster, Distribution, GrantUpload, OwnIdentity } from '../models/crypto.model';
+import { ChatRoster, Distribution, GrantUpload, OwnIdentity, PublicKey } from '../models/crypto.model';
 import { CryptoApiService } from './crypto-api.service';
 import { RosterVerificationError } from './crypto-errors';
 
@@ -35,6 +38,23 @@ interface UnlockedIdentity {
     signingPrivate: Uint8Array;
     signingPublic: Uint8Array;
     identityPrivate: Uint8Array;
+    // Present once this device has minted a signed prekey — which `generateIdentity` does by
+    // default from registration onward. Absent for a bundle sealed before rotation was re-enabled;
+    // `ingestDistributions` falls back to `identityPrivate` whenever this is missing, or when
+    // unwrapping with it fails because the grant predates the prekey's existence.
+    prekeyPrivate?: Uint8Array;
+    // The *previous* generation's prekey private half, retained for exactly one rotation cycle —
+    // see crypto-spec-v1.md §2.1.2/§2.2. `unwrapGrantForSelf` tries this after `prekeyPrivate` and
+    // before `identityPrivate`, so a grant published against the outgoing prekey but not yet
+    // ingested when rotation happened still opens. Absent before this device's first rotation, and
+    // discarded on every rotation after that — one cycle only, not an accumulated history.
+    prevPrekeyPrivate?: Uint8Array;
+    // The Argon2id-derived key from this session's unlock (or from registration), kept only in
+    // memory so `rotatePrekey` can re-seal the bundle without prompting for the password again —
+    // see crypto-spec-v1.md §2.1.2. Same lifetime and threat model as the private key material
+    // above: never persisted, gone on `lock()`.
+    kek: Uint8Array;
+    kdfParams: KdfParams;
 }
 
 /**
@@ -102,6 +122,9 @@ export class KeyStoreService {
     /** Create and publish a fresh identity for this device. Called once, at registration. */
     async createAndPublishIdentity(userId: string, password: string, displayName = 'web'): Promise<void> {
         const deviceId = this.deviceId;
+        // Mints a signed prekey alongside the identity keypair (see `generateIdentity`'s
+        // docstring): its private half needs to be inside the sealed bundle from the very first
+        // seal, or a later rotation has nowhere to put one without a fresh password prompt.
         const bundle = generateIdentity(userId, deviceId);
         const wrapped = await wrapPrivateBundle(bundle, password);
 
@@ -112,6 +135,8 @@ export class KeyStoreService {
                 identity_public_key: b64uEncode(bundle.identityPublic),
                 signing_public_key: b64uEncode(bundle.signingPublic),
                 identity_key_signature: b64uEncode(bundle.identityKeySignature),
+                signed_prekey_public: bundle.prekeyPublic ? b64uEncode(bundle.prekeyPublic) : null,
+                signed_prekey_signature: bundle.signedPrekeySignature ? b64uEncode(bundle.signedPrekeySignature) : null,
                 encrypted_private_bundle: wrapped.encryptedPrivateBundle,
                 kdf_params: wrapped.kdfParams as unknown as Record<string, unknown>,
             })
@@ -123,6 +148,9 @@ export class KeyStoreService {
             signingPrivate: bundle.signingPrivate,
             signingPublic: bundle.signingPublic,
             identityPrivate: bundle.identityPrivate,
+            prekeyPrivate: bundle.prekeyPrivate,
+            kek: wrapped.kek,
+            kdfParams: wrapped.kdfParams,
         };
         this.isUnlocked.set(true);
     }
@@ -157,6 +185,10 @@ export class KeyStoreService {
                 signingPrivate: opened.signingPrivate,
                 signingPublic: b64uDecode(mine.signing_public_key),
                 identityPrivate: opened.identityPrivate,
+                prekeyPrivate: opened.prekeyPrivate,
+                prevPrekeyPrivate: opened.prevPrekeyPrivate,
+                kek: opened.kek,
+                kdfParams: mine.kdf_params as unknown as KdfParams,
             };
             this.isUnlocked.set(true);
 
@@ -168,25 +200,62 @@ export class KeyStoreService {
     }
 
     /**
-     * Signed-prekey rotation is deliberately NOT performed by this client.
+     * Rotate this device's medium-term signed prekey.
      *
-     * The primitives exist and the server verifies the binding, but rotating here would break
-     * receiving. Senders wrap grants to `signed_prekey_public ?? identity_public_key`, while
-     * `ingestDistributions` can only unwrap with `identityPrivate` — the prekey's private half is
-     * nowhere, so publishing a prekey makes every grant addressed to this device unopenable and every
-     * message reports `no_key`.
+     * Safe now that every bundle carries `prekey_private` from registration onward (see
+     * `generateIdentity`): re-sealing here needs only the KEK this session already derived at
+     * unlock, not the password again. `sealPrivateBundle` reuses the existing Argon2id
+     * salt/parameters — the password has not changed, so there is nothing to re-derive — and
+     * refreshes only the AES-GCM nonce and the plaintext, which now carries the new prekey's
+     * private half alongside the unchanged identity/signing privates.
      *
-     * It cannot simply be kept, either. The private bundle is sealed under an Argon2id key derived
-     * from the password, and the password is not retained after unlock — so re-sealing the bundle to
-     * add a rotated prekey private would mean re-prompting on every rotation. Persisting it outside
-     * the bundle is the approach already tried and reverted for the identity keys.
+     * Does not touch the identity keypair, its version, or any existing grant: role and prekey
+     * changes are not confidentiality boundaries (crypto-spec-v1.md §5.2), so nothing here forces a
+     * chat re-key. It does mean every *future* grant to this device prefers the new prekey — see
+     * `ensureSenderChain` — while grants already issued keep working, because `ingestDistributions`
+     * falls back to `identityPrivate` whenever unwrapping with a prekey fails.
      *
-     * Doing this properly needs the bundle to carry `prekey_private` from the start, generated at
-     * registration alongside the identity, with rotation deferred until there is somewhere to put the
-     * new private half. Until then the identity key is the grant recipient and forward secrecy across
-     * prekey rotations is simply not claimed.
+     * The outgoing `prekeyPrivate` is carried forward as `prevPrekeyPrivate` — dropping whatever
+     * `prevPrekeyPrivate` held before — so a grant published against it but not yet ingested at the
+     * moment of rotation still opens for exactly one further rotation cycle (crypto-spec-v1.md
+     * §2.1.2). `unwrapGrantForSelf` tries it between `prekeyPrivate` and `identityPrivate`.
      */
-    // (no rotation method: see above)
+    async rotatePrekey(): Promise<PublicKey> {
+        const identity = this.requireIdentity();
+
+        const { prekeyPrivate, prekeyPublic, signature } = generateSignedPrekey(
+            identity.signingPrivate,
+            identity.userId,
+            identity.deviceId
+        );
+
+        const prevPrekeyPrivate = identity.prekeyPrivate;
+
+        const sealed = await sealPrivateBundle(
+            {
+                signingPrivate: identity.signingPrivate,
+                identityPrivate: identity.identityPrivate,
+                prekeyPrivate,
+                prevPrekeyPrivate,
+            },
+            identity.kek,
+            identity.kdfParams
+        );
+
+        const updated = await firstValueFrom(
+            this.cryptoApi.rotatePrekey({
+                device_id: identity.deviceId,
+                signed_prekey_public: b64uEncode(prekeyPublic),
+                signed_prekey_signature: b64uEncode(signature),
+                encrypted_private_bundle: sealed.encryptedPrivateBundle,
+                kdf_params: sealed.kdfParams as unknown as Record<string, unknown>,
+            })
+        );
+
+        this.identity = { ...identity, prekeyPrivate, prevPrekeyPrivate, kdfParams: sealed.kdfParams };
+
+        return updated;
+    }
 
     /**
      * Re-seal a published device's private bundle under a new password.
@@ -203,13 +272,16 @@ export class KeyStoreService {
             oldPassword
         );
 
+        // `prekeyPrivate` and `prevPrekeyPrivate` carry through when present — dropping either here
+        // would silently strand a rotated prekey (or its one-cycle grace window) the moment the
+        // password changes, since the server has no way to notice a re-wrap quietly lost a field
+        // the blob is opaque to.
         const rewrapped = await wrapPrivateBundle(
             {
                 signingPrivate: opened.signingPrivate,
-                signingPublic: b64uDecode(published.signing_public_key),
                 identityPrivate: opened.identityPrivate,
-                identityPublic: b64uDecode(published.identity_public_key),
-                identityKeySignature: b64uDecode(published.identity_key_signature),
+                prekeyPrivate: opened.prekeyPrivate,
+                prevPrekeyPrivate: opened.prevPrekeyPrivate,
             },
             newPassword
         );
@@ -219,7 +291,11 @@ export class KeyStoreService {
 
         if (
             b64uEncode(verified.signingPrivate) !== b64uEncode(opened.signingPrivate) ||
-            b64uEncode(verified.identityPrivate) !== b64uEncode(opened.identityPrivate)
+            b64uEncode(verified.identityPrivate) !== b64uEncode(opened.identityPrivate) ||
+            b64uEncode(verified.prekeyPrivate ?? new Uint8Array()) !==
+                b64uEncode(opened.prekeyPrivate ?? new Uint8Array()) ||
+            b64uEncode(verified.prevPrekeyPrivate ?? new Uint8Array()) !==
+                b64uEncode(opened.prevPrekeyPrivate ?? new Uint8Array())
         ) {
             throw new Error('Re-wrapped bundle did not round-trip; refusing to change the password.');
         }
@@ -369,15 +445,16 @@ export class KeyStoreService {
 
         const chainKey = generateChainKey();
         const senderKeyId = uuidv4();
-        const chainIdentity = generateIdentity(identity.userId, identity.deviceId);
+        // Throwaway signing identity for this one chain — it exists only to sign the distribution
+        // below, so it has no business publishing (or needing) a prekey of its own.
+        const chainIdentity = generateIdentity(identity.userId, identity.deviceId, false);
 
         const grants: GrantUpload[] = [];
         for (const member of roster.members) {
             // Prefer the signed prekey: it gives forward secrecy for the grant once it rotates.
-            //
-            // The recipient must hold the matching private half, and this client keeps only the
-            // identity private — which is why it never publishes a prekey of its own. A prekey seen
-            // here therefore belongs to some other client that can open it.
+            // The recipient must hold the matching private half — `ingestDistributions` tries
+            // `prekeyPrivate` first and falls back to `identityPrivate`, so either publishing state
+            // on the recipient's side can open this.
             const recipientPublic = b64uDecode(member.signed_prekey_public ?? member.identity_public_key);
 
             const wrapped = await wrapChainKey({
@@ -477,24 +554,73 @@ export class KeyStoreService {
             }
 
             try {
-                const { chainKey, chainStartIndex } = await unwrapChainKey({
-                    wrapped: dist.grant.wrapped_chain_key,
-                    ephemeralPublic: dist.grant.ephemeral_public_key,
-                    recipientPrivate: identity.identityPrivate,
-                    chatId,
+                const { chainKey, chainStartIndex } = await this.unwrapGrantForSelf(identity, chatId, dist.grant, {
                     epoch: dist.epoch,
                     senderKeyId: dist.sender_key_id,
                     senderDeviceId: dist.sender_device_id,
-                    recipientDeviceId: identity.deviceId,
                 });
 
                 this.peerChains.set(cacheKey, new ReceiverChain(chainKey, chainStartIndex));
                 this.chainSigningKeys.set(dist.sender_key_id, b64uDecode(dist.signing_public_key));
             } catch {
-                // Stale grant, wrapped to an identity key we have since rotated away from.
+                // Neither private half opened it: a grant wrapped to a prekey we have since
+                // rotated away from with no fallback path, or one whose ciphertext genuinely does
+                // not match either key. Leaves `getReceiverChain` returning undefined, which
+                // `MessageService` already surfaces as `no_key` — retryable once a fresh grant
+                // arrives, not a decrypt failure.
                 continue;
             }
         }
+    }
+
+    /**
+     * Unwrap one grant addressed to this device.
+     *
+     * `ensureSenderChain` wraps to `signed_prekey_public ?? identity_public_key` (whatever the
+     * roster showed the sender at send time), so this device must be willing to try either private
+     * half. Prefer the prekey — that is the common case once a device has published one — then
+     * `prevPrekeyPrivate` if this device has rotated: that covers a grant published against the
+     * *outgoing* prekey but not yet ingested when rotation happened (crypto-spec-v1.md §2.1.2), for
+     * exactly one further rotation cycle. Fall back to the identity key last: a bundle with no
+     * `prekeyPrivate` (this device predates rotation) has nothing else to try, and even a device
+     * that does have one may be opening a grant that was wrapped before its prekey existed, back
+     * when the sender still saw only the identity key.
+     */
+    private async unwrapGrantForSelf(
+        identity: UnlockedIdentity,
+        chatId: string,
+        grant: NonNullable<Distribution['grant']>,
+        params: { epoch: number; senderKeyId: string; senderDeviceId: string }
+    ): Promise<{ chainKey: Uint8Array; chainStartIndex: number }> {
+        const base = {
+            wrapped: grant.wrapped_chain_key,
+            ephemeralPublic: grant.ephemeral_public_key,
+            chatId,
+            epoch: params.epoch,
+            senderKeyId: params.senderKeyId,
+            senderDeviceId: params.senderDeviceId,
+            recipientDeviceId: identity.deviceId,
+        };
+
+        if (identity.prekeyPrivate) {
+            try {
+                return await unwrapChainKey({ ...base, recipientPrivate: identity.prekeyPrivate });
+            } catch {
+                // Falls through to the grace-window / identity-key attempts below — this grant may
+                // predate our current prekey.
+            }
+        }
+
+        if (identity.prevPrekeyPrivate) {
+            try {
+                return await unwrapChainKey({ ...base, recipientPrivate: identity.prevPrekeyPrivate });
+            } catch {
+                // Falls through to the identity-key attempt below — this grant may predate even the
+                // previous prekey generation.
+            }
+        }
+
+        return await unwrapChainKey({ ...base, recipientPrivate: identity.identityPrivate });
     }
 
     getReceiverChain(chatId: string, epoch: number, senderKeyId: string): ReceiverChain | undefined {

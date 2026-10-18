@@ -18,11 +18,17 @@
         (securityRequested)="openSecurity()"
     />
 
-    <app-chat-sidebar
+    <app-resizable-panel
         class="sidebar"
         [class.is-hidden-narrow]="showConversationOnly()"
-        [filter]="filter()"
-    />
+        storageKey="chat-sidebar"
+        [minWidth]="256"
+        [maxWidth]="512"
+        [defaultWidth]="320"
+        [disabled]="isNarrow()"
+    >
+        <app-chat-sidebar [filter]="filter()" />
+    </app-resizable-panel>
 
     <main
         class="conversation"
