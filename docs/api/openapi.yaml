@@ -5,7 +5,7 @@ info:
   description: |
     Контракт взаємодії контейнерів **Web Client (Angular 19) → Gateway (Nginx) → API (FastAPI)**
     для критичного бізнес-сценарію «надсилання повідомлення в зашифрованому чаті»
-    (див. [2_design.md, підрозділ 2.5](../2_design.md#25-специфікація-міжсервісних-контрактів-api)).
+    (див. [2_design.md, підрозділ 2.5](../2_design.md#25-специфікація-міжсервісних-контрактів-та-топологія-api-маршрутів)).
 
     Послідовність викликів клієнта:
     1. `POST /auth/login` – отримання JWT у cookie `access_token` і `refresh_token`.
@@ -15,6 +15,8 @@ info:
     4. `POST /messages` – надсилання конверта, зашифрованого AES-256-GCM і підписаного Ed25519.
     5. `GET /crypto/chats/{chat_id}/keys` і `GET /chats/{chat_id}/messages` – отримання грантів
        та історії отримувачем.
+    6. `POST /files/upload` і `GET /files/attachments/{chat_id}/{object_key}` – завантаження
+       та отримання шифротексту вкладення.
 
     Сервер не має доступу до відкритого тексту: тіла повідомлень передаються лише як шифротекст
     (`MessageEnvelope.ct`). Усі ідентифікатори сутностей PostgreSQL – UUID, ідентифікатори
@@ -24,7 +26,7 @@ info:
     Розширення `x-implementation-status: planned` позначає елементи цільової моделі To-Be,
     яких ще немає в поточному коді (реалізація – Розділ 3).
 
-    Вимоги: SRS-FUN-03, SRS-FUN-14 – SRS-FUN-18, SRS-FUN-20, SRS-NFR-SEC-03
+    Вимоги: SRS-FUN-03, SRS-FUN-14 – SRS-FUN-18, SRS-FUN-20, SRS-FUN-27, SRS-NFR-SEC-03, SRS-NFR-SEC-04
     ([srs.md](../srs.md)).
   contact:
     name: Zaloha Nikita
@@ -44,6 +46,8 @@ tags:
     description: Епохи, склад пристроїв, ключі відправників і гранти
   - name: Messages
     description: Надсилання та читання зашифрованих конвертів
+  - name: Files
+    description: Завантаження та отримання зашифрованих вкладень
 security:
   - cookieAuth: []
 
@@ -382,6 +386,118 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '422':
           $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /files/upload:
+    post:
+      tags: [Files]
+      operationId: uploadFile
+      summary: Завантаження зашифрованого вкладення, аватара або стікера
+      description: |
+        Тіло – `multipart/form-data`. Для `category = message` файл є шифротекстом AES-256-GCM,
+        сформованим клієнтом; сервер зберігає його в приватному бакеті RustFS з
+        `Content-Type: application/octet-stream`. Для `avatar` і `sticker` дозволено лише
+        `image/jpeg`, `image/png`, `image/webp`, `image/gif` з перевіркою сигнатури файлу.
+        Тіло читається частинами по 1 МБ і переривається з кодом 413 при перевищенні ліміту:
+        50 МБ для вкладень, 5 МБ для аватарів і стікерів; шлюз обмежує тіло 55 МБ
+        (SRS-FUN-27, SRS-NFR-SEC-04). Ліміт: 100 завантажень за годину на користувача.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/FileUploadForm'
+            encoding:
+              file:
+                contentType: application/octet-stream, image/jpeg, image/png, image/webp, image/gif
+      responses:
+        '200':
+          description: Об’єкт збережено; метадані використовуються як `Attachment` у повідомленні
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadedFileSuccessResponse'
+        '400':
+          description: Порожній файл (`EMPTY_FILE`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          description: Розмір перевищує ліміт категорії (`FILE_SIZE_TOO_LARGE`) або ліміт шлюзу
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '415':
+          description: Тип або сигнатура аватара чи стікера не з дозволеного переліку (`UNSUPPORTED_MEDIA_TYPE`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /files/attachments/{chat_id}/{object_key}:
+    get:
+      tags: [Files]
+      operationId: downloadAttachment
+      summary: Отримання шифротексту вкладення
+      description: |
+        Об’єкт видається лише якщо користувач є учасником чату `chat_id` і на об’єкт посилається
+        повідомлення цього чату (захист від IDOR: простір ключів об’єктів спільний для всіх чатів).
+        Відповідь завжди має `Content-Disposition: attachment` і `X-Content-Type-Options: nosniff`.
+      parameters:
+        - $ref: '#/components/parameters/ChatId'
+        - name: object_key
+          in: path
+          required: true
+          description: Ключ об’єкта в бакеті вкладень (UUID з розширенням)
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9._-]{1,128}$'
+      responses:
+        '200':
+          description: Шифротекст вкладення
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+              description: '`attachment; filename="<object_key>"`'
+            Cache-Control:
+              schema:
+                type: string
+              description: '`private, max-age=300`'
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Об’єкт не згадано в повідомленнях цього чату (`ATTACHMENT_NOT_FOUND`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '410':
+          description: Об’єкт видалено зі сховища (`ATTACHMENT_GONE`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -1073,6 +1189,47 @@ components:
           properties:
             data:
               $ref: '#/components/schemas/Message'
+    FileUploadForm:
+      type: object
+      required: [file]
+      properties:
+        file:
+          type: string
+          format: binary
+          description: Вміст файлу (для `message` – шифротекст)
+        category:
+          type: string
+          enum: [message, avatar, sticker]
+          default: message
+
+    UploadedFile:
+      type: object
+      required: [url, name, size, content_type]
+      properties:
+        url:
+          type: string
+          format: uri
+          maxLength: 1024
+        name:
+          type: string
+          maxLength: 255
+        size:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 52428800
+        content_type:
+          type: string
+          maxLength: 255
+
+    UploadedFileSuccessResponse:
+      allOf:
+        - $ref: '#/components/schemas/SuccessEnvelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/UploadedFile'
     MessageListSuccessResponse:
       allOf:
         - $ref: '#/components/schemas/SuccessEnvelope'
