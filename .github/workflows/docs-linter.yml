@@ -1,0 +1,36 @@
+name: Docs Quality Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - ".markdownlint.json"
+      - ".markdownlint-cli2.jsonc"
+      - ".markdownlint-rules/**"
+      - ".github/workflows/docs-linter.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-linter-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  markdownlint:
+    name: markdownlint (docs/)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Lint Markdown in docs/
+        run: npx --yes markdownlint-cli2@0.17.2

@@ -1,0 +1,1243 @@
+openapi: 3.0.3
+info:
+  title: Mess&Gags API – E2EE Messaging Contract
+  version: 1.0.0
+  description: |
+    Контракт взаємодії контейнерів **Web Client (Angular 19) → Gateway (Nginx) → API (FastAPI)**
+    для критичного бізнес-сценарію «надсилання повідомлення в зашифрованому чаті»
+    (див. [2_design.md, підрозділ 2.5](../2_design.md#25-специфікація-міжсервісних-контрактів-та-топологія-api-маршрутів)).
+
+    Послідовність викликів клієнта:
+    1. `POST /auth/login` – отримання JWT у cookie `access_token` і `refresh_token`.
+    2. `GET /crypto/chats/{chat_id}/roster` – склад пристроїв і `member_set_hash` поточної епохи.
+    3. `POST /crypto/chats/{chat_id}/epochs/{epoch}/sender-keys` – публікація ланцюжка відправника
+       з грантами для кожного пристрою (ліниво, перед першим надсиланням в епосі).
+    4. `POST /messages` – надсилання конверта, зашифрованого AES-256-GCM і підписаного Ed25519.
+    5. `GET /crypto/chats/{chat_id}/keys` і `GET /chats/{chat_id}/messages` – отримання грантів
+       та історії отримувачем.
+    6. `POST /files/upload` і `GET /files/attachments/{chat_id}/{object_key}` – завантаження
+       та отримання шифротексту вкладення.
+
+    Сервер не має доступу до відкритого тексту: тіла повідомлень передаються лише як шифротекст
+    (`MessageEnvelope.ct`). Усі ідентифікатори сутностей PostgreSQL – UUID, ідентифікатори
+    документів MongoDB – ObjectId (24 шістнадцяткові символи). Двійкові значення кодуються
+    base64url без доповнення (`Base64Url`).
+
+    Розширення `x-implementation-status: planned` позначає елементи цільової моделі To-Be,
+    яких ще немає в поточному коді (реалізація – Розділ 3).
+
+    Вимоги: SRS-FUN-03, SRS-FUN-14 – SRS-FUN-18, SRS-FUN-20, SRS-FUN-27, SRS-NFR-SEC-03, SRS-NFR-SEC-04
+    ([srs.md](../srs.md)).
+  contact:
+    name: Zaloha Nikita
+    url: https://github.com/Bananbka/F2-diploma-project
+  license:
+    name: Proprietary (qualification project)
+servers:
+  - url: https://{host}/api
+    description: Gateway (Nginx) зі зняттям префікса /api перед проксіюванням до API
+    variables:
+      host:
+        default: localhost
+tags:
+  - name: Authentication
+    description: Вхід і видача JWT у cookie
+  - name: Crypto
+    description: Епохи, склад пристроїв, ключі відправників і гранти
+  - name: Messages
+    description: Надсилання та читання зашифрованих конвертів
+  - name: Files
+    description: Завантаження та отримання зашифрованих вкладень
+security:
+  - cookieAuth: []
+
+paths:
+  /auth/login:
+    post:
+      tags: [Authentication]
+      operationId: login
+      summary: Вхід за username і паролем
+      description: |
+        Перевіряє пароль (bcrypt) і встановлює два cookie з атрибутами HttpOnly, Secure,
+        SameSite=Lax: `access_token` (JWT HS256, 1 800 с) і `refresh_token` (604 800 с).
+        Ліміти: 20 спроб за 300 с з однієї адреси і 8 спроб за 300 с на обліковий запис;
+        на шлюзі додатково 1 r/s, burst 5 (SRS-FUN-03, SRS-NFR-SEC-03).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Успішний вхід, токени встановлено в cookie
+          headers:
+            Set-Cookie:
+              description: '`access_token=<JWT>; HttpOnly; Secure; SameSite=Lax; Max-Age=1800` і `refresh_token=<JWT>; HttpOnly; Secure; SameSite=Lax; Max-Age=604800`'
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserSuccessResponse'
+        '401':
+          description: Невірні облікові дані (`INVALID_CREDENTIALS`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: error
+                error_code: INVALID_CREDENTIALS
+                message: Incorrect username or password
+                details: null
+        '403':
+          description: Обліковий запис вимкнено (`ACCOUNT_DISABLED`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /crypto/chats/{chat_id}/roster:
+    get:
+      tags: [Crypto]
+      operationId: getChatRoster
+      summary: Склад пристроїв чату і commitment поточної епохи
+      description: |
+        Повертає активні пристрої учасників з публічними ключами та підписами прив’язки,
+        а також `member_set_hash`, **збережений** в рядку епохи (не перерахований сервером).
+        Клієнт зобов’язаний перевірити підписи кожного запису, перерахувати SHA-256 складу
+        і відмовитися від розсилання ключів при невідповідності (SRS-FUN-14).
+      parameters:
+        - $ref: '#/components/parameters/ChatId'
+      responses:
+        '200':
+          description: Склад пристроїв поточної епохи
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RosterSuccessResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: У чаті немає відкритої епохи (`EPOCH_MISSING`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /crypto/chats/{chat_id}/epochs/{epoch}/sender-keys:
+    post:
+      tags: [Crypto]
+      operationId: publishSenderKey
+      summary: Публікація ланцюжка відправника з грантами
+      description: |
+        Зберігає розподіл ключа відправника (`sender_key_distributions`) і по одному гранту
+        (`sender_key_grants`) на кожен пристрій складу епохи в одній транзакції PostgreSQL.
+        Сервер перевіряє підпис розподілу довготривалим ключем Ed25519 пристрою і рівність
+        множин `{grants[j].recipient_device_id}` та пристроїв складу епохи.
+        Ліміт: 60 публікацій за 300 с на користувача.
+      parameters:
+        - $ref: '#/components/parameters/ChatId'
+        - name: epoch
+          in: path
+          required: true
+          description: Номер епохи, у яку публікується ланцюжок
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SenderKeyUpload'
+      responses:
+        '201':
+          description: Ланцюжок опубліковано
+          x-implementation-status: planned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SenderKeyPublishedSuccessResponse'
+        '200':
+          description: Ланцюжок опубліковано (поточна реалізація повертає 200 замість 201)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SenderKeyPublishedSuccessResponse'
+        '400':
+          description: |
+            Порушення криптографічних інваріантів: `UNKNOWN_DEVICE`, `NO_IDENTITY_KEY`,
+            `INVALID_DISTRIBUTION_SIGNATURE`, `GRANT_SET_MISMATCH` (у `details` – масиви
+            `missing` і `unexpected` з ідентифікаторами пристроїв)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: error
+                error_code: GRANT_SET_MISMATCH
+                message: Grants must cover exactly the epoch's member devices.
+                details:
+                  missing: [7f9c2b1e-4d3a-4c55-9a0e-2b8f1d6c3e10]
+                  unexpected: []
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Епохи з таким номером не існує (`EPOCH_NOT_FOUND`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: |
+            Епоху закрито новою ротацією (`EPOCH_CLOSED`) або ланцюжок з таким `sender_key_id`
+            уже існує (`SENDER_KEY_EXISTS`, planned). Клієнт отримує поточну епоху і повторює
+            публікацію (не більше 3 спроб)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /crypto/chats/{chat_id}/keys:
+    get:
+      tags: [Crypto]
+      operationId: getChatKeys
+      summary: Епохи чату і гранти, адресовані пристроям користувача
+      parameters:
+        - $ref: '#/components/parameters/ChatId'
+        - name: since_epoch
+          in: query
+          required: false
+          description: Повернути лише епохи з номером, більшим за вказаний
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: Епохи та розподіли ключів
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatKeysSuccessResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /messages:
+    post:
+      tags: [Messages]
+      operationId: sendMessage
+      summary: Надсилання повідомлення
+      description: |
+        Для чату з `crypto_mode = sender_keys_v1` приймає лише `envelope`. Сервер перевіряє:
+        участь у чаті; `envelope.epoch = current_epoch` (строга рівність, SRS-FUN-16);
+        наявність розподілу `envelope.skid` у поточній епосі, що належить відправнику;
+        підпис Ed25519 конверта (SRS-FUN-17). Після збереження документа в MongoDB подія
+        `new_message` публікується в канали `user:{id}` усіх учасників (SRS-FUN-18).
+        Повторний запит з тим самим `client_message_id` повертає наявне повідомлення
+        (SRS-FUN-20, planned). Ліміт: 300 повідомлень за 60 с на користувача.
+        Поточна реалізація реєструє шлях як `/messages/`; канонічний шлях контракту – `/messages`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessageCreateRequest'
+      responses:
+        '201':
+          description: Повідомлення створено
+          x-implementation-status: planned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageSuccessResponse'
+        '200':
+          description: |
+            Повідомлення створено (поточна реалізація) або повернуто наявне повідомлення
+            з тим самим `client_message_id` (planned)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageSuccessResponse'
+        '400':
+          description: |
+            `ENVELOPE_REQUIRED`, `ENVELOPE_NOT_ALLOWED`, `INVALID_MESSAGE_SIGNATURE`,
+            `INVALID_ID` (невалідний `reply_to_message_id`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: error
+                error_code: INVALID_MESSAGE_SIGNATURE
+                message: The message signature does not verify against your published sender key.
+                details: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: '`FORBIDDEN` (не учасник чату), `SENDER_KEY_NOT_YOURS`, `NOT_VERIFIED`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: |
+            `EPOCH_STALE` – чат пройшов ротацію: клієнт отримує `details.current_epoch`,
+            відкидає кешований ланцюжок, повторно шифрує відкритий текст і повторює запит один раз.
+            `SENDER_KEY_MISSING` – для поточної епохи не опубліковано ланцюжок `envelope.skid`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                epochStale:
+                  value:
+                    status: error
+                    error_code: EPOCH_STALE
+                    message: This chat has re-keyed. Fetch the current epoch, re-encrypt and retry.
+                    details:
+                      current_epoch: 8
+                      sent_epoch: 7
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /chats/{chat_id}/messages:
+    get:
+      tags: [Messages]
+      operationId: listChatMessages
+      summary: Історія повідомлень чату (курсорна пагінація)
+      description: |
+        Повертає до `limit` документів, відсортованих за `_id` у спадному порядку.
+        Курсор `before_id` – ObjectId найстарішого завантаженого повідомлення.
+        Для учасника, що приєднався з `history_visibility = joined`, історію обмежено знизу
+        значенням `chat_participants.history_start_message_id`.
+      parameters:
+        - $ref: '#/components/parameters/ChatId'
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: before_id
+          in: query
+          required: false
+          description: ObjectId найстарішого вже завантаженого повідомлення
+          schema:
+            $ref: '#/components/schemas/ObjectId'
+      responses:
+        '200':
+          description: Сторінка історії
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageListSuccessResponse'
+        '400':
+          description: Невалідний курсор (`INVALID_ID`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /files/upload:
+    post:
+      tags: [Files]
+      operationId: uploadFile
+      summary: Завантаження зашифрованого вкладення, аватара або стікера
+      description: |
+        Тіло – `multipart/form-data`. Для `category = message` файл є шифротекстом AES-256-GCM,
+        сформованим клієнтом; сервер зберігає його в приватному бакеті RustFS з
+        `Content-Type: application/octet-stream`. Для `avatar` і `sticker` дозволено лише
+        `image/jpeg`, `image/png`, `image/webp`, `image/gif` з перевіркою сигнатури файлу.
+        Тіло читається частинами по 1 МБ і переривається з кодом 413 при перевищенні ліміту:
+        50 МБ для вкладень, 5 МБ для аватарів і стікерів; шлюз обмежує тіло 55 МБ
+        (SRS-FUN-27, SRS-NFR-SEC-04). Ліміт: 100 завантажень за годину на користувача.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/FileUploadForm'
+            encoding:
+              file:
+                contentType: application/octet-stream, image/jpeg, image/png, image/webp, image/gif
+      responses:
+        '200':
+          description: Об’єкт збережено; метадані використовуються як `Attachment` у повідомленні
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadedFileSuccessResponse'
+        '400':
+          description: Порожній файл (`EMPTY_FILE`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          description: Розмір перевищує ліміт категорії (`FILE_SIZE_TOO_LARGE`) або ліміт шлюзу
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '415':
+          description: Тип або сигнатура аватара чи стікера не з дозволеного переліку (`UNSUPPORTED_MEDIA_TYPE`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /files/attachments/{chat_id}/{object_key}:
+    get:
+      tags: [Files]
+      operationId: downloadAttachment
+      summary: Отримання шифротексту вкладення
+      description: |
+        Об’єкт видається лише якщо користувач є учасником чату `chat_id` і на об’єкт посилається
+        повідомлення цього чату (захист від IDOR: простір ключів об’єктів спільний для всіх чатів).
+        Відповідь завжди має `Content-Disposition: attachment` і `X-Content-Type-Options: nosniff`.
+      parameters:
+        - $ref: '#/components/parameters/ChatId'
+        - name: object_key
+          in: path
+          required: true
+          description: Ключ об’єкта в бакеті вкладень (UUID з розширенням)
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9._-]{1,128}$'
+      responses:
+        '200':
+          description: Шифротекст вкладення
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+              description: '`attachment; filename="<object_key>"`'
+            Cache-Control:
+              schema:
+                type: string
+              description: '`private, max-age=300`'
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Об’єкт не згадано в повідомленнях цього чату (`ATTACHMENT_NOT_FOUND`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '410':
+          description: Об’єкт видалено зі сховища (`ATTACHMENT_GONE`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: access_token
+      description: |
+        JWT HS256 (claims `sub`, `iat`, `exp`, `type`), TTL 1 800 с, у cookie HttpOnly, Secure,
+        SameSite=Lax. Схему Bearer у заголовку Authorization не застосовано: токен недоступний
+        JavaScript, що виключає його викрадення через XSS. Відкликані токени (вихід, зміна пароля)
+        відхиляються з кодом 401 `TOKEN_REVOKED` (SRS-FUN-04).
+
+  parameters:
+    ChatId:
+      name: chat_id
+      in: path
+      required: true
+      description: Ідентифікатор чату (`chats.id`)
+      schema:
+        $ref: '#/components/schemas/Uuid'
+
+  responses:
+    Unauthorized:
+      description: |
+        Відсутній, прострочений або відкликаний токен:
+        `UNAUTHORIZED`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, `TOKEN_REVOKED`, `SESSION_EXPIRED`
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            status: error
+            error_code: TOKEN_EXPIRED
+            message: Token is expired.
+            details: null
+    Forbidden:
+      description: Користувач не є учасником чату (`FORBIDDEN`) або email не підтверджено (`NOT_VERIFIED`)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Ресурс не існує (`NOT_FOUND`)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    PayloadTooLarge:
+      description: Тіло запиту перевищує `client_max_body_size` шлюзу (55 МБ)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ValidationError:
+      description: Тіло або параметри не відповідають схемі (`VALIDATION_ERROR`, перелік полів у `details`)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            status: error
+            error_code: VALIDATION_ERROR
+            message: Data validation error.
+            details:
+              - loc: [body, envelope, epoch]
+                msg: Input should be greater than or equal to 0
+                type: greater_than_equal
+    TooManyRequests:
+      description: |
+        Перевищено ліміт API (`RATE_LIMITED`, у `details.retry_after_seconds` – час до нового вікна)
+        або ліміт шлюзу Nginx (`limit_req`)
+      headers:
+        Retry-After:
+          description: Кількість секунд до відкриття нового вікна (planned для відповідей API і шлюзу)
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            status: error
+            error_code: RATE_LIMITED
+            message: You are sending messages too quickly. Please slow down.
+            details:
+              retry_after_seconds: 17
+    InternalError:
+      description: Необроблена помилка сервера (`INTERNAL_SERVER_ERROR`)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ServiceUnavailable:
+      description: Недоступна залежність (MongoDB, Redis); ліміти працюють у режимі fail-closed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    Uuid:
+      type: string
+      format: uuid
+      example: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+    ObjectId:
+      type: string
+      pattern: '^[0-9a-f]{24}$'
+      example: 6710f3c2a9b1e4d5c6f70812
+    Base64Url:
+      type: string
+      description: base64url без доповнення
+      pattern: '^[A-Za-z0-9_-]+$'
+    Key32:
+      description: 32-байтовий ключ X25519 або Ed25519 у base64url (43 символи)
+      type: string
+      pattern: '^[A-Za-z0-9_-]{43}$'
+    Signature64:
+      description: 64-байтовий підпис Ed25519 у base64url (86 символів)
+      type: string
+      pattern: '^[A-Za-z0-9_-]{86}$'
+    Timestamp:
+      type: string
+      format: date-time
+      description: Час у форматі RFC 3339 з часовим поясом (UTC)
+
+    ErrorResponse:
+      type: object
+      required: [status, error_code, message]
+      properties:
+        status:
+          type: string
+          enum: [error]
+        error_code:
+          type: string
+          pattern: '^[A-Z_]+$'
+          description: Машинно-читаний код помилки
+        message:
+          type: string
+        details:
+          nullable: true
+          description: Контекст помилки (об’єкт або масив помилок валідації)
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      additionalProperties: false
+      properties:
+        username:
+          type: string
+          minLength: 6
+          maxLength: 50
+          pattern: '^[A-Za-z][A-Za-z0-9_]*$'
+        password:
+          type: string
+          format: password
+          minLength: 8
+          maxLength: 72
+          description: Верхня межа 72 байти відповідає обмеженню вхідних даних bcrypt
+          writeOnly: true
+
+    User:
+      type: object
+      required: [id, full_name, username, email, is_active]
+      properties:
+        id:
+          $ref: '#/components/schemas/Uuid'
+        full_name:
+          type: string
+          maxLength: 30
+        username:
+          type: string
+          maxLength: 50
+        email:
+          type: string
+          format: email
+          maxLength: 255
+        bio:
+          type: string
+          nullable: true
+        avatar_url:
+          type: string
+          format: uri
+          nullable: true
+        is_active:
+          type: boolean
+
+    RosterEntry:
+      type: object
+      required: [user_id, device_id, identity_key_id, identity_public_key, signing_public_key, identity_key_signature]
+      properties:
+        user_id:
+          $ref: '#/components/schemas/Uuid'
+        device_id:
+          $ref: '#/components/schemas/Uuid'
+        identity_key_id:
+          $ref: '#/components/schemas/Uuid'
+        identity_public_key:
+          $ref: '#/components/schemas/Key32'
+        signing_public_key:
+          $ref: '#/components/schemas/Key32'
+        identity_key_signature:
+          $ref: '#/components/schemas/Signature64'
+        signed_prekey_public:
+          allOf:
+            - $ref: '#/components/schemas/Key32'
+          nullable: true
+        signed_prekey_signature:
+          allOf:
+            - $ref: '#/components/schemas/Signature64'
+          nullable: true
+
+    Roster:
+      type: object
+      required: [chat_id, current_epoch, member_set_hash, members]
+      properties:
+        chat_id:
+          $ref: '#/components/schemas/Uuid'
+        current_epoch:
+          type: integer
+          format: int32
+          minimum: 1
+        member_set_hash:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: SHA-256 (hex) відсортованого складу пристроїв разом з їхніми публічними ключами
+        members:
+          type: array
+          maxItems: 256
+          items:
+            $ref: '#/components/schemas/RosterEntry'
+
+    GrantUpload:
+      type: object
+      required: [recipient_device_id, wrap_algorithm, ephemeral_public_key, wrapped_chain_key]
+      additionalProperties: false
+      properties:
+        recipient_device_id:
+          $ref: '#/components/schemas/Uuid'
+        wrap_algorithm:
+          type: string
+          maxLength: 64
+          example: x25519-hkdf-sha256-aes256gcm-v1
+        ephemeral_public_key:
+          $ref: '#/components/schemas/Key32'
+        wrapped_chain_key:
+          allOf:
+            - $ref: '#/components/schemas/Base64Url'
+          maxLength: 128
+          description: Ключ ланцюжка, зашифрований AES-256-GCM ключем, виведеним з X25519 + HKDF-SHA256
+
+    SenderKeyUpload:
+      type: object
+      required: [sender_device_id, sender_key_id, algorithm, signing_public_key, signature, grants]
+      additionalProperties: false
+      properties:
+        sender_device_id:
+          $ref: '#/components/schemas/Uuid'
+        sender_key_id:
+          $ref: '#/components/schemas/Uuid'
+        algorithm:
+          type: string
+          maxLength: 64
+          example: sender-key-hkdf-sha256-v1
+        signing_public_key:
+          $ref: '#/components/schemas/Key32'
+        chain_start_index:
+          type: integer
+          format: int32
+          minimum: 0
+          default: 0
+        signature:
+          $ref: '#/components/schemas/Signature64'
+        grants:
+          type: array
+          minItems: 1
+          maxItems: 256
+          items:
+            $ref: '#/components/schemas/GrantUpload'
+
+    SenderKeyPublished:
+      type: object
+      required: [distribution_id, epoch, sender_key_id, grant_count]
+      properties:
+        distribution_id:
+          $ref: '#/components/schemas/Uuid'
+        epoch:
+          type: integer
+          format: int32
+          minimum: 1
+        sender_key_id:
+          $ref: '#/components/schemas/Uuid'
+        grant_count:
+          type: integer
+          minimum: 1
+          maximum: 256
+
+    Epoch:
+      type: object
+      required: [id, epoch, reason, member_count, member_set_hash, created_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/Uuid'
+        epoch:
+          type: integer
+          format: int32
+          minimum: 1
+        reason:
+          type: string
+          enum: [initial, member_added, member_removed, device_revoked, periodic, manual]
+        member_count:
+          type: integer
+          minimum: 0
+          maximum: 256
+        member_set_hash:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        created_at:
+          $ref: '#/components/schemas/Timestamp'
+        closed_at:
+          allOf:
+            - $ref: '#/components/schemas/Timestamp'
+          nullable: true
+
+    Grant:
+      type: object
+      required: [recipient_device_id, recipient_identity_key_id, wrap_algorithm, ephemeral_public_key, wrapped_chain_key]
+      properties:
+        recipient_device_id:
+          $ref: '#/components/schemas/Uuid'
+        recipient_identity_key_id:
+          $ref: '#/components/schemas/Uuid'
+        wrap_algorithm:
+          type: string
+        ephemeral_public_key:
+          $ref: '#/components/schemas/Key32'
+        wrapped_chain_key:
+          $ref: '#/components/schemas/Base64Url'
+
+    Distribution:
+      type: object
+      required: [distribution_id, epoch, sender_user_id, sender_device_id, sender_key_id, algorithm, signing_public_key, chain_start_index, signature]
+      properties:
+        distribution_id:
+          $ref: '#/components/schemas/Uuid'
+        epoch:
+          type: integer
+          format: int32
+        sender_user_id:
+          $ref: '#/components/schemas/Uuid'
+        sender_device_id:
+          $ref: '#/components/schemas/Uuid'
+        sender_key_id:
+          $ref: '#/components/schemas/Uuid'
+        algorithm:
+          type: string
+        signing_public_key:
+          $ref: '#/components/schemas/Key32'
+        chain_start_index:
+          type: integer
+          format: int32
+          minimum: 0
+        signature:
+          $ref: '#/components/schemas/Signature64'
+        grant:
+          allOf:
+            - $ref: '#/components/schemas/Grant'
+          nullable: true
+          description: null – відправник ще не обгорнув ключ для пристрою користувача
+
+    ChatKeys:
+      type: object
+      required: [crypto_mode, history_visibility, current_epoch, epochs, distributions]
+      properties:
+        crypto_mode:
+          type: string
+          enum: [legacy, sender_keys_v1, not_encrypted]
+        history_visibility:
+          type: string
+          enum: [joined, shared]
+        current_epoch:
+          type: integer
+          format: int32
+          minimum: 0
+        my_join_epoch:
+          type: integer
+          format: int32
+          nullable: true
+        epochs:
+          type: array
+          items:
+            $ref: '#/components/schemas/Epoch'
+        distributions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Distribution'
+
+    MessageEnvelope:
+      type: object
+      description: |
+        Зашифрований конверт. `chat_id` і `sender_id` до конверта не входять: вони прив’язані
+        до AAD і беруться з тіла запиту та JWT, а не з полів, наданих клієнтом.
+      required: [v, alg, epoch, skid, idx, n, ct, sig]
+      additionalProperties: false
+      properties:
+        v:
+          type: integer
+          minimum: 1
+          default: 1
+        alg:
+          type: string
+          maxLength: 32
+          example: aes256gcm-ed25519-v1
+        epoch:
+          type: integer
+          format: int32
+          minimum: 0
+        skid:
+          $ref: '#/components/schemas/Uuid'
+        idx:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Індекс повідомлення в ланцюжку
+        n:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{16}$'
+          description: 12-байтовий nonce AES-GCM у base64url
+        ct:
+          allOf:
+            - $ref: '#/components/schemas/Base64Url'
+          maxLength: 87400
+          description: Шифротекст разом з тегом GCM (ліміт кадру 64 КБ)
+        sig:
+          $ref: '#/components/schemas/Signature64'
+
+    ChannelPost:
+      type: object
+      required: [v, alg, post_id, content, sig]
+      additionalProperties: false
+      properties:
+        v:
+          type: integer
+          minimum: 1
+        alg:
+          type: string
+          maxLength: 32
+          default: ed25519-post-v1
+        post_id:
+          $ref: '#/components/schemas/Uuid'
+        content:
+          type: string
+          maxLength: 64000
+        sig:
+          $ref: '#/components/schemas/Signature64'
+
+    Attachment:
+      type: object
+      required: [url, name, size, content_type]
+      properties:
+        url:
+          type: string
+          format: uri
+          maxLength: 1024
+          description: Ключ одного об’єкта в бакеті вкладень або стікерів RustFS
+        name:
+          type: string
+          maxLength: 255
+        size:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 52428800
+        content_type:
+          type: string
+          maxLength: 255
+        kind:
+          type: string
+          enum: [file, image, video, gif, audio, sticker]
+          default: file
+        duration_ms:
+          type: integer
+          minimum: 0
+          nullable: true
+        width:
+          type: integer
+          minimum: 0
+          nullable: true
+        height:
+          type: integer
+          minimum: 0
+          nullable: true
+        waveform:
+          type: array
+          maxItems: 64
+          nullable: true
+          items:
+            type: number
+            format: float
+
+    ForwardOrigin:
+      type: object
+      required: [user_id, created_at]
+      properties:
+        user_id:
+          $ref: '#/components/schemas/Uuid'
+        created_at:
+          $ref: '#/components/schemas/Timestamp'
+
+    Reaction:
+      type: object
+      required: [user_id, emoji, created_at]
+      properties:
+        user_id:
+          $ref: '#/components/schemas/Uuid'
+        emoji:
+          type: string
+          minLength: 1
+          maxLength: 8
+        created_at:
+          $ref: '#/components/schemas/Timestamp'
+
+    MessageCreateRequest:
+      type: object
+      description: Рівно одне з полів `envelope`, `channel_post`, `encrypted_content`.
+      required: [chat_id]
+      additionalProperties: false
+      properties:
+        chat_id:
+          $ref: '#/components/schemas/Uuid'
+        client_message_id:
+          allOf:
+            - $ref: '#/components/schemas/Uuid'
+          x-implementation-status: planned
+          description: Ключ ідемпотентності (UUID v4), що генерує клієнт (SRS-FUN-20)
+        envelope:
+          $ref: '#/components/schemas/MessageEnvelope'
+        channel_post:
+          $ref: '#/components/schemas/ChannelPost'
+        encrypted_content:
+          type: string
+          maxLength: 87400
+          description: Застарілий формат (legacy) для незашифрованих чатів
+        reply_to_message_id:
+          allOf:
+            - $ref: '#/components/schemas/ObjectId'
+          nullable: true
+        forwarded_from:
+          allOf:
+            - $ref: '#/components/schemas/ForwardOrigin'
+          nullable: true
+        attachments:
+          type: array
+          maxItems: 10
+          nullable: true
+          items:
+            $ref: '#/components/schemas/Attachment'
+      oneOf:
+        - required: [envelope]
+        - required: [channel_post]
+        - required: [encrypted_content]
+
+    Message:
+      type: object
+      required: [_id, chat_id, sender_id, content_format, created_at, is_encrypted]
+      properties:
+        _id:
+          $ref: '#/components/schemas/ObjectId'
+        chat_id:
+          $ref: '#/components/schemas/Uuid'
+        sender_id:
+          $ref: '#/components/schemas/Uuid'
+        client_message_id:
+          allOf:
+            - $ref: '#/components/schemas/Uuid'
+          nullable: true
+          x-implementation-status: planned
+        content_format:
+          type: string
+          enum: [legacy_plaintext, legacy_rsa, sender_keys_v1, channel_signed_v1]
+        envelope:
+          allOf:
+            - $ref: '#/components/schemas/MessageEnvelope'
+          nullable: true
+        channel_post:
+          allOf:
+            - $ref: '#/components/schemas/ChannelPost'
+          nullable: true
+        encrypted_content:
+          type: string
+          nullable: true
+        reply_to_message_id:
+          allOf:
+            - $ref: '#/components/schemas/ObjectId'
+          nullable: true
+        forwarded_from:
+          allOf:
+            - $ref: '#/components/schemas/ForwardOrigin'
+          nullable: true
+        attachments:
+          type: array
+          nullable: true
+          items:
+            $ref: '#/components/schemas/Attachment'
+        reactions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Reaction'
+        is_pinned:
+          type: boolean
+        pinned_at:
+          allOf:
+            - $ref: '#/components/schemas/Timestamp'
+          nullable: true
+        pinned_by:
+          allOf:
+            - $ref: '#/components/schemas/Uuid'
+          nullable: true
+        is_edited:
+          type: boolean
+        edited_at:
+          allOf:
+            - $ref: '#/components/schemas/Timestamp'
+          nullable: true
+          x-implementation-status: planned
+        is_read:
+          type: boolean
+          deprecated: true
+          description: Застаріле спільне поле; стан прочитання – `chat_participants.last_read_message_id`
+        is_encrypted:
+          type: boolean
+          readOnly: true
+          description: Обчислюється з `content_format`
+        created_at:
+          $ref: '#/components/schemas/Timestamp'
+
+    SuccessEnvelope:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [success]
+        meta:
+          type: object
+          nullable: true
+          additionalProperties: true
+
+    UserSuccessResponse:
+      allOf:
+        - $ref: '#/components/schemas/SuccessEnvelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/User'
+    RosterSuccessResponse:
+      allOf:
+        - $ref: '#/components/schemas/SuccessEnvelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/Roster'
+    SenderKeyPublishedSuccessResponse:
+      allOf:
+        - $ref: '#/components/schemas/SuccessEnvelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/SenderKeyPublished'
+    ChatKeysSuccessResponse:
+      allOf:
+        - $ref: '#/components/schemas/SuccessEnvelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/ChatKeys'
+    MessageSuccessResponse:
+      allOf:
+        - $ref: '#/components/schemas/SuccessEnvelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/Message'
+    FileUploadForm:
+      type: object
+      required: [file]
+      properties:
+        file:
+          type: string
+          format: binary
+          description: Вміст файлу (для `message` – шифротекст)
+        category:
+          type: string
+          enum: [message, avatar, sticker]
+          default: message
+
+    UploadedFile:
+      type: object
+      required: [url, name, size, content_type]
+      properties:
+        url:
+          type: string
+          format: uri
+          maxLength: 1024
+        name:
+          type: string
+          maxLength: 255
+        size:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 52428800
+        content_type:
+          type: string
+          maxLength: 255
+
+    UploadedFileSuccessResponse:
+      allOf:
+        - $ref: '#/components/schemas/SuccessEnvelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/UploadedFile'
+    MessageListSuccessResponse:
+      allOf:
+        - $ref: '#/components/schemas/SuccessEnvelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: array
+              maxItems: 100
+              items:
+                $ref: '#/components/schemas/Message'
