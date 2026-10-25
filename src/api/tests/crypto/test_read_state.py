@@ -30,7 +30,7 @@ async def _send(client: httpx.AsyncClient, chat_id: uuid.UUID, text: str) -> str
     r = await client.post(
         "/messages/", json={"chat_id": str(chat_id), "encrypted_content": text}
     )
-    assert r.status_code == 200, r.text
+    assert r.status_code == 201, r.text
     return r.json()["data"]["_id"]
 
 
@@ -42,7 +42,10 @@ async def _mark_read(client: httpx.AsyncClient, chat_id: uuid.UUID, message_id: 
     """Mark read over the WebSocket, the same path the client uses, and wait for the ack-less
     round trip to land server-side before returning."""
     async with websockets.connect(
-        WS_BASE, additional_headers={"Cookie": _cookie_header(client)}
+        WS_BASE, additional_headers={
+                "Cookie": _cookie_header(client),
+                "Origin": "http://localhost:4200",
+            }
     ) as socket:
         await socket.send(
             f'{{"event_type":"message_read","chat_id":"{chat_id}",'
@@ -132,10 +135,16 @@ async def test_message_read_broadcast_reaches_other_participants():
         msg_id = await _send(bob, chat_id, "read me")
 
         async with websockets.connect(
-            WS_BASE, additional_headers={"Cookie": _cookie_header(alice)}
+            WS_BASE, additional_headers={
+                "Cookie": _cookie_header(alice),
+                "Origin": "http://localhost:4200",
+            }
         ) as alice_socket:
             async with websockets.connect(
-                WS_BASE, additional_headers={"Cookie": _cookie_header(bob)}
+                WS_BASE, additional_headers={
+                "Cookie": _cookie_header(bob),
+                "Origin": "http://localhost:4200",
+            }
             ) as bob_socket:
                 await alice_socket.send(
                     f'{{"event_type":"message_read","chat_id":"{chat_id}",'
@@ -206,7 +215,10 @@ async def test_garbage_read_id_is_rejected_without_touching_postgres():
         assert state_before[str(bob_id)] is None
 
         async with websockets.connect(
-            WS_BASE, additional_headers={"Cookie": _cookie_header(bob)}
+            WS_BASE, additional_headers={
+                "Cookie": _cookie_header(bob),
+                "Origin": "http://localhost:4200",
+            }
         ) as socket:
             await socket.send(
                 f'{{"event_type":"message_read","chat_id":"{chat_id}",'

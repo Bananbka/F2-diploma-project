@@ -1,11 +1,13 @@
 ﻿import uuid
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from app.domains.users.schemas.user_schemas import UserSearchResponse
 
 
 class ContactCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     target_user_id: uuid.UUID
     alias: str | None = None
 

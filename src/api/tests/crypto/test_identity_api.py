@@ -4,12 +4,13 @@ import uuid
 
 import httpx
 import pytest
-import redis.asyncio as aioredis
 
 from app.core.config import settings
 from app.core.rate_limit import TEST_BYPASS_HEADER
 from app.domains.crypto.reference.identity import generate_identity, wrap_private_bundle
 from app.domains.crypto.reference.primitives import b64u_encode
+
+from tests.crypto.otp_helpers import plant_known_otp
 
 BASE = "http://localhost:8000"
 
@@ -65,9 +66,7 @@ async def _register_user() -> tuple[httpx.AsyncClient, uuid.UUID]:
     assert r.status_code == 200, r.text
     user_id = uuid.UUID(r.json()["data"]["id"])
 
-    rc = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
-    otp = await rc.get(f"email-verification:{email}")
-    await rc.aclose()
+    otp = await plant_known_otp(f"email-verification:{email}")
 
     r = await client.post("/auth/verify-email", json={"email": email, "otp": otp})
     assert r.status_code == 200, r.text

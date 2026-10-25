@@ -170,7 +170,7 @@ async def test_full_group_key_distribution_and_message_exchange():
                 "grants": grants,
             },
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
         assert r.json()["data"]["grant_count"] == 2
 
         # --- alice sends a sealed message ---
@@ -190,7 +190,7 @@ async def test_full_group_key_distribution_and_message_exchange():
         r = await alice.post(
             "/messages/", json={"chat_id": str(chat_id), "envelope": envelope}
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
 
         # --- bob fetches keys, unwraps his grant, and decrypts ---
         r = await bob.get(f"/crypto/chats/{chat_id}/keys")

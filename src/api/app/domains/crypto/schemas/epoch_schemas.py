@@ -54,6 +54,8 @@ class RosterResponse(BaseModel):
 
 
 class GrantUpload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     recipient_device_id: uuid.UUID
     wrap_algorithm: str = Field(..., max_length=64)
     ephemeral_public_key: str
@@ -62,6 +64,7 @@ class GrantUpload(BaseModel):
 
 class SenderKeyUpload(BaseModel):
     """A sender's chain for one epoch, plus one wrapped copy per recipient device."""
+    model_config = ConfigDict(extra="forbid")
 
     sender_device_id: uuid.UUID
     sender_key_id: uuid.UUID

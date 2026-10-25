@@ -8,6 +8,8 @@ from app.domains.crypto.schemas.crypto_schemas import RewrappedIdentity
 
 
 class UserCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     full_name: str = Field(..., min_length=1, max_length=30)
     username: str = Field(..., min_length=6, max_length=50)
     password: str = Field(..., min_length=8, max_length=72)
@@ -43,6 +45,8 @@ class UserCreate(BaseModel):
 
 
 class UserLogin(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     username: str
     password: str
 
@@ -76,16 +80,21 @@ class UserSearchResponse(BaseModel):
 
 class UserBatchRequest(BaseModel):
     """Resolve ids to display names. Bounded like the crypto keys batch it mirrors."""
+    model_config = ConfigDict(extra="forbid")
 
     user_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=512)
 
 
 class PasswordForgot(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     username: str
     email: EmailStr
 
 
 class PasswordReset(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     username: str
     otp: str = Field(..., min_length=6, max_length=6)
 
@@ -101,6 +110,7 @@ class PasswordChange(BaseModel):
     bundle. Nothing about the identity changes, so history stays readable. Contrast PasswordReset,
     where the bundle is unrecoverable and the identity necessarily dies with it.
     """
+    model_config = ConfigDict(extra="forbid")
 
     old_password: str
     new_password: str = Field(..., min_length=8, max_length=72)
@@ -112,5 +122,7 @@ class PasswordChange(BaseModel):
 
 
 class EmailVerification(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     otp: str = Field(..., min_length=6, max_length=6)
     email: EmailStr

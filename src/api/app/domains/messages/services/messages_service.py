@@ -1,8 +1,11 @@
+import hashlib
+import json
 import uuid
 from datetime import datetime, timezone
 
 from bson import ObjectId
 from bson.errors import InvalidId
+from pymongo.errors import DuplicateKeyError
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -414,13 +417,98 @@ async def _authorize_attachments(
             )
 
 
+async def _find_by_client_message_id(
+    collection, chat_id: uuid.UUID, sender_id: uuid.UUID, client_message_id: uuid.UUID
+) -> dict | None:
+    return await collection.find_one(
+        {
+            "chat_id": chat_id,
+            "sender_id": sender_id,
+            "client_message_id": client_message_id,
+        }
+    )
+
+
+def _request_fingerprint(message_in: MessageCreateRequest) -> str:
+    """Digest of the request fields that must not change between retries of one send.
+
+    Deliberately excludes the ciphertext: a manual retry legitimately re-seals the message under a
+    fresh chain index, so the envelope bytes differ even though it is the same send. What is
+    compared instead is the shape of the request, which catches an id being reused for a
+    genuinely different message.
+    """
+    if message_in.envelope is not None:
+        kind = "envelope"
+    elif message_in.channel_post is not None:
+        kind = "channel_post"
+    else:
+        kind = "plain"
+
+    forwarded = (
+        message_in.forwarded_from.model_dump(mode="json")
+        if message_in.forwarded_from is not None
+        else None
+    )
+    canonical = {
+        "kind": kind,
+        "reply_to_message_id": message_in.reply_to_message_id,
+        "attachments": sorted(a.url for a in message_in.attachments or []),
+        "forwarded_from": forwarded,
+    }
+    return hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+async def _replay(
+    db: AsyncSession, existing: dict, chat: Chat, message_in: MessageCreateRequest
+) -> tuple[MessageResponse, bool]:
+    stored = existing.get("request_fingerprint")
+    if stored is not None and stored != _request_fingerprint(message_in):
+        raise AppException(
+            409,
+            "IDEMPOTENCY_KEY_REUSED",
+            "This client_message_id was already used for a different message.",
+        )
+
+    # Touched again so a crash between the original insert and its commit or broadcast cannot
+    # leave the chat unmoved; the route re-broadcasts too, and clients dedup by message id.
+    await chat_services.touch_chat(db, message_in.chat_id)
+    await db.commit()
+
+    return _to_response(existing, chat), False
+
+
+def _to_response(doc: dict, chat: Chat) -> MessageResponse:
+    doc = dict(doc)
+    doc["_id"] = str(doc["_id"])
+    doc["content_format"] = resolve_content_format(doc, chat)
+    return MessageResponse(**doc)
+
+
 async def send_message(
     db: AsyncSession,
     mongo_db: AsyncIOMotorDatabase,
     user_id: uuid.UUID,
     message_in: MessageCreateRequest,
-) -> MessageResponse:
+) -> tuple[MessageResponse, bool]:
+    """Store a message. Returns `(message, created)`; `created` is False for an idempotent replay.
+
+    A replay is answered straight after the membership check and before any envelope or epoch
+    validation: it stores nothing new, and the original already passed validation when it was
+    stored (a replay after a rotation would otherwise fail as stale for a message that was
+    delivered). A replay with a different request shape is refused with IDEMPOTENCY_KEY_REUSED.
+    """
     chat = await get_chat_or_403(db, message_in.chat_id, user_id)
+
+    collection = mongo_db["messages"]
+
+    if message_in.client_message_id is not None:
+        existing = await _find_by_client_message_id(
+            collection, message_in.chat_id, user_id, message_in.client_message_id
+        )
+        if existing is not None:
+            return await _replay(db, existing, chat, message_in)
 
     await _authorize_attachments(db, mongo_db, user_id, message_in.attachments)
 
@@ -459,8 +547,23 @@ async def send_message(
     message_dict["sender_id"] = new_message.sender_id
     message_dict["created_at"] = new_message.created_at
 
-    collection = mongo_db["messages"]
-    res = await collection.insert_one(dict(message_dict))
+    # Stored as a native BSON UUID (never a string) so the partial unique index can see it.
+    if new_message.client_message_id is None:
+        message_dict.pop("client_message_id", None)
+    else:
+        message_dict["client_message_id"] = new_message.client_message_id
+        message_dict["request_fingerprint"] = _request_fingerprint(message_in)
+
+    try:
+        res = await collection.insert_one(dict(message_dict))
+    except DuplicateKeyError:
+        # Lost a race against a concurrent send of the same client_message_id.
+        existing = await _find_by_client_message_id(
+            collection, message_in.chat_id, user_id, message_in.client_message_id
+        )
+        if existing is None:
+            raise
+        return await _replay(db, existing, chat, message_in)
 
     # Move the chat to the top of the sender's and every recipient's list. `get_user_chats` has
     # always ordered by this column and nothing ever wrote to it.
@@ -468,7 +571,7 @@ async def send_message(
     await db.commit()
 
     message_dict["_id"] = str(res.inserted_id)
-    return MessageResponse(**message_dict)
+    return MessageResponse(**message_dict), True
 
 
 async def get_chat_messages(
@@ -596,9 +699,14 @@ async def update_message(
             "encrypted_content": None,
             "content_format": ContentFormat.SENDER_KEYS_V1.value,
             "is_edited": True,
+            "edited_at": datetime.now(timezone.utc),
         }
     else:
-        update = {"encrypted_content": message_in.encrypted_content, "is_edited": True}
+        update = {
+            "encrypted_content": message_in.encrypted_content,
+            "is_edited": True,
+            "edited_at": datetime.now(timezone.utc),
+        }
 
     if attachments_supplied:
         # Whole-list replacement, not a merge — mirrors `PATCH /chat-folder/{id}` replacing

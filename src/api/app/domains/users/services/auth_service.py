@@ -1,9 +1,11 @@
+import hashlib
 import hmac
 import secrets
 import uuid
 
 from redis.asyncio import Redis
 
+from app.core.config import settings
 from app.core.exceptions import AppException
 
 OTP_TTL_SECONDS = 900
@@ -13,6 +15,24 @@ OTP_TTL_SECONDS = 900
 # `check_otp` deleted the code on success and left it sitting there on failure, with no counter
 # and no rate limit in front of the endpoint. Brute-forcing an account took minutes.
 MAX_OTP_ATTEMPTS = 5
+
+
+def _otp_key() -> bytes:
+    """Domain-separated subkey, so the JWT signing secret is never used directly as an OTP MAC key."""
+    return hmac.new(
+        settings.SECRET_KEY.encode("utf-8"), b"otp-v1", hashlib.sha256
+    ).digest()
+
+
+def otp_digest(naming: str, identificator, otp: str) -> str:
+    """HMAC-SHA256 of the code, bound to what it was issued for, so Redis never holds a usable code.
+
+    A six-digit code has only a million values, so a bare hash would be reversible by lookup;
+    keying it with a secret is what makes a leaked Redis dump useless on its own. Binding the
+    purpose and subject means a digest copied from one entry cannot be planted into another.
+    """
+    message = f"{naming}|{identificator}|{otp}".encode("utf-8")
+    return hmac.new(_otp_key(), message, hashlib.sha256).hexdigest()
 
 
 def _code_key(naming: str, identificator) -> str:
@@ -34,7 +54,7 @@ async def generate_otp(
     """
     otp = f"{secrets.randbelow(1_000_000):06d}"
 
-    await redis.setex(_code_key(naming, identificator), OTP_TTL_SECONDS, otp)
+    await redis.setex(_code_key(naming, identificator), OTP_TTL_SECONDS, otp_digest(naming, identificator, otp))
     await redis.delete(_attempts_key(naming, identificator))
 
     return otp
@@ -68,9 +88,14 @@ async def check_otp(
             "Too many incorrect codes. Request a new one.",
         )
 
-    if not hmac.compare_digest(str(true_otp), str(otp)):
+    if not hmac.compare_digest(
+        str(true_otp), otp_digest(naming, identificator, otp)
+    ):
         return False
 
-    await redis.delete(code_key)
+    # Single use: only the caller whose delete actually removed the code succeeds, so two
+    # concurrent requests presenting the same correct code cannot both pass.
+    if await redis.delete(code_key) != 1:
+        return False
     await redis.delete(attempts_key)
     return True

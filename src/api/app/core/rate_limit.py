@@ -61,6 +61,7 @@ async def enforce_rate_limit(
             "RATE_LIMITED",
             message,
             details={"retry_after_seconds": retry_after},
+            headers={"Retry-After": str(retry_after)},
         )
 
 

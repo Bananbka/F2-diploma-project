@@ -31,6 +31,9 @@ class WSEventType(str, Enum):
     MESSAGE_REACTION_REMOVED = "message_reaction_removed"
     MESSAGE_PINNED = "message_pinned"
     MESSAGE_UNPINNED = "message_unpinned"
+    # Published on user:{id} when a session is revoked. Never relayed to the client: each socket
+    # re-validates its own session on receipt and closes itself only if it is the one affected.
+    SESSION_REVOKED = "session_revoked"
     ERROR = "error"
 
 

@@ -238,6 +238,82 @@ describe('ChatStoreService', () => {
         });
     });
 
+    describe('client_message_id', () => {
+        let messages: jasmine.SpyObj<MessageService>;
+
+        beforeEach(() => {
+            messages = TestBed.inject(MessageService) as jasmine.SpyObj<MessageService>;
+            store.chats.set([chat()]);
+            store.activeChatId.set(CHAT);
+        });
+
+        const idOfCall = (n: number): string => messages.sendText.calls.argsFor(n)[5] as string;
+
+        it('gives each new message its own id', async () => {
+            messages.sendText.and.rejectWith(new Error('offline'));
+
+            await store.send('one');
+            await store.send('two');
+
+            const ids = store.pending().map((p) => p.clientMessageId);
+            expect(ids[0]).toBeTruthy();
+            expect(ids[1]).toBeTruthy();
+            expect(ids[0]).not.toBe(ids[1]);
+            expect(idOfCall(0)).toBe(ids[0]);
+            expect(idOfCall(1)).toBe(ids[1]);
+        });
+
+        it('keeps the same id when the user presses Retry on a failed send', async () => {
+            messages.sendText.and.rejectWith(new Error('offline'));
+            await store.send('hello', 'reply-target');
+
+            const failed = store.pending()[0];
+            expect(failed.status).toBe('failed');
+
+            await store.retry(failed.localId);
+
+            expect(messages.sendText).toHaveBeenCalledTimes(2);
+            expect(idOfCall(1)).toBe(idOfCall(0));
+            expect(store.pending()[0].clientMessageId).toBe(failed.clientMessageId);
+            // The retry is the same message, not a stripped copy of it.
+            expect(messages.sendText.calls.argsFor(1)[2]).toBe('reply-target');
+        });
+
+        it('mints a fresh id on Retry only after IDEMPOTENCY_KEY_REUSED', async () => {
+            messages.sendText.and.rejectWith(
+                new HttpErrorResponse({ status: 409, error: { error_code: 'IDEMPOTENCY_KEY_REUSED' } })
+            );
+            await store.send('hello');
+
+            const failed = store.pending()[0];
+            expect(failed.status).toBe('failed');
+            expect(failed.clientMessageId).not.toBe(idOfCall(0));
+
+            messages.sendText.and.resolveTo(messageResponse({ _id: 'y1' }));
+            messages.recordOutgoing.and.returnValue(decrypted('y1', 'ok'));
+            await store.retry(failed.localId);
+
+            expect(idOfCall(1)).toBe(failed.clientMessageId);
+            expect(idOfCall(1)).not.toBe(idOfCall(0));
+        });
+
+        it('accepts the stored message on a replay without duplicating it', async () => {
+            const stored = messageResponse({ _id: 'x1', sender_id: 'me' });
+            messages.sendText.and.resolveTo(stored);
+            messages.recordOutgoing.and.returnValue(decrypted('x1', 'ok'));
+
+            await store.send('hello');
+            // A manual retry after the server already stored it: the replayed response is the same
+            // document, and the client dedups by message id.
+            messages.sendText.and.resolveTo(stored);
+            await store.send('hello', undefined, undefined, idOfCall(0));
+
+            expect(idOfCall(1)).toBe(idOfCall(0));
+            expect(store.messages().filter((m) => m.id === 'x1').length).toBe(1);
+            expect(store.pending().length).toBe(0);
+        });
+    });
+
     describe('openChat', () => {
         /**
          * The fix this guards: `openChat` used to let `loadMessages` fetch this chat's keys a

@@ -107,7 +107,7 @@ async def test_cleanup_minio_orphans_keeps_an_object_referenced_by_a_message():
                 "attachments": [attachment],
             },
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
 
         with _zero_orphan_age():
             await files_tasks.cleanup_minio_orphans()

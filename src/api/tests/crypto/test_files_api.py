@@ -72,7 +72,7 @@ async def test_upload_and_download_through_a_chat():
                 "attachments": [attachment],
             },
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
 
         key = await _object_key(attachment["url"])
 
@@ -200,7 +200,7 @@ async def test_forwarding_someone_elses_attachment_is_allowed():
                 "attachments": [attachment],
             },
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
     finally:
         await alice.aclose()
         await bob.aclose()
@@ -328,7 +328,7 @@ async def test_only_the_sender_may_delete_their_message_and_its_attachment():
                 "attachments": [attachment],
             },
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
         message_id = r.json()["data"]["_id"]
 
         # Bob is a member of the same chat but did not send the message.
@@ -377,7 +377,7 @@ async def test_deleting_one_forward_does_not_reap_a_still_referenced_attachment(
                 "attachments": [attachment],
             },
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
         original_id = r.json()["data"]["_id"]
 
         r = await bob.post(
@@ -388,7 +388,7 @@ async def test_deleting_one_forward_does_not_reap_a_still_referenced_attachment(
                 "attachments": [attachment],
             },
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
 
         r = await alice.delete(f"/messages/{original_id}")
         assert r.status_code == 200, r.text
@@ -440,7 +440,7 @@ async def test_editing_text_only_leaves_attachments_untouched():
                 "attachments": [attachment],
             },
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
         message_id = r.json()["data"]["_id"]
 
         r = await alice.put(
@@ -466,7 +466,7 @@ async def test_editing_to_add_an_owned_attachment_succeeds():
         r = await alice.post(
             "/messages/", json={"chat_id": str(chat_id), "encrypted_content": "x"}
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
         message_id = r.json()["data"]["_id"]
         assert r.json()["data"]["attachments"] is None
 
@@ -512,7 +512,7 @@ async def test_editing_to_add_an_unowned_unseen_attachment_is_rejected():
         r = await mallory.post(
             "/messages/", json={"chat_id": str(mallory_chat), "encrypted_content": "x"}
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
         message_id = r.json()["data"]["_id"]
 
         # Mallory knows the key but neither uploaded it nor is in a chat that references it.
@@ -548,7 +548,7 @@ async def test_editing_to_remove_all_attachments_with_explicit_empty_list():
                 "attachments": [attachment],
             },
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
         message_id = r.json()["data"]["_id"]
 
         r = await alice.put(
@@ -587,7 +587,7 @@ async def test_editing_a_legacy_plaintext_message_attachment_still_goes_through_
         r = await alice.post(
             "/messages/", json={"chat_id": str(chat_id), "encrypted_content": "x"}
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
         message_id = r.json()["data"]["_id"]
         assert r.json()["data"]["content_format"] == "legacy_plaintext"
 
@@ -620,7 +620,7 @@ async def test_editing_a_channel_post_attachments_is_rejected_as_not_editable():
             "/messages/",
             json={"chat_id": str(chat_id), "channel_post": _post(owner_keys, chat_id, owner_id)},
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
         message_id = r.json()["data"]["_id"]
 
         # An attachment Mallory owns and the owner cannot see — this would be ATTACHMENT_FORBIDDEN
@@ -663,7 +663,7 @@ async def test_rejected_edit_does_not_persist_a_smuggled_attachment_list():
 
         envelope = _seal(sender, chat_id, epoch, alice_id, skid, chain_identity, body=b"original")
         r = await alice.post("/messages/", json={"chat_id": str(chat_id), "envelope": envelope})
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
         message_id = r.json()["data"]["_id"]
         assert r.json()["data"]["attachments"] is None
 

@@ -12,6 +12,7 @@ from app.domains.crypto.reference.identity import (
 )
 from app.domains.crypto.reference.primitives import b64u_encode
 
+from tests.crypto.otp_helpers import plant_known_otp
 from tests.crypto.test_identity_api import _publish_payload, _register_user
 
 
@@ -93,8 +94,6 @@ async def test_change_password_rejects_unknown_device():
 
 async def test_reset_password_revokes_identity():
     """Reset cannot preserve the identity, so it must revoke rather than strand dead keys."""
-    import redis.asyncio as aioredis
-    from app.core.config import settings
 
     client, user_id = await _register_user()
     try:
@@ -107,10 +106,7 @@ async def test_reset_password_revokes_identity():
                               json={"username": me["username"], "email": me["email"]})
         assert r.status_code == 200, r.text
 
-        rc = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
-        otp = await rc.get(f"password_reset:{user_id}")
-        await rc.aclose()
-        assert otp, "reset OTP should be in redis"
+        otp = await plant_known_otp(f"password_reset:{user_id}")
 
         r = await client.post("/auth/reset-password", json={
             "username": me["username"],

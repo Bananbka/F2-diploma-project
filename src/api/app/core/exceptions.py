@@ -12,12 +12,14 @@ class AppException(Exception):
             status_code: int,
             error_code: str,
             message: str,
-            details: any = None
+            details: any = None,
+            headers: dict[str, str] | None = None
     ):
         self.status_code = status_code
         self.error_code = error_code
         self.message = message
         self.details = details
+        self.headers = headers
 
 
 async def app_exception_handler(request: Request, exc: AppException):
@@ -28,7 +30,8 @@ async def app_exception_handler(request: Request, exc: AppException):
             error_code=exc.error_code,
             message=exc.message,
             details=exc.details
-        ).model_dump()
+        ).model_dump(),
+        headers=exc.headers,
     )
 
 

@@ -98,7 +98,7 @@ async def test_owner_can_post_and_subscribers_can_verify():
         r = await owner.post("/messages/", json={
             "chat_id": str(chat_id), "channel_post": _post(owner_keys, chat_id, owner_id),
         })
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
 
         data = r.json()["data"]
         assert data["content_format"] == "channel_signed_v1"
@@ -164,7 +164,7 @@ async def test_admin_can_post():
         r = await admin.post("/messages/", json={
             "chat_id": str(chat_id), "channel_post": _post(admin_keys, chat_id, admin_id),
         })
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
     finally:
         await owner.aclose()
         await admin.aclose()

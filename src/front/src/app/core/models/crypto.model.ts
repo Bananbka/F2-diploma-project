@@ -218,5 +218,8 @@ export interface MessageResponse {
     pinned_at: string | null;
     pinned_by: string | null;
     is_edited: boolean;
+    edited_at?: string | null;
+    /** Sender-chosen idempotency key echoed back by the server; absent on older messages. */
+    client_message_id?: string | null;
     is_encrypted: boolean;
 }

@@ -33,10 +33,14 @@ def _validate_avatar_url(v: str | None) -> str | None:
 
 
 class PrivateChatCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     target_user_id: uuid.UUID
 
 
 class GroupChatCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     # Bounded like the channel request below. Unbounded, one request could store as much text as
     # the body allowed in a `Text` column, and add an unlimited number of participants.
     title: str = Field(..., min_length=1, max_length=255)
@@ -94,6 +98,7 @@ class ChannelCreateRequest(BaseModel):
     unachievable for open-enrollment broadcast anyway, and sender-key distribution does not scale
     to channel-sized membership.
     """
+    model_config = ConfigDict(extra="forbid")
 
     title: str = Field(..., min_length=1, max_length=255)
     description: str | None = Field(None, max_length=2000)
@@ -107,18 +112,23 @@ class ChannelCreateRequest(BaseModel):
 
 
 class UserListRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     # Bounded at both ends. An empty list reached `insert().values([])`, which is a SQL syntax
     # error and surfaced as a 500 rather than a validation message.
     user_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=256)
 
 
 class ChangeRoleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     user_id: uuid.UUID
     role: ParticipantRole
 
 
 class TransferOwnershipRequest(BaseModel):
     """Hand OWNER to another member. The current owner is demoted to ADMIN."""
+    model_config = ConfigDict(extra="forbid")
 
     user_id: uuid.UUID
 
@@ -132,6 +142,7 @@ class MuteChatRequest(BaseModel):
     sends a timestamp far enough in the future; that keeps the server-side state to one column
     with no ambiguity between "not muted" and "muted with no expiry".
     """
+    model_config = ConfigDict(extra="forbid")
 
     muted_until: datetime | None = None
 

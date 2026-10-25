@@ -30,6 +30,11 @@ export class ChatApiService {
         return this.configService.apiUrl + 'messages/';
     }
 
+    /** `POST /messages` — no trailing slash, so it never costs a redirect. */
+    private get messagesCollectionUrl(): string {
+        return this.configService.apiUrl + 'messages';
+    }
+
     /**
      * The token-scoped invite-link endpoints (`preview`/`join`/`revoke`) are not addressed by chat
      * id at all — see `invite_link_routes.py`'s `router`, kept deliberately separate from the
@@ -119,11 +124,13 @@ export class ChatApiService {
         envelope: MessageEnvelope,
         replyTo?: string,
         attachments?: MessageAttachment[],
-        forwardedFrom?: ForwardOrigin
+        forwardedFrom?: ForwardOrigin,
+        clientMessageId?: string
     ): Observable<MessageResponse> {
         return this.http
-            .post<SuccessResponse<MessageResponse>>(this.messagesUrl, {
+            .post<SuccessResponse<MessageResponse>>(this.messagesCollectionUrl, {
                 chat_id: chatId,
+                client_message_id: clientMessageId,
                 envelope,
                 reply_to_message_id: replyTo ?? null,
                 attachments: attachments?.length ? attachments : null,
@@ -159,9 +166,13 @@ export class ChatApiService {
     }
 
     /** Send a signed broadcast post. Channels are authenticated but not confidential. */
-    sendChannelPost(chatId: string, post: ChannelPostPayload): Observable<MessageResponse> {
+    sendChannelPost(chatId: string, post: ChannelPostPayload, clientMessageId?: string): Observable<MessageResponse> {
         return this.http
-            .post<SuccessResponse<MessageResponse>>(this.messagesUrl, { chat_id: chatId, channel_post: post })
+            .post<SuccessResponse<MessageResponse>>(this.messagesCollectionUrl, {
+                chat_id: chatId,
+                client_message_id: clientMessageId,
+                channel_post: post,
+            })
             .pipe(map((r) => r.data));
     }
 

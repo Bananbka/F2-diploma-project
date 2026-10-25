@@ -312,7 +312,7 @@ async def test_chat_list_orders_most_recently_active_first():
             "/messages/",
             json={"chat_id": first["id"], "encrypted_content": "hi"},
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
 
         r = await alice.get("/chats/")
         assert r.status_code == 200, r.text
@@ -324,7 +324,7 @@ async def test_chat_list_orders_most_recently_active_first():
             "/messages/",
             json={"chat_id": second["id"], "encrypted_content": "hi"},
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
 
         r = await alice.get("/chats/")
         titles = [c["title"] for c in r.json()["data"]]
@@ -345,11 +345,11 @@ async def test_chat_list_reports_unread_count_and_last_message():
         r = await alice.post(
             "/messages/", json={"chat_id": chat["id"], "encrypted_content": "first"}
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
         r = await alice.post(
             "/messages/", json={"chat_id": chat["id"], "encrypted_content": "second"}
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
 
         r = await bob.get("/chats/")
         assert r.status_code == 200, r.text

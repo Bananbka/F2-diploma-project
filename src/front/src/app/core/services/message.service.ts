@@ -199,12 +199,24 @@ export class MessageService {
         text: string,
         replyTo?: string,
         attachments?: MessageAttachment[],
-        forwardedFrom?: ForwardOrigin
+        forwardedFrom?: ForwardOrigin,
+        clientMessageId: string = uuidv4()
     ): Promise<MessageResponse> {
+        // Minted before any encryption and reused by every retry of this logical message — the
+        // EPOCH_STALE re-seal below produces different ciphertext, but it is still the same send,
+        // and the server dedups on this id. A caller retrying by hand passes the id it kept.
         const keys = await firstValueFrom(this.cryptoApi.getChatKeys(chatId));
 
         try {
-            return await this.sealAndSend(chatId, keys.current_epoch, text, replyTo, attachments, forwardedFrom);
+            return await this.sealAndSend(
+                chatId,
+                keys.current_epoch,
+                text,
+                clientMessageId,
+                replyTo,
+                attachments,
+                forwardedFrom
+            );
         } catch (error) {
             if (!this.isEpochStale(error)) {
                 throw error;
@@ -214,7 +226,7 @@ export class MessageService {
                 this.epochFromError(error) ?? (await firstValueFrom(this.cryptoApi.getChatKeys(chatId))).current_epoch;
 
             this.keyStore.invalidateSenderChain(chatId, keys.current_epoch);
-            return this.sealAndSend(chatId, currentEpoch, text, replyTo, attachments, forwardedFrom);
+            return this.sealAndSend(chatId, currentEpoch, text, clientMessageId, replyTo, attachments, forwardedFrom);
         }
     }
 
@@ -222,6 +234,7 @@ export class MessageService {
         chatId: string,
         epoch: number,
         text: string,
+        clientMessageId: string,
         replyTo?: string,
         attachments?: MessageAttachment[],
         forwardedFrom?: ForwardOrigin
@@ -249,7 +262,9 @@ export class MessageService {
         // The key only ever belongs inside the sealed plaintext above — it must never reach the
         // wire as part of the ordinary HTTP attachment metadata.
         const wireAttachments = attachments ? stripDecryptionKeys(attachments) : undefined;
-        return firstValueFrom(this.chatApi.sendEnvelope(chatId, envelope, replyTo, wireAttachments, forwardedFrom));
+        return firstValueFrom(
+            this.chatApi.sendEnvelope(chatId, envelope, replyTo, wireAttachments, forwardedFrom, clientMessageId)
+        );
     }
 
     /**
@@ -318,7 +333,11 @@ export class MessageService {
     }
 
     /** Post to a channel: signed with the identity key, not encrypted. */
-    async sendChannelPost(chatId: string, content: string): Promise<MessageResponse> {
+    async sendChannelPost(
+        chatId: string,
+        content: string,
+        clientMessageId: string = uuidv4()
+    ): Promise<MessageResponse> {
         const identity = this.keyStore.currentIdentity;
         if (!identity) {
             throw new Error('key store is locked');
@@ -327,19 +346,23 @@ export class MessageService {
         const postId = uuidv4();
 
         return firstValueFrom(
-            this.chatApi.sendChannelPost(chatId, {
-                v: 1,
-                alg: 'ed25519-post-v1',
-                post_id: postId,
-                content,
-                sig: signChannelPost({
-                    signingPrivate: identity.signingPrivate,
-                    chatId,
-                    senderId: identity.userId,
-                    postId,
+            this.chatApi.sendChannelPost(
+                chatId,
+                {
+                    v: 1,
+                    alg: 'ed25519-post-v1',
+                    post_id: postId,
                     content,
-                }),
-            })
+                    sig: signChannelPost({
+                        signingPrivate: identity.signingPrivate,
+                        chatId,
+                        senderId: identity.userId,
+                        postId,
+                        content,
+                    }),
+                },
+                clientMessageId
+            )
         );
     }
 

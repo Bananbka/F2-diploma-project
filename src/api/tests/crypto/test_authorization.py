@@ -12,6 +12,7 @@ import websockets
 
 from app.domains.crypto.reference.ratchet import SenderChain
 
+from tests.crypto.otp_helpers import plant_known_otp
 from tests.crypto.test_epoch_api import _group_with, _publish_identity
 from tests.crypto.test_identity_api import _register_user, rate_limit_bypass_headers
 from tests.crypto.test_rotation_api import _publish_chain, _seal
@@ -31,23 +32,13 @@ def _cookie_header(client: httpx.AsyncClient) -> str:
 
 
 async def _read_otp(key: str) -> str:
-    """Read a one-time code straight out of Redis.
+    """Obtain a usable one-time code for `key` (Redis holds only its HMAC; see otp_helpers).
 
     The code only ever reaches the user by email, and there is no mail server in the test
     environment. Reading it here keeps the reset flow testable end to end without adding a
     back door to the application itself.
     """
-    from redis.asyncio import Redis
-
-    from app.core.config import settings
-
-    redis = Redis.from_url(settings.REDIS_URL, decode_responses=True)
-    try:
-        code = await redis.get(key)
-        assert code, f"no OTP stored at {key}"
-        return code
-    finally:
-        await redis.aclose()
+    return await plant_known_otp(key)
 
 
 async def _publish_identity_with_device(client, user_id, device_id=None):
@@ -125,7 +116,7 @@ async def test_edit_is_rejected_under_a_stale_epoch():
         r = await alice.post(
             "/messages/", json={"chat_id": str(chat_id), "envelope": envelope}
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
         message_id = r.json()["data"]["_id"]
 
         # Carol is removed, which re-keys the chat. Carol keeps every key she already held.
@@ -251,7 +242,7 @@ async def test_edit_with_envelope_rejected_when_chat_has_no_crypto_settings():
         r = await alice.post(
             "/messages/", json={"chat_id": str(chat_id), "encrypted_content": "hello"}
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
         message_id = r.json()["data"]["_id"]
 
         forged_envelope = {
@@ -301,7 +292,7 @@ async def test_envelope_still_accepted_once_the_chat_is_actually_encrypted():
             "/messages/", json={"chat_id": str(chat_id), "envelope": envelope}
         )
 
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
         assert r.json()["data"]["content_format"] == "sender_keys_v1"
     finally:
         await alice.aclose()
@@ -334,11 +325,14 @@ async def test_socket_refuses_read_receipts_for_a_chat_you_are_not_in():
                 "encrypted_content": "hello",
             },
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
         message_id = r.json()["data"]["_id"]
 
         async with websockets.connect(
-            WS_BASE, additional_headers={"Cookie": _cookie_header(mallory)}
+            WS_BASE, additional_headers={
+                "Cookie": _cookie_header(mallory),
+                "Origin": "http://localhost:4200",
+            }
         ) as socket:
             await socket.send(
                 f'{{"event_type":"message_read","chat_id":"{chat_id}",'
@@ -370,7 +364,10 @@ async def test_socket_refuses_typing_for_a_chat_you_are_not_in():
         chat_id = await _private_chat(alice, bob_id)
 
         async with websockets.connect(
-            WS_BASE, additional_headers={"Cookie": _cookie_header(mallory)}
+            WS_BASE, additional_headers={
+                "Cookie": _cookie_header(mallory),
+                "Origin": "http://localhost:4200",
+            }
         ) as socket:
             await socket.send(
                 f'{{"event_type":"typing_start","chat_id":"{chat_id}","payload":{{}}}}'
@@ -390,7 +387,10 @@ async def test_socket_survives_a_malformed_frame():
 
     try:
         async with websockets.connect(
-            WS_BASE, additional_headers={"Cookie": _cookie_header(alice)}
+            WS_BASE, additional_headers={
+                "Cookie": _cookie_header(alice),
+                "Origin": "http://localhost:4200",
+            }
         ) as socket:
             await socket.send("this is not json")
             reply = await socket.recv()
@@ -555,7 +555,7 @@ async def test_owner_can_delete_a_group_and_its_messages():
         r = await alice.post(
             "/messages/", json={"chat_id": str(chat_id), "encrypted_content": "x"}
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
 
         # A member cannot delete it.
         r = await bob.delete(f"/chats/{chat_id}")

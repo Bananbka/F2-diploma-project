@@ -46,6 +46,16 @@ async def ensure_indexes():
         sparse=True,
     )
 
+    # Send idempotency. Partial, because most documents (and every legacy one) carry no
+    # client_message_id and must not collide on a missing value; `binData` is how a standard-
+    # representation UUID is stored.
+    await messages.create_index(
+        [("chat_id", 1), ("sender_id", 1), ("client_message_id", 1)],
+        name="ux_chat_sender_client_msg",
+        unique=True,
+        partialFilterExpression={"client_message_id": {"$type": "binData"}},
+    )
+
     audit_log = mongo_client.db["security_audit"]
 
     # The two ways an audit log is ever read: everything about one account, and everything in a

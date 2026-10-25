@@ -54,7 +54,7 @@ async def _publish_chain(client, chat_id, epoch, sender_id, sender_device, ident
         "signature": b64u_encode(signature),
         "grants": grants,
     })
-    assert r.status_code == 200, r.text
+    assert r.status_code == 201, r.text
 
     return chain_key, sender_key_id, chain_identity
 
@@ -176,7 +176,7 @@ async def test_adding_a_member_rotates_and_floors_their_history():
             "chat_id": str(chat_id),
             "envelope": _seal(chain, chat_id, 1, alice_id, skid, chain_identity, b"before carol"),
         })
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
 
         r = await alice.post(f"/chats/{chat_id}/add-participants",
                              json={"user_ids": [str(carol_id)]})
@@ -229,7 +229,7 @@ async def test_send_is_rejected_under_a_stale_epoch():
             "chat_id": str(chat_id),
             "envelope": _seal(chain, chat_id, 1, alice_id, skid, chain_identity),
         })
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
 
         # Removing carol rotates to epoch 2.
         await alice.post(f"/chats/{chat_id}/delete-participants",

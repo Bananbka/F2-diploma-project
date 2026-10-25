@@ -57,7 +57,7 @@ async def test_sealed_message_round_trip_and_storage_is_opaque():
         envelope = _seal(chain, chat_id, epoch, alice_id, skid, chain_identity, body=SECRET)
 
         r = await alice.post("/messages/", json={"chat_id": str(chat_id), "envelope": envelope})
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
 
         data = r.json()["data"]
         assert data["content_format"] == "sender_keys_v1"
@@ -104,7 +104,7 @@ async def test_legacy_plaintext_still_works_and_is_flagged():
         r = await alice.post("/messages/", json={
             "chat_id": chat_id, "encrypted_content": "hello in the clear",
         })
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
 
         data = r.json()["data"]
         # The old code reported is_encrypted=True here because the computed value was dropped.
@@ -128,7 +128,7 @@ async def test_chat_list_survives_envelope_messages():
         envelope = _seal(chain, chat_id, epoch, alice_id, skid, chain_identity, body=SECRET)
 
         r = await alice.post("/messages/", json={"chat_id": str(chat_id), "envelope": envelope})
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
 
         r = await bob.get("/chats/")
         assert r.status_code == 200, r.text
@@ -179,7 +179,7 @@ async def test_edit_rejects_reused_chain_index():
 
         envelope = _seal(sender, chat_id, epoch, alice_id, skid, chain_identity, body=b"original")
         r = await alice.post("/messages/", json={"chat_id": str(chat_id), "envelope": envelope})
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
         # FastAPI serialises response models by alias, so the id field comes back as "_id".
         message_id = r.json()["data"]["_id"]
 
@@ -225,7 +225,7 @@ async def test_edit_from_a_fresh_chain_is_accepted():
         envelope = _seal(first_chain, chat_id, epoch, alice_id, first_skid, chain_identity, body=b"original")
         assert envelope["idx"] > 0
         r = await alice.post("/messages/", json={"chat_id": str(chat_id), "envelope": envelope})
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
         message_id = r.json()["data"]["_id"]
 
         # The client reloaded: new chain, new key, index back to 0. Registering a new device

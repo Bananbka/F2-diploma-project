@@ -64,6 +64,7 @@ class IdentityPublishRequest(BaseModel):
     cannot validate the private bundle — that is opaque by design — but rejecting malformed
     public keys at the door prevents a whole class of permanently-broken accounts.
     """
+    model_config = ConfigDict(extra="forbid")
 
     device_id: uuid.UUID
     display_name: str = Field("default", max_length=100)
@@ -120,6 +121,7 @@ class PrekeyRotateRequest(BaseModel):
     the old (or no) `prekey_private` — exactly the state that made every grant addressed to this
     device unopenable the first time this shipped.
     """
+    model_config = ConfigDict(extra="forbid")
 
     device_id: uuid.UUID
     signed_prekey_public: str
@@ -150,6 +152,7 @@ class RewrappedIdentity(BaseModel):
     This is what makes "change password" non-destructive: only the wrapping changes, so every
     message and key grant the user could read before, they can still read.
     """
+    model_config = ConfigDict(extra="forbid")
 
     device_id: uuid.UUID
     encrypted_private_bundle: str = Field(..., max_length=ENCRYPTED_BUNDLE_MAX_LENGTH)
@@ -196,6 +199,8 @@ class OwnIdentityResponse(PublicKeyResponse):
 
 
 class UserKeysRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     user_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=512)
 
 

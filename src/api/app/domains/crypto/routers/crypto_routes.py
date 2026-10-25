@@ -362,6 +362,7 @@ async def get_chat_keys(
 @router.post(
     "/chats/{chat_id}/epochs/{epoch}/sender-keys",
     response_model=SuccessResponse[SenderKeyPublishedResponse],
+    status_code=201,
 )
 async def publish_sender_key(
     data: SenderKeyUpload,

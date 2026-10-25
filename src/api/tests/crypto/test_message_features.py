@@ -25,7 +25,7 @@ async def _send_message(client, chat_id) -> str:
         "/messages/",
         json={"chat_id": str(chat_id), "encrypted_content": "hello"},
     )
-    assert r.status_code == 200, r.text
+    assert r.status_code == 201, r.text
     return r.json()["data"]["_id"]
 
 
@@ -184,7 +184,10 @@ async def test_reaction_broadcasts_over_websocket():
         message_id = await _send_message(alice, chat_id)
 
         async with websockets.connect(
-            WS_BASE, additional_headers={"Cookie": _cookie_header(alice)}
+            WS_BASE, additional_headers={
+                "Cookie": _cookie_header(alice),
+                "Origin": "http://localhost:4200",
+            }
         ) as socket:
             r = await bob.post(f"/messages/{message_id}/reactions", json={"emoji": "👍"})
             assert r.status_code == 200, r.text
@@ -331,7 +334,10 @@ async def test_pin_broadcasts_over_websocket():
         message_id = await _send_message(alice, chat_id)
 
         async with websockets.connect(
-            WS_BASE, additional_headers={"Cookie": _cookie_header(bob)}
+            WS_BASE, additional_headers={
+                "Cookie": _cookie_header(bob),
+                "Origin": "http://localhost:4200",
+            }
         ) as socket:
             r = await alice.post(f"/messages/{message_id}/pin")
             assert r.status_code == 200, r.text
@@ -428,7 +434,10 @@ async def test_muting_never_reaches_the_other_participant_over_websocket():
         chat_id = await _group_with(alice, bob_id)
 
         async with websockets.connect(
-            WS_BASE, additional_headers={"Cookie": _cookie_header(bob)}
+            WS_BASE, additional_headers={
+                "Cookie": _cookie_header(bob),
+                "Origin": "http://localhost:4200",
+            }
         ) as socket:
             r = await alice.patch(
                 f"/chats/{chat_id}/mute", json={"muted_until": "2999-01-01T00:00:00Z"}

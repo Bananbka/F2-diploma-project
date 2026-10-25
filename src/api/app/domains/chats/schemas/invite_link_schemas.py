@@ -12,6 +12,7 @@ class InviteLinkTokenRequest(BaseModel):
     in the URL), these are authenticated mutating actions — keeping the token in the body keeps it
     out of URL-based logging (uvicorn/nginx access logs) entirely, without needing any log
     suppression for them."""
+    model_config = ConfigDict(extra="forbid")
 
     token: str = Field(..., min_length=1, max_length=128)
 
@@ -19,6 +20,7 @@ class InviteLinkTokenRequest(BaseModel):
 class CreateInviteLinkRequest(BaseModel):
     """Both bounds are optional. Omitting both creates a link with no expiry and no use cap —
     allowed, since revocation is always available as the way to close it."""
+    model_config = ConfigDict(extra="forbid")
 
     expires_at: datetime | None = None
     # Bounded well above anything a real chat would need, purely to keep the column away from
