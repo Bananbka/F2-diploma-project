@@ -28,6 +28,7 @@
 | [Обґрунтування архітектури](2_design.md#21-обґрунтування-архітектурного-стилю-та-патернів-проєктування) | Модульний моноліт, Clean Architecture, патерни мікрорівня, архітектурні ризики |
 | [adr/](adr/) | Architecture Decision Records за шаблоном Майкла Нігардза |
 | [adr/0001-choice-of-technology.md](adr/0001-choice-of-technology.md) | ADR-001: вибір схеми групового наскрізного шифрування (Approved) |
+| [adr/0002-account-deletion-as-tombstone.md](adr/0002-account-deletion-as-tombstone.md) | ADR-002: видалення облікового запису як знеособлення з надгробком (Approved) |
 | [Діаграми C4](2_design.md#22-контекстне-та-контейнерне-моделювання-системи-c4-model) | Context, Container і Component у Mermaid.js |
 | [Серверне ядро](2_design.md#23-компонентне-моделювання-та-опис-серверного-ядра) | Рівні Inbound, Core, Outbound та їхні інваріанти |
 | [Контур безпеки](2_design.md#24-контур-безпеки-програмного-рішення-application-security) | Автентифікація, OWASP Top 10, обмеження ресурсів, захист середовища |

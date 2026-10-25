@@ -32,7 +32,14 @@ actually checked and passed – never as a default.
 - **Re-keying** – brief state after a member joins or leaves while the chat opens a new epoch.
 - **Send blocked** – the server rejected a send with `409 EPOCH_STALE` because the chat re-keyed
   mid-compose. The client re-encrypts from plaintext and retries automatically; surface it only if
-  the retry also fails.
+  the retry also fails. The retry happens exactly once, under the same `client_message_id`, sealed
+  for `details.current_epoch`; if it fails too the message stays in the list as "Send failed" with
+  Retry/Discard.
+- **Key not shared** (`RETRY_LIMIT_EXCEEDED`) – publishing our sender key failed three times
+  (network, 5xx, `EPOCH_CLOSED`, `GRANT_SET_MISMATCH`; waits of 250 ms then 500 ms, roster re-read and
+  re-verified each time). Nothing is suspicious, so this is a plain retryable "Not sent" row with its
+  own wording, never the roster alarm. An exhausted `EPOCH_CLOSED` is treated like `EPOCH_STALE` and
+  re-sealed once for the current epoch first.
 - **Read receipts** are per-participant, derived from `GET /chats/{id}/read-state` plus the
   `message_read` broadcast, and shown only on the current user's own sent messages. A private chat
   gets an ordinary single/double tick; a group gets a double tick once every other member has read
@@ -63,7 +70,9 @@ It has **two distinct causes**, and they are not interchangeable:
   and more circumstantial, since the server writes both, but it catches a device inserted or dropped
   after the epoch opened.
 
-Both must block. They are thrown as `RosterVerificationError` and classified by **type**, never by
+Both must block. They are thrown as `RosterVerificationError` (binding failure, code
+`ROSTER_VERIFICATION_FAILED`) and its subclass `MemberSetMismatchError` (code `MEMBER_SET_MISMATCH`),
+and the chat banner words each differently. They are never retried. Both are classified by **type**, never by
 message text – an earlier prefix match silently stopped recognising the binding failure when it was
 added, so sending continued and no banner appeared for the failure that matters most.
 

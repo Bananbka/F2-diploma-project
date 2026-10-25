@@ -23,8 +23,8 @@ info:
     документів MongoDB – ObjectId (24 шістнадцяткові символи). Двійкові значення кодуються
     base64url без доповнення (`Base64Url`).
 
-    Розширення `x-implementation-status: planned` позначає елементи цільової моделі To-Be,
-    яких ще немає в поточному коді (реалізація – Розділ 3).
+    Усі елементи контракту відповідають поточному коду, крім коду помилки `SENDER_KEY_EXISTS`,
+    який позначено в описі як `planned` (To-Be).
 
     Вимоги: SRS-FUN-03, SRS-FUN-14 – SRS-FUN-18, SRS-FUN-20, SRS-FUN-27, SRS-NFR-SEC-03, SRS-NFR-SEC-04
     ([srs.md](../srs.md)).
@@ -169,13 +169,6 @@ paths:
       responses:
         '201':
           description: Ланцюжок опубліковано
-          x-implementation-status: planned
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SenderKeyPublishedSuccessResponse'
-        '200':
-          description: Ланцюжок опубліковано (поточна реалізація повертає 200 замість 201)
           content:
             application/json:
               schema:
@@ -265,9 +258,12 @@ paths:
         наявність розподілу `envelope.skid` у поточній епосі, що належить відправнику;
         підпис Ed25519 конверта (SRS-FUN-17). Після збереження документа в MongoDB подія
         `new_message` публікується в канали `user:{id}` усіх учасників (SRS-FUN-18).
-        Повторний запит з тим самим `client_message_id` повертає наявне повідомлення
-        (SRS-FUN-20, planned). Ліміт: 300 повідомлень за 60 с на користувача.
-        Поточна реалізація реєструє шлях як `/messages/`; канонічний шлях контракту – `/messages`.
+        Повторний запит з тим самим `client_message_id` повертає наявне повідомлення зі статусом 200
+        без створення дубліката (SRS-FUN-20); подію `new_message` при цьому розсилають повторно,
+        бо перший запит міг перерватися між збереженням і розсилкою. Якщо тіло повтору відрізняється
+        від початкового (відповідь, вкладення, формат, пересилання), сервер повертає 409
+        `IDEMPOTENCY_KEY_REUSED`. Ліміт: 300 повідомлень за 60 с на користувача.
+        Канонічний шлях – `/messages`; шлях зі скісною рискою лишено для сумісності, його вилучено зі схеми.
       requestBody:
         required: true
         content:
@@ -277,15 +273,13 @@ paths:
       responses:
         '201':
           description: Повідомлення створено
-          x-implementation-status: planned
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/MessageSuccessResponse'
         '200':
           description: |
-            Повідомлення створено (поточна реалізація) або повернуто наявне повідомлення
-            з тим самим `client_message_id` (planned)
+            Повторний запит з тим самим `client_message_id`: повернуто наявне повідомлення
           content:
             application/json:
               schema:
@@ -315,7 +309,8 @@ paths:
           description: |
             `EPOCH_STALE` – чат пройшов ротацію: клієнт отримує `details.current_epoch`,
             відкидає кешований ланцюжок, повторно шифрує відкритий текст і повторює запит один раз.
-            `SENDER_KEY_MISSING` – для поточної епохи не опубліковано ланцюжок `envelope.skid`
+            `SENDER_KEY_MISSING` – для поточної епохи не опубліковано ланцюжок `envelope.skid`.
+            `IDEMPOTENCY_KEY_REUSED` – `client_message_id` уже використано для іншого повідомлення
           content:
             application/json:
               schema:
@@ -574,7 +569,7 @@ components:
         або ліміт шлюзу Nginx (`limit_req`)
       headers:
         Retry-After:
-          description: Кількість секунд до відкриття нового вікна (planned для відповідей API і шлюзу)
+          description: Кількість секунд до відкриття нового вікна (у відповідях API і шлюзу)
           schema:
             type: integer
             minimum: 1
@@ -1034,7 +1029,6 @@ components:
         client_message_id:
           allOf:
             - $ref: '#/components/schemas/Uuid'
-          x-implementation-status: planned
           description: Ключ ідемпотентності (UUID v4), що генерує клієнт (SRS-FUN-20)
         envelope:
           $ref: '#/components/schemas/MessageEnvelope'
@@ -1077,7 +1071,6 @@ components:
           allOf:
             - $ref: '#/components/schemas/Uuid'
           nullable: true
-          x-implementation-status: planned
         content_format:
           type: string
           enum: [legacy_plaintext, legacy_rsa, sender_keys_v1, channel_signed_v1]
@@ -1125,7 +1118,6 @@ components:
           allOf:
             - $ref: '#/components/schemas/Timestamp'
           nullable: true
-          x-implementation-status: planned
         is_read:
           type: boolean
           deprecated: true
