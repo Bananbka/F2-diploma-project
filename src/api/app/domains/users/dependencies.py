@@ -10,6 +10,7 @@ from starlette.websockets import WebSocket
 
 from app.core.config import settings
 from app.core.exceptions import AppException
+from app.core.security import is_token_revoked
 from app.domains.users.models.user import User
 from app.domains.users.services.user_service import get_user_by_id
 from app.infrastructure.postgres import get_db
@@ -28,8 +29,7 @@ async def get_current_unverified_user(
     if not token:
         raise AppException(401, "UNAUTHORIZED", "You are not logged in.")
 
-    is_blacklisted = await redis.get(f"blacklist:{token}")
-    if is_blacklisted:
+    if await is_token_revoked(redis, token):
         raise AppException(
             status.HTTP_401_UNAUTHORIZED,
             "TOKEN_REVOKED",
@@ -89,6 +89,17 @@ async def get_current_user(
     return current_unverified_user
 
 
+async def check_ws_origin(websocket: WebSocket) -> None:
+    """Refuse a handshake whose Origin is absent or not allow-listed, before accept().
+
+    Auth is cookie-based, so without this any page the user visits could open an authenticated
+    socket in their browser. Non-browser clients must send an allowed Origin explicitly.
+    """
+    origin = websocket.headers.get("origin")
+    if not origin or origin not in settings.ALLOWED_WS_ORIGINS:
+        raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION)
+
+
 async def get_ws_current_user(
     websocket: WebSocket,
     db: AsyncSession = Depends(get_db),
@@ -99,8 +110,7 @@ async def get_ws_current_user(
     if not token:
         raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION)
 
-    is_blacklisted = await redis.get(f"blacklist:{token}")
-    if is_blacklisted:
+    if await is_token_revoked(redis, token):
         raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION)
 
     try:

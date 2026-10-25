@@ -1,3 +1,4 @@
+import hashlib
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -19,6 +20,32 @@ def get_password_hash(password: str) -> str:
     salt = bcrypt.gensalt()
     hashed_bytes = bcrypt.hashpw(password_bytes, salt)
     return hashed_bytes.decode("utf-8")
+
+
+def denylist_key(token: str) -> str:
+    """Redis key under which a revoked token is recorded.
+
+    Keyed on the SHA-256 of the token so a read of Redis never yields a usable JWT.
+    """
+    return f"blacklist:{hashlib.sha256(token.encode('utf-8')).hexdigest()}"
+
+
+def legacy_denylist_key(token: str) -> str:
+    """Pre-hash key format. Read-only during the transition; nothing writes it any more."""
+    return f"blacklist:{token}"
+
+
+async def is_token_revoked(redis, token: str) -> bool:
+    """True if the token is denylisted under either key format.
+
+    TODO(remove legacy read): drop `legacy_denylist_key` and its lookup 7 days after this change
+    is deployed. That is the refresh-token TTL, so by then every token denylisted under the old
+    plaintext format has expired on its own.
+    """
+    return bool(
+        await redis.get(denylist_key(token))
+        or await redis.get(legacy_denylist_key(token))
+    )
 
 
 def issued_now() -> float:

@@ -1,4 +1,4 @@
-﻿from fastapi import APIRouter, Depends
+﻿from fastapi import APIRouter, Depends, Response
 from fastapi import Path
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -56,9 +56,11 @@ async def _broadcast(
 
 
 # MESSAGES CRUD
-@router.post("/", response_model=SuccessResponse[MessageResponse])
+@router.post("", response_model=SuccessResponse[MessageResponse], status_code=201)
+@router.post("/", response_model=SuccessResponse[MessageResponse], status_code=201,
+             include_in_schema=False)
 async def create_message(
-        message_in: MessageCreateRequest, user: User = Depends(get_current_user),
+        message_in: MessageCreateRequest, response: Response, user: User = Depends(get_current_user),
         db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
         mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db)
 ):
@@ -71,7 +73,12 @@ async def create_message(
         message="You are sending messages too quickly. Please slow down.",
     )
 
-    new_msg = await messages_service.send_message(db, mongo_db, user.id, message_in)
+    new_msg, created = await messages_service.send_message(db, mongo_db, user.id, message_in)
+
+    if not created:
+        # Idempotent replay. Broadcast again regardless: the original request may have died
+        # between the insert and the publish, and clients dedup by message id.
+        response.status_code = 200
 
     participant_ids = await get_chat_participants_ids(db, new_msg.chat_id)
     ws_envelope = WSMessageEnvelope(

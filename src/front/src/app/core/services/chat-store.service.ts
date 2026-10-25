@@ -2,6 +2,7 @@ import { HttpErrorResponse } from '@angular/common/http';
 import { computed, effect, inject, Injectable, signal, untracked } from '@angular/core';
 import { Router } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
+import { v4 as uuidv4 } from 'uuid';
 
 import { Chat, ParticipantReadState } from '../models/chat.model';
 import { ChatKeys, MessageAttachment, MessageResponse } from '../models/crypto.model';
@@ -39,6 +40,14 @@ export interface PendingMessage {
     status: 'sending' | 'failed';
     /** True when the failure survived the automatic EPOCH_STALE re-encrypt-and-retry. */
     rekeyFailure: boolean;
+    /**
+     * Idempotency key for this logical message, minted once and kept across every retry — the
+     * automatic EPOCH_STALE one and the user-pressed "Retry" alike.
+     */
+    clientMessageId: string;
+    /** Kept so a manual retry re-sends the same message, not a stripped-down copy of it. */
+    replyTo?: string;
+    attachments?: MessageAttachment[];
 }
 
 /**
@@ -597,24 +606,45 @@ export class ChatStoreService {
      * invisible on purpose. Only a failure that survives the retry surfaces, which is what
      * `docs/ui-states.md` asks for.
      */
-    async send(text: string, replyTo?: string, attachments?: MessageAttachment[]): Promise<void> {
+    async send(
+        text: string,
+        replyTo?: string,
+        attachments?: MessageAttachment[],
+        clientMessageId: string = uuidv4()
+    ): Promise<void> {
         const chatId = this.activeChatId();
         const chat = this.activeChat();
         if (!chatId || !chat || (!text.trim() && !attachments?.length)) {
             return;
         }
 
-        const localId = `local-${crypto.randomUUID()}`;
+        const localId = `local-${uuidv4()}`;
         this.pending.update((p) => [
             ...p,
-            { localId, text, createdAt: new Date().toISOString(), status: 'sending', rekeyFailure: false },
+            {
+                localId,
+                text,
+                createdAt: new Date().toISOString(),
+                status: 'sending',
+                rekeyFailure: false,
+                clientMessageId,
+                replyTo,
+                attachments,
+            },
         ]);
 
         try {
             const sent =
                 chat.chat_type === 'channel'
-                    ? await this.messages_.sendChannelPost(chatId, text)
-                    : await this.messages_.sendText(chatId, text, replyTo, attachments);
+                    ? await this.messages_.sendChannelPost(chatId, text, clientMessageId)
+                    : await this.messages_.sendText(
+                          chatId,
+                          text,
+                          replyTo,
+                          attachments,
+                          undefined,
+                          clientMessageId
+                      );
 
             this.pending.update((p) => p.filter((item) => item.localId !== localId));
             this.rawMessages.set(sent._id, sent);
@@ -634,7 +664,15 @@ export class ChatStoreService {
             this.pending.update((p) =>
                 p.map((item) =>
                     item.localId === localId
-                        ? { ...item, status: 'failed' as const, rekeyFailure: this.looksLikeRekey(error) }
+                        ? {
+                              ...item,
+                              status: 'failed' as const,
+                              rekeyFailure: this.looksLikeRekey(error),
+                              // The server refused this id because it already belongs to different
+                              // content. Retrying under it can only be refused again, so the next
+                              // attempt gets a fresh one; every other failure keeps its id.
+                              clientMessageId: this.isIdempotencyKeyReused(error) ? uuidv4() : item.clientMessageId,
+                          }
                         : item
                 )
             );
@@ -648,7 +686,7 @@ export class ChatStoreService {
         }
 
         this.pending.update((p) => p.filter((entry) => entry.localId !== localId));
-        await this.send(item.text);
+        await this.send(item.text, item.replyTo, item.attachments, item.clientMessageId);
     }
 
     discardPending(localId: string): void {
@@ -1295,6 +1333,14 @@ export class ChatStoreService {
      */
     private isMemberVerificationFailure(error: unknown): boolean {
         return isRosterVerificationFailure(error);
+    }
+
+    private isIdempotencyKeyReused(error: unknown): boolean {
+        return (
+            error instanceof HttpErrorResponse &&
+            error.status === 409 &&
+            error.error?.error_code === 'IDEMPOTENCY_KEY_REUSED'
+        );
     }
 
     private looksLikeRekey(error: unknown): boolean {

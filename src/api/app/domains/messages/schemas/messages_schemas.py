@@ -24,7 +24,7 @@ class Attachment(BaseModel):
     layer now also derives the sticker exemption from the URL itself rather than trusting `kind`,
     but this keeps the two fields from being able to lie to each other in the first place.
     """
-    url: str
+    url: str = Field(..., max_length=512)
     name: str = Field(..., max_length=255)
     size: int = Field(..., ge=0)
     content_type: str = Field(..., max_length=255)
@@ -110,7 +110,8 @@ class MessageEnvelope(BaseModel):
     skid: uuid.UUID                     # sender_key_id
     idx: int = Field(..., ge=0)         # chain index
     n: str = Field(..., max_length=32)  # nonce, b64u
-    ct: str                             # ciphertext || GCM tag, b64u
+    # ciphertext || GCM tag, b64u. ~190 KB of plaintext; attachments travel as separate blobs.
+    ct: str = Field(..., max_length=256_000)
     sig: str = Field(..., max_length=128)  # Ed25519, b64u
 
 
@@ -157,6 +158,8 @@ def validate_emoji(v: str) -> str:
 
 
 class ReactionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     emoji: str = Field(..., min_length=1, max_length=8)
 
     @field_validator("emoji")
@@ -196,6 +199,9 @@ class MessageDocument(BaseModel):
 
     attachments: list[Attachment] | None = None
 
+    # Idempotency key chosen by the sender, unique per (chat, sender); see `ux_chat_sender_client_msg`.
+    client_message_id: uuid.UUID | None = None
+
     reactions: list[Reaction] = Field(default_factory=list)
 
     # DEPRECATED: a single shared boolean, so one member reading a group message marks it read for
@@ -209,6 +215,7 @@ class MessageDocument(BaseModel):
     pinned_at: datetime.datetime | None = None
     pinned_by: uuid.UUID | None = None
     is_edited: bool = False
+    edited_at: datetime.datetime | None = None
 
     created_at: datetime.datetime
 
@@ -228,6 +235,7 @@ class MessageResponse(BaseModel):
     created_at: datetime.datetime
 
     attachments: list[Attachment] | None = None
+    client_message_id: uuid.UUID | None = None
 
     reactions: list[Reaction] = Field(default_factory=list)
 
@@ -238,8 +246,17 @@ class MessageResponse(BaseModel):
     pinned_at: datetime.datetime | None = None
     pinned_by: uuid.UUID | None = None
     is_edited: bool = False
+    edited_at: datetime.datetime | None = None
 
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+    @field_validator("edited_at")
+    @classmethod
+    def _edited_at_is_utc(cls, v: datetime.datetime | None) -> datetime.datetime | None:
+        """Mongo returns naive datetimes; they are UTC, so say so on the wire."""
+        if v is not None and v.tzinfo is None:
+            return v.replace(tzinfo=datetime.timezone.utc)
+        return v
 
     @computed_field
     @property
@@ -254,18 +271,24 @@ class MessageCreateRequest(BaseModel):
 
     Supply exactly one content form: `envelope` for an encrypted chat, `channel_post` for a
     broadcast channel, or `encrypted_content` for a legacy unencrypted chat.
-    """
-    chat_id: uuid.UUID
 
-    encrypted_content: str | None = None
+    `client_message_id` makes a send idempotent: repeating the same (chat, sender, id) returns the
+    already-stored message instead of creating a second one.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    chat_id: uuid.UUID
+    client_message_id: uuid.UUID | None = None
+
+    encrypted_content: str | None = Field(None, max_length=64_000)
     envelope: MessageEnvelope | None = None
     channel_post: ChannelPost | None = None
 
-    reply_to_message_id: str | None = None
+    reply_to_message_id: str | None = Field(None, max_length=24)
     # Client-supplied and unverifiable — see ForwardOrigin. Stored as given so the receiving client
     # can attribute the copy; the server has no way to confirm it and does not pretend to.
     forwarded_from: ForwardOrigin | None = None
-    attachments: list[Attachment] | None = None
+    attachments: list[Attachment] | None = Field(default=None, max_length=10)
 
     @model_validator(mode="after")
     def check_exactly_one_content(self):
@@ -291,7 +314,9 @@ class MessageUpdateRequest(BaseModel):
     requires a greater index only when the edit reuses the *same* chain, and accepts any index from a
     new one. Sealing from a fresh chain is the normal case for a client that has reloaded.
     """
-    encrypted_content: str | None = None
+    model_config = ConfigDict(extra="forbid")
+
+    encrypted_content: str | None = Field(None, max_length=64_000)
     envelope: MessageEnvelope | None = None
 
     # Omitted (field absent from the request body) means "leave the existing attachments alone".
@@ -300,7 +325,7 @@ class MessageUpdateRequest(BaseModel):
     # `PATCH /profile/me` there is no NOT-NULL column an empty list would violate. `update_message`
     # distinguishes "omitted" from "explicitly supplied" via `"attachments" in
     # message_in.model_fields_set`, not by this field's default alone.
-    attachments: list[Attachment] | None = None
+    attachments: list[Attachment] | None = Field(default=None, max_length=10)
 
     @model_validator(mode="after")
     def check_exactly_one_content(self):

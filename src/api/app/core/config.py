@@ -51,6 +51,15 @@ class Settings(BaseSettings):
     # `None` by default, and leaving it unset is what keeps this dead code in production.
     RATE_LIMIT_TEST_BYPASS_TOKEN: str | None = None
 
+    # Origins allowed to open the WebSocket. Browsers always send Origin on a WS handshake, so a
+    # missing or foreign one is refused: cookie auth alone would let any site the user visits
+    # open an authenticated socket (cross-site WebSocket hijacking).
+    # Set from the environment as JSON, e.g. ALLOWED_WS_ORIGINS=["https://chat.example.com"].
+    ALLOWED_WS_ORIGINS: list[str] = ["http://localhost:4200", "http://127.0.0.1:4200"]
+
+    # Swagger/ReDoc/openapi.json are off unless explicitly enabled (dev only).
+    EXPOSE_API_DOCS: bool = False
+
     # EMAIL
     SMTP_HOST: str = "smtp.gmail.com"
     SMTP_PORT: int = 587

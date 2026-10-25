@@ -1,6 +1,6 @@
 import re
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.config import settings
 
@@ -12,6 +12,7 @@ class ProfileRequestSchema(BaseModel):
     changing only a bio had to resend the name it was not touching, and forgetting to would blank
     nothing but fail validation instead.
     """
+    model_config = ConfigDict(extra="forbid")
 
     full_name: str | None = Field(None, min_length=1, max_length=30)
     username: str | None = Field(None, min_length=6, max_length=50)

@@ -20,7 +20,7 @@ async def _send(client, chat_id, content="hello", attachments=None) -> dict:
     if attachments is not None:
         body["attachments"] = attachments
     r = await client.post("/messages/", json=body)
-    assert r.status_code == 200, r.text
+    assert r.status_code == 201, r.text
     return r.json()["data"]
 
 

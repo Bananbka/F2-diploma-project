@@ -1,6 +1,7 @@
+import { HttpErrorResponse } from '@angular/common/http';
 import { TestBed } from '@angular/core/testing';
 import { ed25519 } from '@noble/curves/ed25519.js';
-import { of } from 'rxjs';
+import { of, throwError } from 'rxjs';
 
 import { signChannelPost } from '../crypto/channel';
 import { openMessage, sealMessage } from '../crypto/envelope';
@@ -82,10 +83,10 @@ describe('MessageService', () => {
     beforeEach(() => {
         keyStore = jasmine.createSpyObj<KeyStoreService>(
             'KeyStoreService',
-            ['getReceiverChain', 'getChainSigningKey', 'ingestDistributions', 'ensureSenderChain'],
+            ['getReceiverChain', 'getChainSigningKey', 'ingestDistributions', 'ensureSenderChain', 'invalidateSenderChain'],
             ['currentIdentity']
         );
-        chatApi = jasmine.createSpyObj<ChatApiService>('ChatApiService', ['getMessages', 'editMessage']);
+        chatApi = jasmine.createSpyObj<ChatApiService>('ChatApiService', ['getMessages', 'editMessage', 'sendEnvelope']);
 
         cryptoApi = jasmine.createSpyObj<CryptoApiService>('CryptoApiService', ['getChatKeys', 'getKeysBatch']);
         cryptoApi.getChatKeys.and.returnValue(
@@ -424,6 +425,76 @@ describe('MessageService', () => {
         const second = await service.decrypt(CHAT, raw);
         expect(second.reactions).toEqual(fresh.reactions);
         expect(second.isPinned).toBeTrue();
+    });
+
+    describe('sendText idempotency key', () => {
+        const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+        beforeEach(() => {
+            keyStore.ensureSenderChain.and.callFake(() =>
+                Promise.resolve({
+                    senderKeyId: 'c0000000-0000-4000-8000-000000000003',
+                    chain: new SenderChain(crypto.getRandomValues(new Uint8Array(32))),
+                    chainSigningPrivate: crypto.getRandomValues(new Uint8Array(32)),
+                } as never)
+            );
+            Object.defineProperty(keyStore, 'currentIdentity', {
+                value: { userId: SENDER, deviceId: 'device-1' },
+            });
+        });
+
+        const staleError = () =>
+            new HttpErrorResponse({
+                status: 409,
+                error: { error_code: 'EPOCH_STALE', details: { current_epoch: 2 } },
+            });
+
+        it('sends a fresh UUIDv4 per logical message', async () => {
+            chatApi.sendEnvelope.and.returnValue(of(envelopeMessage('m1', 0)));
+
+            await service.sendText(CHAT, 'one');
+            await service.sendText(CHAT, 'two');
+
+            const first = chatApi.sendEnvelope.calls.argsFor(0)[5];
+            const second = chatApi.sendEnvelope.calls.argsFor(1)[5];
+            expect(first).toMatch(UUID_V4);
+            expect(second).toMatch(UUID_V4);
+            expect(first).not.toBe(second);
+        });
+
+        it('reuses the same id when EPOCH_STALE forces a re-encrypt and retry', async () => {
+            chatApi.sendEnvelope.and.returnValues(throwError(() => staleError()), of(envelopeMessage('m1', 0)));
+
+            await service.sendText(CHAT, 'hello');
+
+            expect(chatApi.sendEnvelope).toHaveBeenCalledTimes(2);
+            const [first, second] = [chatApi.sendEnvelope.calls.argsFor(0), chatApi.sendEnvelope.calls.argsFor(1)];
+            expect(first[5]).toMatch(UUID_V4);
+            expect(second[5]).toBe(first[5]);
+            // The retry is a genuine re-seal, not the old ciphertext resent.
+            expect(second[1]).not.toEqual(first[1]);
+        });
+
+        it('uses a caller-supplied id, for a manual retry', async () => {
+            chatApi.sendEnvelope.and.returnValue(of(envelopeMessage('m1', 0)));
+
+            await service.sendText(CHAT, 'hello', undefined, undefined, undefined, 'kept-id');
+
+            expect(chatApi.sendEnvelope.calls.mostRecent().args[5]).toBe('kept-id');
+        });
+
+        it('resolves with the stored message whether the server replied 200 or 201', async () => {
+            // HttpClient treats every 2xx alike and the unwrapped body is identical, so the replay
+            // (200) must come out exactly like the first store (201).
+            const stored = envelopeMessage('m1', 0);
+            chatApi.sendEnvelope.and.returnValue(of(stored));
+
+            const created = await service.sendText(CHAT, 'hello', undefined, undefined, undefined, 'same-id');
+            const replayed = await service.sendText(CHAT, 'hello', undefined, undefined, undefined, 'same-id');
+
+            expect(created._id).toBe('m1');
+            expect(replayed._id).toBe('m1');
+        });
     });
 
     describe('editText', () => {

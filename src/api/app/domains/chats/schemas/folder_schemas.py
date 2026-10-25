@@ -4,11 +4,15 @@ from pydantic import BaseModel, ConfigDict
 
 
 class FolderCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     title: str
     chat_ids: list[uuid.UUID] = []
 
 
 class FolderUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     title: str | None = None
     chat_ids: list[uuid.UUID] | None = None
 

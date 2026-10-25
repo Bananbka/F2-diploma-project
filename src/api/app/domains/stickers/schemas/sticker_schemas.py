@@ -6,6 +6,8 @@ from app.core.config import settings
 
 
 class StickerCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     image_url: str
     emoji: str = Field(..., max_length=8)
     position: int | None = None
@@ -40,10 +42,14 @@ class StickerResponse(BaseModel):
 
 
 class StickerPackCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     title: str = Field(..., min_length=1, max_length=100)
 
 
 class StickerPackUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     title: str | None = Field(None, min_length=1, max_length=100)
     is_public: bool | None = None
 

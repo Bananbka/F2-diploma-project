@@ -1,0 +1,243 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # Versions mirror src/docker-compose.yml. Postgres and Mongo are plain service containers.
+    # Redis and RustFS need command-line arguments / a readiness wait that service containers
+    # cannot express, so they are started with `docker run` in the first steps below.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: messenger
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci-postgres-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci -d messenger"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      mongodb:
+        image: mongo:8.0
+        env:
+          MONGO_INITDB_ROOT_USERNAME: ci
+          MONGO_INITDB_ROOT_PASSWORD: ci-mongo-password
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ping:1}).ok' || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    # These are read by app.core.config.Settings in BOTH the uvicorn process and the pytest
+    # process (the tests import `settings` directly, e.g. to plant OTPs in Redis and to build
+    # URLs), so SECRET_KEY, REDIS_URL and the bypass token must be identical for the two.
+    env:
+      DATABASE_URL: postgresql+asyncpg://ci:ci-postgres-password@localhost:5432/messenger
+      MONGO_URL: mongodb://ci:ci-mongo-password@localhost:27017/?authSource=admin
+      MONGO_DB_NAME: messenger_db
+      REDIS_URL: redis://:ci-redis-password@localhost:6379/0
+      MINIO_URL: http://localhost:9000
+      MINIO_PUBLIC_URL: http://localhost:4200/objects
+      MINIO_USER: ci-rustfs-access
+      MINIO_PASSWORD: ci-rustfs-secret-key
+      SECRET_KEY: ci-only-secret-key-not-used-anywhere-else
+      COOKIE_SECURE: "false"
+      RATE_LIMIT_ENABLED: "true"
+      RATE_LIMIT_TEST_BYPASS_TOKEN: ci-token
+      EXPOSE_API_DOCS: "false"
+      # ALLOWED_WS_ORIGINS intentionally unset: the default (http://localhost:4200) is what the
+      # WebSocket tests send as Origin. SMTP_* intentionally unset: no test needs a mail server
+      # (OTPs are planted in Redis by tests/crypto/otp_helpers.py).
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start Redis (password-protected, as in docker-compose.yml)
+        run: |
+          docker run -d --name redis -p 6379:6379 redis:8-alpine \
+            redis-server --requirepass ci-redis-password --maxmemory 512mb --maxmemory-policy noeviction
+          for i in $(seq 1 30); do
+            docker exec redis redis-cli -a ci-redis-password ping 2>/dev/null | grep -q PONG && exit 0
+            sleep 1
+          done
+          docker logs redis
+          exit 1
+
+      - name: Start RustFS (S3-compatible object store)
+        run: |
+          docker run -d --name rustfs -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY=ci-rustfs-access \
+            -e RUSTFS_SECRET_KEY=ci-rustfs-secret-key \
+            -e RUSTFS_ADDRESS=":9000" \
+            rustfs/rustfs:latest
+          # Any HTTP response (even 403) means the S3 endpoint is accepting connections.
+          for i in $(seq 1 60); do
+            curl -s -o /dev/null http://localhost:9000/ && exit 0
+            sleep 1
+          done
+          docker logs rustfs
+          exit 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: src/api/requirements.txt
+
+      - name: Install dependencies
+        working-directory: src/api
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff
+
+      # The codebase has ~600 pre-existing violations under ruff's default rule set, so the
+      # default is not enforced here (that would require reformatting the codebase). Only the
+      # rules that indicate real breakage are selected: E9 (syntax/IO errors), F63 (invalid
+      # comparisons/assertions), F7 (misplaced control flow), F82 (undefined names). Widen
+      # this list as violations get cleaned up.
+      - name: Lint (ruff, minimal rule set)
+        working-directory: src/api
+        run: ruff check --select E9,F63,F7,F82 .
+
+      # The application never calls create_all(); the schema exists only through migrations.
+      - name: Apply migrations
+        working-directory: src/api
+        run: alembic upgrade head
+
+      - name: Start API
+        working-directory: src/api
+        run: |
+          nohup uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-access-log > "$RUNNER_TEMP/uvicorn.log" 2>&1 &
+          # Docs are disabled, so / is a 404 -- any HTTP response means the server is up.
+          for i in $(seq 1 60); do
+            curl -s -o /dev/null http://localhost:8000/ && exit 0
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/uvicorn.log"
+          exit 1
+
+      - name: Run tests
+        working-directory: src/api
+        run: python -m pytest tests -q
+
+      - name: Show API log on failure
+        if: failure()
+        run: tail -n 200 "$RUNNER_TEMP/uvicorn.log" || true
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # `npm run interop` generates its Python vectors with `docker compose exec api python -c`.
+    # CI has no compose stack, so a `docker` shim (below) runs that same python in-process
+    # against src/api. Importing app.* builds Settings, hence the placeholder values.
+    env:
+      DATABASE_URL: postgresql+asyncpg://ci:ci@localhost:5432/ci
+      MONGO_URL: mongodb://ci:ci@localhost:27017
+      REDIS_URL: redis://localhost:6379/0
+      MINIO_URL: http://localhost:9000
+      MINIO_PUBLIC_URL: http://localhost:4200/objects
+      MINIO_USER: ci
+      MINIO_PASSWORD: ci
+      SECRET_KEY: ci-interop-placeholder
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: src/front/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: src/api/requirements.txt
+
+      - name: Install Python reference dependencies (for interop)
+        run: pip install -r src/api/requirements.txt
+
+      # NOT `npm ci`: the lockfile is generated on Windows and lacks the Linux optional binaries
+      # for esbuild / Angular CLI (see CLAUDE.md). postinstall also fetches emoji/fonts assets.
+      - name: Install dependencies
+        working-directory: src/front
+        run: npm install
+
+      - name: Lint
+        working-directory: src/front
+        run: npm run lint
+
+      # ubuntu-latest ships Google Chrome. karma.conf.cjs honours CHROME_BIN first and its
+      # launcher already passes --no-sandbox.
+      - name: Unit tests (Karma, headless)
+        working-directory: src/front
+        run: |
+          export CHROME_BIN="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium-browser || command -v chromium)"
+          echo "Using browser: $CHROME_BIN"
+          npm test -- --watch=false --browsers=ChromeHeadlessCI
+
+      - name: Client/reference interop check
+        working-directory: src/front
+        run: |
+          shim_dir="$RUNNER_TEMP/shim"
+          mkdir -p "$shim_dir"
+          cat > "$shim_dir/docker" <<'SHIM'
+          #!/usr/bin/env bash
+          # Invoked as: docker compose exec -T api python -c CODE
+          shift 4
+          cd "$GITHUB_WORKSPACE/src/api"
+          exec "$@"
+          SHIM
+          chmod +x "$shim_dir/docker"
+          PATH="$shim_dir:$PATH" npm run interop
+
+  # Informational only: findings here never fail the workflow (continue-on-error: true).
+  # Pre-existing advisories should not block merges; review the output periodically.
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: pip-audit (informational)
+        continue-on-error: true
+        run: |
+          pip install pip-audit
+          pip-audit -r src/api/requirements.txt
+
+      - name: npm audit (informational)
+        continue-on-error: true
+        working-directory: src/front
+        run: npm audit --audit-level=high

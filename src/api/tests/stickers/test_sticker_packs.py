@@ -372,7 +372,7 @@ async def test_sending_a_sticker_attachment_from_another_users_pack_succeeds():
                 ],
             },
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
     finally:
         await alice.aclose()
         await bob.aclose()
@@ -486,7 +486,7 @@ async def test_real_sticker_in_a_visible_pack_still_sends_successfully():
                 ],
             },
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
     finally:
         await alice.aclose()
         await bob.aclose()
@@ -541,7 +541,7 @@ async def test_sticker_attachment_can_be_added_on_edit():
         r = await bob.post(
             "/messages/", json={"chat_id": str(chat_id), "encrypted_content": "x"}
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
         message_id = r.json()["data"]["_id"]
 
         # Bob never uploaded this image and is not the pack owner.

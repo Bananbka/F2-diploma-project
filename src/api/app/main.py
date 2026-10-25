@@ -4,6 +4,7 @@ from fastapi.exceptions import RequestValidationError
 from contextlib import asynccontextmanager
 from loguru import logger
 
+from app.core.config import settings
 from app.core.logger import setup_logging
 from app.core.exceptions import (
     AppException,
@@ -45,7 +46,15 @@ async def lifespan(app: FastAPI):
     await close_mongo_connection()
 
 
-app = FastAPI(title="Mess&Gags API", lifespan=lifespan)
+_docs_enabled = settings.EXPOSE_API_DOCS
+
+app = FastAPI(
+    title="Mess&Gags API",
+    lifespan=lifespan,
+    docs_url="/docs" if _docs_enabled else None,
+    redoc_url="/redoc" if _docs_enabled else None,
+    openapi_url="/openapi.json" if _docs_enabled else None,
+)
 
 app.add_exception_handler(AppException, app_exception_handler)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)

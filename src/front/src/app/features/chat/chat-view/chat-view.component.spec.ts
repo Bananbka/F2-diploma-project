@@ -314,6 +314,7 @@ describe('ChatViewComponent', () => {
                 createdAt: '2024-01-01T00:00:00Z',
                 status: 'sending',
                 rekeyFailure: false,
+                clientMessageId: 'cmid-1',
             };
 
             const asMessage = fixture.componentInstance.pendingAsMessage(pending);

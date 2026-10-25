@@ -17,7 +17,9 @@ from app.core.security import (
     create_access_token,
     create_refresh_token,
     delete_token_cookies,
+    denylist_key,
     get_password_hash,
+    is_token_revoked,
     revocation_cutoff,
     set_token_cookie,
     verify_password,
@@ -279,7 +281,7 @@ async def logout(
 
         ttl = int(exp - time.time())
         if ttl > 0:
-            await redis.setex(f"blacklist:{token}", ttl, "revoked")
+            await redis.setex(denylist_key(token), ttl, "revoked")
 
     delete_token_cookies(response)
 
@@ -319,7 +321,7 @@ async def refresh(
             401, "NO_REFRESH_TOKEN", "There is no refresh token in cookies."
         )
 
-    if await redis.get(f"blacklist:{refresh_token}"):
+    if await is_token_revoked(redis, refresh_token):
         raise AppException(401, "TOKEN_REVOKED", "Session ended. Please log in again.")
 
     try:

@@ -13,7 +13,7 @@ from app.domains.chats.models import ChatParticipant
 from app.domains.chats.services.chat_services import update_participant_last_read
 from app.domains.messages.schemas.ws_schemas import WSEventType, WSMessageEnvelope
 from app.domains.messages.services import messages_service
-from app.domains.users.dependencies import get_ws_current_user
+from app.domains.users.dependencies import check_ws_origin, get_ws_current_user
 from app.domains.users.models import User
 from app.infrastructure.mongo import get_mongo_db
 from app.infrastructure.postgres import get_db
@@ -108,7 +108,7 @@ async def _may_act_on(db: AsyncSession, user_id, chat_id, websocket: WebSocket) 
     return False
 
 
-@ws_router.websocket("/ws")
+@ws_router.websocket("/ws", dependencies=[Depends(check_ws_origin)])
 async def websocket_endpoint(
     websocket: WebSocket,
     user: User = Depends(get_ws_current_user),

@@ -1,7 +1,7 @@
 import uuid
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # Mirrors UPLOAD_LIMIT/UPLOAD_WINDOW's style in file_routes.py: a round number picked to comfortably
 # cover one chat's worth of visible media (a busy chat screen full of images/voice notes) without
@@ -23,6 +23,7 @@ class BatchAttachmentRequest(BaseModel):
     plus a Mongo `find_one`. This batches the authorization and the Mongo lookup into one call
     each; the object-store reads are still one per key, since RustFS/S3 has no batched GET.
     """
+    model_config = ConfigDict(extra="forbid")
 
     chat_id: uuid.UUID
     object_keys: list[str] = Field(..., min_length=1, max_length=MAX_BATCH_ATTACHMENT_KEYS)
