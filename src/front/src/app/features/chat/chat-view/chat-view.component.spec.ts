@@ -5,6 +5,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
 
 import { Chat } from '../../../core/models/chat.model';
+import { ChatPanelStoreService } from '../../../core/services/chat-panel-store.service';
 import { ChatStoreService, ConversationItem, PendingMessage } from '../../../core/services/chat-store.service';
 import { DirectoryService } from '../../../core/services/directory.service';
 import { DecryptedMessage } from '../../../core/services/message.service';
@@ -239,6 +240,58 @@ describe('ChatViewComponent', () => {
             const host = create();
 
             expect(host.textContent).toContain('not encrypted');
+        });
+    });
+
+    describe('side panel entry points', () => {
+        let panel: ChatPanelStoreService;
+
+        beforeEach(() => {
+            localStorage.removeItem('chat-panel-open');
+            panel = TestBed.inject(ChatPanelStoreService);
+            panel.close();
+            panel.selectTab('stickers');
+        });
+
+        afterEach(() => localStorage.removeItem('chat-panel-open'));
+
+        function panelButton(host: HTMLElement): HTMLButtonElement {
+            return host.querySelector<HTMLButtonElement>('.head-actions button[aria-pressed]')!;
+        }
+
+        it('has a header toggle that opens and closes the panel and reflects its state', () => {
+            const host = create();
+            expect(panelButton(host).getAttribute('aria-pressed')).toBe('false');
+            expect(panelButton(host).getAttribute('aria-label')).toBe('Open side panel');
+
+            panelButton(host).click();
+            fixture.detectChanges();
+            expect(panel.open()).toBeTrue();
+            expect(panelButton(host).getAttribute('aria-pressed')).toBe('true');
+            expect(panelButton(host).getAttribute('aria-label')).toBe('Close side panel');
+
+            panelButton(host).click();
+            fixture.detectChanges();
+            expect(panel.open()).toBeFalse();
+        });
+
+        it('the header identity opens the Profile tab', () => {
+            const host = create();
+
+            host.querySelector<HTMLButtonElement>('.identity')?.click();
+
+            expect(panel.open()).toBeTrue();
+            expect(panel.tab()).toBe('profile');
+        });
+
+        it('the member-verification banner opens the Profile tab to review members', () => {
+            store.memberVerificationError.set('member set hash mismatch');
+            const host = create();
+
+            host.querySelector<HTMLButtonElement>('.alarm-button')?.click();
+
+            expect(panel.open()).toBeTrue();
+            expect(panel.tab()).toBe('profile');
         });
     });
 

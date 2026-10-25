@@ -21,9 +21,11 @@
             <lucide-icon [img]="arrowLeftIcon" />
         </button>
 
-        <a
+        <button
+            type="button"
             class="identity"
-            [routerLink]="['/chats', chat()!.id, 'info']"
+            aria-label="Open chat info"
+            (click)="openProfile()"
         >
             <app-avatar
                 [name]="title()"
@@ -43,7 +45,7 @@
                 </span>
                 <span class="identity-sub">{{ subtitle() }}</span>
             </span>
-        </a>
+        </button>
 
         <div class="head-actions">
             @if (peerId()) {
@@ -57,14 +59,17 @@
                     <lucide-icon [img]="shieldIcon" />
                 </button>
             }
-            <a
+            <button
+                type="button"
                 class="head-button"
-                aria-label="Chat info"
-                title="Chat info"
-                [routerLink]="['/chats', chat()!.id, 'info']"
+                [class.is-active]="panelOpen()"
+                [attr.aria-pressed]="panelOpen()"
+                [attr.aria-label]="panelOpen() ? 'Close side panel' : 'Open side panel'"
+                [title]="panelOpen() ? 'Close side panel' : 'Open side panel'"
+                (click)="togglePanel()"
             >
-                <lucide-icon [img]="infoIcon" />
-            </a>
+                <lucide-icon [img]="panelOpen() ? panelCloseIcon : panelIcon" />
+            </button>
         </div>
     </header>
 
@@ -86,11 +91,13 @@
                 </p>
             </div>
             <div class="alarm-actions">
-                <a
+                <button
+                    type="button"
                     class="alarm-button"
-                    [routerLink]="['/chats', chat()!.id, 'info']"
-                    >Review members</a
+                    (click)="openProfile()"
                 >
+                    Review members
+                </button>
                 <button
                     type="button"
                     class="alarm-dismiss"

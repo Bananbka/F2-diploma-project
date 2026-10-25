@@ -10,16 +10,17 @@ import {
     untracked,
     viewChild,
 } from '@angular/core';
-import { Router, RouterLink } from '@angular/router';
+import { Router } from '@angular/router';
 import {
     AlertTriangle,
     ArrowLeft,
     CheckCheck,
     Copy,
     Forward,
-    Info,
     LucideAngularModule,
     MessageSquare,
+    PanelRight,
+    PanelRightClose,
     Pencil,
     Pin,
     PinOff,
@@ -35,6 +36,7 @@ import {
 } from 'lucide-angular';
 
 import { Chat } from '../../../core/models/chat.model';
+import { ChatPanelStoreService } from '../../../core/services/chat-panel-store.service';
 import {
     ChatStoreService,
     ConversationItem,
@@ -66,7 +68,6 @@ const DRAG_SELECT_THRESHOLD_PX = 8;
 @Component({
     selector: 'app-chat-view',
     imports: [
-        RouterLink,
         LucideAngularModule,
         AvatarComponent,
         MessageBubbleComponent,
@@ -83,6 +84,7 @@ export class ChatViewComponent {
     private readonly directory = inject(DirectoryService);
     private readonly session = inject(SessionService);
     private readonly router = inject(Router);
+    private readonly panel = inject(ChatPanelStoreService);
     // Root-scoped, like the composer's own instance — injected here too so edit-start can refuse
     // to fire while a voice note is in flight, rather than threading a new output through the
     // composer just to observe its recording state.
@@ -205,7 +207,9 @@ export class ChatViewComponent {
     private atNewest = false;
 
     readonly arrowLeftIcon = ArrowLeft;
-    readonly infoIcon = Info;
+    readonly panelIcon = PanelRight;
+    readonly panelCloseIcon = PanelRightClose;
+    readonly panelOpen = this.panel.open;
     readonly shieldIcon = Shield;
     readonly shieldAlertIcon = ShieldAlert;
     readonly shieldOffIcon = ShieldOff;
@@ -638,6 +642,18 @@ export class ChatViewComponent {
 
     async unpinFromPanel(messageId: string): Promise<void> {
         await this.store.unpinMessage(messageId);
+    }
+
+    togglePanel(): void {
+        this.panel.toggle();
+    }
+
+    /**
+     * The chat-info entry points (header identity, member-verification banner) open the side panel
+     * on its Profile tab. The standalone `/chats/:id/info` route still exists for deep links.
+     */
+    openProfile(): void {
+        this.panel.show('profile');
     }
 
     async openSafetyNumber(): Promise<void> {

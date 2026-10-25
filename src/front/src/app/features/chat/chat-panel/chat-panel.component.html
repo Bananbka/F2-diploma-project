@@ -1,0 +1,132 @@
+@if (overlay()) {
+    <div
+        class="backdrop"
+        aria-hidden="true"
+        (click)="close()"
+    ></div>
+}
+
+<aside
+    class="panel"
+    aria-label="Conversation panel"
+>
+    <div class="bar">
+        <div
+            class="tabs"
+            role="tablist"
+            aria-label="Conversation panel sections"
+        >
+            @for (view of tabs; track view.id) {
+                <button
+                    type="button"
+                    role="tab"
+                    class="tab"
+                    [id]="'chat-panel-tab-' + view.id"
+                    [class.is-active]="tab() === view.id"
+                    [attr.aria-selected]="tab() === view.id"
+                    [attr.aria-controls]="'chat-panel-body-' + view.id"
+                    [attr.tabindex]="tab() === view.id ? 0 : -1"
+                    (click)="selectTab(view.id)"
+                    (keydown)="onTabKeydown($event)"
+                >
+                    <lucide-icon [img]="view.icon" />
+                    {{ view.label }}
+                </button>
+            }
+        </div>
+        <button
+            type="button"
+            class="close"
+            aria-label="Close panel"
+            title="Close panel"
+            (click)="close()"
+        >
+            <lucide-icon [img]="closeIcon" />
+        </button>
+    </div>
+
+    <div
+        id="chat-panel-body-profile"
+        class="body"
+        role="tabpanel"
+        aria-labelledby="chat-panel-tab-profile"
+        [hidden]="tab() !== 'profile'"
+    >
+        @if (visited().has('profile')) {
+            <app-chat-info
+                [chatId]="chatId()"
+                [embedded]="true"
+            />
+        }
+    </div>
+
+    <div
+        id="chat-panel-body-stickers"
+        class="body is-flush"
+        role="tabpanel"
+        aria-labelledby="chat-panel-tab-stickers"
+        [hidden]="tab() !== 'stickers'"
+    >
+        @if (visited().has('stickers')) {
+            @if (unavailableReason(); as reason) {
+                <p
+                    class="note"
+                    role="status"
+                >
+                    {{ reason }}
+                </p>
+            } @else if (refused()) {
+                <p
+                    class="note"
+                    role="status"
+                >
+                    The composer could not accept that right now.
+                </p>
+            }
+            <fieldset
+                class="locked"
+                [disabled]="unavailableReason() !== null"
+            >
+                <app-sticker-picker
+                    [embedded]="true"
+                    (stickerPicked)="onStickerPicked($event)"
+                />
+            </fieldset>
+        }
+    </div>
+
+    <div
+        id="chat-panel-body-emoji"
+        class="body is-flush"
+        role="tabpanel"
+        aria-labelledby="chat-panel-tab-emoji"
+        [hidden]="tab() !== 'emoji'"
+    >
+        @if (visited().has('emoji')) {
+            @if (unavailableReason(); as reason) {
+                <p
+                    class="note"
+                    role="status"
+                >
+                    {{ reason }}
+                </p>
+            } @else if (refused()) {
+                <p
+                    class="note"
+                    role="status"
+                >
+                    The composer could not accept that right now.
+                </p>
+            }
+            <fieldset
+                class="locked"
+                [disabled]="unavailableReason() !== null"
+            >
+                <app-emoji-picker
+                    [embedded]="true"
+                    (pick)="onEmojiPicked($event)"
+                />
+            </fieldset>
+        }
+    </div>
+</aside>

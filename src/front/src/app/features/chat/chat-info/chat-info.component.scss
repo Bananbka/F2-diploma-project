@@ -19,6 +19,23 @@
     text-align: center;
 }
 
+/* In the side panel the host is a column inside a scrolling tab panel, not a full screen. */
+:host(.is-embedded) {
+    min-height: 0;
+    background: none;
+
+    .body {
+        max-width: none;
+        padding: 1rem;
+    }
+}
+
+.profile-username {
+    margin: 0.125rem 0 0;
+    color: var(--muted-foreground);
+    font-size: 0.8125rem;
+}
+
 .profile-name {
     margin-top: 0.75rem;
     font-size: 1.25rem;

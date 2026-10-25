@@ -21,6 +21,7 @@ import {
     RefreshCw,
     Send,
     ShieldAlert,
+    Smile,
     Sticker,
     Trash2,
     UserX,
@@ -32,8 +33,10 @@ import { computeWaveformPeaks } from '../../../core/audio/waveform';
 import { encryptAttachment } from '../../../core/crypto/attachment-crypto';
 import { AttachmentKind, MessageAttachment } from '../../../core/models/crypto.model';
 import { Sticker as StickerModel } from '../../../core/models/sticker.model';
+import { ChatPanelStoreService, ComposerBridge } from '../../../core/services/chat-panel-store.service';
 import { ProfileApiService } from '../../../core/services/profile-api.service';
 import { VoiceRecorderService } from '../../../core/services/voice-recorder.service';
+import { EmojiPickerComponent } from '../../../shared/ui/emoji-picker/emoji-picker.component';
 import { StickerPickerComponent } from '../stickers/sticker-picker/sticker-picker.component';
 
 /** What the composer hands over. Attachments travel with the message, not separately. */
@@ -67,7 +70,7 @@ function inferKind(mimeType: string): AttachmentKind {
 
 @Component({
     selector: 'app-composer',
-    imports: [LucideAngularModule, StickerPickerComponent],
+    imports: [LucideAngularModule, StickerPickerComponent, EmojiPickerComponent],
     templateUrl: './composer.component.html',
     styleUrl: './composer.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
@@ -76,8 +79,10 @@ export class ComposerComponent {
     private readonly profileApi = inject(ProfileApiService);
     private readonly destroyRef = inject(DestroyRef);
     private readonly voiceRecorder = inject(VoiceRecorderService);
+    private readonly panel = inject(ChatPanelStoreService);
 
     readonly stickerPickerOpen = signal(false);
+    readonly emojiPickerOpen = signal(false);
 
     /** False while the member set cannot be verified — sending is refused, not merely discouraged. */
     readonly canSend = input(true);
@@ -125,6 +130,33 @@ export class ComposerComponent {
         () => this.voiceRecorder.recordingState() === 'recording' || this.confirmingRecording()
     );
 
+    /**
+     * Why text/stickers cannot be put into the composer right now, or null when they can.
+     *
+     * The single source for the emoji and sticker triggers here and for the side panel (through
+     * the bridge), so the two surfaces cannot drift apart: a guard added once applies to both.
+     */
+    readonly unavailableReason = computed<string | null>(() => {
+        if (!this.canSend()) {
+            return this.readOnly()
+                ? (this.blockedReason() ?? 'This conversation is read-only.')
+                : (this.blockedReason() ?? 'Sending is blocked.');
+        }
+        if (this.editing()) {
+            return 'Finish or cancel editing the message first.';
+        }
+        if (this.showRecordingRow()) {
+            return 'Finish the voice message first.';
+        }
+        return null;
+    });
+
+    private readonly bridge: ComposerBridge = {
+        unavailableReason: this.unavailableReason,
+        insertEmoji: (emoji) => this.insertEmoji(emoji),
+        sendSticker: (sticker) => this.sendSticker(sticker),
+    };
+
     private readonly area = viewChild<ElementRef<HTMLTextAreaElement>>('area');
     private readonly fileInput = viewChild<ElementRef<HTMLInputElement>>('fileInput');
     private typingActive = false;
@@ -149,6 +181,9 @@ export class ComposerComponent {
                 this.staged.set(attachments.map((file) => ({ file, previewUrl: null })));
             });
         });
+
+        this.panel.registerComposer(this.bridge);
+        this.destroyRef.onDestroy(() => this.panel.unregisterComposer(this.bridge));
 
         this.destroyRef.onDestroy(() => this.revokeStaged(this.staged()));
         // The recorder is a root-scoped service, so it outlives this component — if the chat is
@@ -179,6 +214,7 @@ export class ComposerComponent {
     readonly filmIcon = Film;
     readonly closeIcon = X;
     readonly stickerIcon = Sticker;
+    readonly smileIcon = Smile;
     readonly micIcon = Mic;
     readonly trashIcon = Trash2;
     readonly checkIcon = Check;
@@ -330,11 +366,16 @@ export class ComposerComponent {
      */
     onStickerPicked(sticker: StickerModel): void {
         this.stickerPickerOpen.set(false);
+        this.sendSticker(sticker);
+    }
+
+    /** Shared by the tray here and the side panel. Returns whether the sticker was actually sent. */
+    sendSticker(sticker: StickerModel): boolean {
         // A sticker carries no `decryptionKey` by design, and `editMessage` rejects attachments
         // without one. The trigger button is disabled while editing, but guard here too: nothing
         // should route a sticker into an edit and lose the user's in-progress draft.
-        if (!this.canSend() || this.editing()) {
-            return;
+        if (this.unavailableReason() !== null) {
+            return false;
         }
 
         this.submitted.emit({
@@ -349,6 +390,53 @@ export class ComposerComponent {
                 },
             ],
         });
+        return true;
+    }
+
+    toggleEmojiPicker(): void {
+        if (this.unavailableReason() !== null) {
+            return;
+        }
+        this.emojiPickerOpen.update((open) => !open);
+    }
+
+    /** The popover's pick: insert, keep the popover open for several in a row, and refocus the box. */
+    onEmojiPicked(emoji: string): void {
+        this.insertEmoji(emoji);
+    }
+
+    /**
+     * Insert an emoji at the caret, replacing any selection, and put the caret after it.
+     *
+     * The textarea keeps its `selectionStart`/`selectionEnd` while blurred, so clicking the picker
+     * (which takes focus) does not lose the position. The text signal is the source of truth and
+     * the element is written to as well, because the `[value]` binding only re-applies when the
+     * signal changes and would otherwise leave the caret at the end.
+     */
+    insertEmoji(emoji: string): boolean {
+        if (this.unavailableReason() !== null || !emoji) {
+            return false;
+        }
+
+        const element = this.area()?.nativeElement;
+        const current = this.text();
+        const length = current.length;
+        const start = Math.min(element?.selectionStart ?? length, length);
+        const end = Math.min(Math.max(element?.selectionEnd ?? start, start), length);
+
+        const next = current.slice(0, start) + emoji + current.slice(end);
+        const caret = start + emoji.length;
+        this.text.set(next);
+
+        if (element) {
+            element.value = next;
+            element.setSelectionRange(caret, caret);
+            element.focus();
+        }
+
+        this.autoGrow();
+        this.pingTyping();
+        return true;
     }
 
     /** Tapping the mic button — morphs the composer row into the recording UI on success. */

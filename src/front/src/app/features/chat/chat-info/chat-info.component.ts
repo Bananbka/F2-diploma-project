@@ -60,6 +60,7 @@ interface MemberRow {
     templateUrl: './chat-info.component.html',
     styleUrl: './chat-info.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
+    host: { '[class.is-embedded]': 'embedded()' },
 })
 export class ChatInfoComponent {
     private readonly chatApi = inject(ChatApiService);
@@ -71,6 +72,8 @@ export class ChatInfoComponent {
     private readonly router = inject(Router);
 
     readonly chatId = input.required<string>();
+    /** Shown inside the conversation's side panel (Profile tab) instead of as its own screen. */
+    readonly embedded = input(false);
 
     readonly chat = signal<Chat | null>(null);
     readonly roster = signal<ChatRoster | null>(null);
@@ -205,6 +208,11 @@ export class ChatInfoComponent {
     });
 
     readonly peerId = computed(() => this.members().find((m) => !m.isMe)?.userId ?? null);
+    /** The counterpart's handle in a private chat. Never shown for a deleted account. */
+    readonly peerUsername = computed(() => {
+        const peer = this.isPrivate() ? this.members().find((m) => !m.isMe) : undefined;
+        return peer && !peer.deleted ? peer.username : null;
+    });
     readonly membersWithoutKeys = computed(() => this.members().filter((m) => !m.hasKeys && !m.deleted).length);
     readonly safetyPreview = computed(() => safetyNumberGroups(this.safetyNumber() ?? '').slice(0, 3));
 
@@ -299,6 +307,12 @@ export class ChatInfoComponent {
     private async load(chatId: string): Promise<void> {
         this.loading.set(true);
         this.error.set(null);
+        // The panel keeps one instance across chat switches, so nothing from the previous chat may
+        // survive into this one (a stale roster would be verified against the wrong epoch).
+        this.chat.set(null);
+        this.roster.set(null);
+        this.safetyNumber.set(null);
+        this.inviteLinks.set([]);
 
         try {
             // `GET /chats/{id}` is the only endpoint that populates participants — the list endpoint

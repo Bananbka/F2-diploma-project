@@ -2,10 +2,12 @@ import { ChangeDetectionStrategy, Component, computed, DestroyRef, inject, signa
 import { Router, RouterOutlet } from '@angular/router';
 import { LucideAngularModule, WifiOff } from 'lucide-angular';
 
+import { ChatPanelStoreService } from '../../../core/services/chat-panel-store.service';
 import { ChatStoreService } from '../../../core/services/chat-store.service';
 import { DirectoryService } from '../../../core/services/directory.service';
 import { SessionService } from '../../../core/services/session.service';
 import { ResizablePanelComponent } from '../../../shared/ui/resizable-panel/resizable-panel.component';
+import { ChatPanelComponent } from '../chat-panel/chat-panel.component';
 import { ChatSidebarComponent } from '../chat-sidebar/chat-sidebar.component';
 import { ChatFilter, NavigationRailComponent } from '../navigation-rail/navigation-rail.component';
 
@@ -20,6 +22,7 @@ const NARROW_QUERY = '(width < 48rem)';
         NavigationRailComponent,
         ChatSidebarComponent,
         ResizablePanelComponent,
+        ChatPanelComponent,
     ],
     templateUrl: './chat-shell.component.html',
     styleUrl: './chat-shell.component.scss',
@@ -32,7 +35,10 @@ export class ChatShellComponent {
     private readonly router = inject(Router);
     private readonly destroyRef = inject(DestroyRef);
 
+    private readonly panel = inject(ChatPanelStoreService);
+
     readonly filter = signal<ChatFilter>('all');
+    readonly panelOpen = this.panel.open;
 
     readonly isOnline = this.store.isOnline;
     readonly activeChatId = this.store.activeChatId;

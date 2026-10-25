@@ -1,6 +1,6 @@
 <div
     class="picker"
-    role="dialog"
+    [attr.role]="embedded() ? 'group' : 'dialog'"
     aria-label="Choose an emoji"
 >
     <div

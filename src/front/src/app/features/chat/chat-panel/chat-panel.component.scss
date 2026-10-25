@@ -1,0 +1,168 @@
+@use 'ui';
+
+:host {
+    display: flex;
+    flex-shrink: 0;
+    width: 22rem;
+    min-height: 0;
+    background: var(--card);
+    border-left: 1px solid var(--border);
+}
+
+.panel {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+}
+
+.bar {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem 0.75rem 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.tabs {
+    display: flex;
+    flex: 1;
+    gap: 0.25rem;
+    min-width: 0;
+}
+
+.tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    margin-bottom: -1px;
+    padding: 0.5rem 0.625rem;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--muted-foreground);
+    font-size: 0.8125rem;
+    font-weight: 500;
+    cursor: pointer;
+
+    lucide-icon {
+        width: 0.9375rem;
+        height: 0.9375rem;
+    }
+
+    &:hover {
+        color: var(--foreground);
+    }
+
+    &:focus-visible {
+        outline: 2px solid var(--primary);
+        outline-offset: -2px;
+        border-radius: var(--radius-lg);
+    }
+
+    &.is-active {
+        border-bottom-color: var(--primary);
+        color: var(--foreground);
+    }
+}
+
+.close {
+    @include ui.icon-button(2rem);
+
+    flex-shrink: 0;
+    margin-bottom: 0.375rem;
+
+    lucide-icon {
+        width: 1rem;
+        height: 1rem;
+    }
+}
+
+.body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+
+    &.is-flush {
+        display: flex;
+        flex-direction: column;
+        padding: 0;
+    }
+
+    &[hidden] {
+        display: none;
+    }
+}
+
+.note {
+    margin: 0.75rem 0.75rem 0;
+    padding: 0.5rem 0.75rem;
+    background: rgb(37 37 45 / 40%);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+}
+
+.locked {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    overflow-y: auto;
+    border: none;
+
+    &:disabled {
+        opacity: 0.45;
+    }
+}
+
+.backdrop {
+    display: none;
+}
+
+/* Slide-over: covers the conversation instead of squeezing it. */
+:host(.is-overlay) {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    width: auto;
+    background: none;
+    border-left: none;
+
+    .backdrop {
+        position: absolute;
+        inset: 0;
+        display: block;
+        background: rgb(0 0 0 / 55%);
+    }
+
+    .panel {
+        position: absolute;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        flex: none;
+        width: min(24rem, 100%);
+        background: var(--card);
+        border-left: 1px solid var(--border);
+        box-shadow: -8px 0 24px rgb(0 0 0 / 40%);
+        animation: slide-in 0.18s ease-out;
+    }
+}
+
+@keyframes slide-in {
+    from {
+        transform: translateX(1.5rem);
+        opacity: 0;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    :host(.is-overlay) .panel {
+        animation: none;
+    }
+}
