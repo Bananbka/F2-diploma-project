@@ -115,6 +115,15 @@ export class KeyStoreService {
         return stored;
     }
 
+    /**
+     * Forget this browser's device id. Called after the account is deleted: the server retains the
+     * deleted account's public keys under that id, so a later account created in this browser must
+     * mint its own rather than collide with them.
+     */
+    forgetDeviceId(): void {
+        localStorage.removeItem(DEVICE_ID_KEY);
+    }
+
     get currentIdentity(): UnlockedIdentity | null {
         return this.identity;
     }
@@ -451,6 +460,12 @@ export class KeyStoreService {
 
         const grants: GrantUpload[] = [];
         for (const member of roster.members) {
+            // Defensive: the roster never includes a deleted account, but nothing may be wrapped to
+            // the retained key of one. Skipped after verification, so the commitment still covers it.
+            if (member.is_active === false) {
+                continue;
+            }
+
             // Prefer the signed prekey: it gives forward secrecy for the grant once it rotates.
             // The recipient must hold the matching private half — `ingestDistributions` tries
             // `prekeyPrivate` first and falls back to `identityPrivate`, so either publishing state

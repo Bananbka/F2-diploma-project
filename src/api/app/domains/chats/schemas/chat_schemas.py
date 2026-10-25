@@ -77,6 +77,10 @@ class ChatResponse(BaseModel):
     # explicitly by the single-chat `get_chat` route — it is not a property of the chat itself.
     muted_until: datetime | None = None
 
+    # Private chats only: the other party deleted their account. The history stays readable but
+    # sending is refused with 409 PEER_DELETED.
+    peer_is_deleted: bool = False
+
     created_at: datetime
     updated_at: datetime | None = None
 

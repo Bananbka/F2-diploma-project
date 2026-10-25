@@ -45,6 +45,11 @@
     user-select: none;
 }
 
+.is-deleted {
+    background: var(--muted);
+    color: var(--muted-foreground);
+}
+
 .hash {
     width: 0.875rem;
     height: 0.875rem;

@@ -22,6 +22,10 @@ import { WebSocketService } from './websocket.service';
 
 const PAGE_SIZE = 50;
 
+/** Shown in the composer when the other party of a private chat has deleted their account. */
+export const PEER_DELETED_NOTICE =
+    'The other person deleted their account. This conversation is read-only: you can still read and verify the history, but you cannot send new messages.';
+
 /**
  * Backoff for pulling grants after a `no_key`, in milliseconds.
  *
@@ -181,12 +185,30 @@ export class ChatStoreService {
      * Sending is impossible while the member set is in doubt, or while there is no key to seal with.
      * Refusing in both cases is the whole point.
      */
-    readonly canSend = computed(() => this.memberVerificationError() === null && this.encryptionUnavailable() === null);
+    readonly canSend = computed(
+        () => this.memberVerificationError() === null && !this.peerDeleted() && this.encryptionUnavailable() === null
+    );
+
+    /**
+     * The open chat is a private chat whose other party deleted their account.
+     *
+     * A third read-only reason alongside the other two, and deliberately not collapsed into them:
+     * nothing is wrong with anyone's keys and no limit was hit. The history is intact and still
+     * verifies; there is simply no one left to send to. Driven by `Chat.peer_is_deleted`, the
+     * `chat_updated` push, and a 409 `PEER_DELETED` from a send that raced the deletion.
+     */
+    readonly peerDeleted = computed(() => {
+        const chat = this.activeChat();
+        return chat?.chat_type === 'private' && chat.peer_is_deleted === true;
+    });
 
     /** Why sending is blocked, if it is. Ordered by severity. */
     readonly sendBlockedReason = computed<string | null>(() => {
         if (this.memberVerificationError()) {
             return 'Blocked: the member set for this chat could not be verified.';
+        }
+        if (this.peerDeleted()) {
+            return PEER_DELETED_NOTICE;
         }
         if (this.encryptionUnavailable()) {
             return this.encryptionUnavailable();
@@ -325,8 +347,17 @@ export class ChatStoreService {
                 case 'user_offline':
                     this.setPresence(event.user_id, false);
                     break;
-                case 'chat_created':
                 case 'chat_updated':
+                    if (event.payload?.['peer_deleted'] === true) {
+                        // The peer's account is gone. Patched in place rather than refetched: the
+                        // composer must go read-only at once, and a refetch is only a round trip
+                        // away from a send that would be refused.
+                        this.onPeerDeleted(event.chat_id, event.payload['user_id']);
+                    } else {
+                        void this.loadChats();
+                    }
+                    break;
+                case 'chat_created':
                 case 'participants_added':
                 case 'participants_removed':
                     void this.loadChats();
@@ -336,6 +367,22 @@ export class ChatStoreService {
                     break;
             }
         });
+    }
+
+    /** Flip a private chat to read-only and remember the peer as deleted. */
+    private onPeerDeleted(chatId: string | null, userId: unknown): void {
+        if (chatId) {
+            this.markPeerDeleted(chatId);
+        }
+        if (typeof userId === 'string') {
+            this.directory.markDeleted(userId);
+        }
+    }
+
+    private markPeerDeleted(chatId: string): void {
+        this.chats.update((list) =>
+            list.map((chat) => (chat.id === chatId ? { ...chat, peer_is_deleted: true } : chat))
+        );
     }
 
     /**
@@ -416,7 +463,12 @@ export class ChatStoreService {
             }
             const peer = chat.participants.find((p) => p.user_id !== me);
             if (peer) {
-                this.directory.rememberPrivateChatPeer(peer.user_id, chat.title, chat.avatar_url);
+                this.directory.rememberPrivateChatPeer(
+                    peer.user_id,
+                    chat.title,
+                    chat.avatar_url,
+                    chat.peer_is_deleted === true
+                );
             }
         }
     }
@@ -473,6 +525,10 @@ export class ChatStoreService {
                 knownKeys
             );
             raw.forEach((message) => this.rawMessages.set(message._id, message));
+
+            // Authors who have since left (or deleted their account) are no longer participants, so
+            // the roster lookup in `hydrateChat` never named them.
+            await this.directory.resolveMissing(decrypted.map((m) => m.senderId));
 
             this.messages.set(decrypted);
             this.hasMoreHistory.set(decrypted.length === PAGE_SIZE);
@@ -590,6 +646,7 @@ export class ChatStoreService {
         try {
             const { raw, messages: older } = await this.messages_.loadMessages(chatId, PAGE_SIZE, oldest.id);
             raw.forEach((message) => this.rawMessages.set(message._id, message));
+            await this.directory.resolveMissing(older.map((m) => m.senderId));
 
             this.messages.update((current) => [...older, ...current]);
             this.hasMoreHistory.set(older.length === PAGE_SIZE);
@@ -614,7 +671,7 @@ export class ChatStoreService {
     ): Promise<void> {
         const chatId = this.activeChatId();
         const chat = this.activeChat();
-        if (!chatId || !chat || (!text.trim() && !attachments?.length)) {
+        if (!chatId || !chat || (!text.trim() && !attachments?.length) || this.peerDeleted()) {
             return;
         }
 
@@ -637,14 +694,7 @@ export class ChatStoreService {
             const sent =
                 chat.chat_type === 'channel'
                     ? await this.messages_.sendChannelPost(chatId, text, clientMessageId)
-                    : await this.messages_.sendText(
-                          chatId,
-                          text,
-                          replyTo,
-                          attachments,
-                          undefined,
-                          clientMessageId
-                      );
+                    : await this.messages_.sendText(chatId, text, replyTo, attachments, undefined, clientMessageId);
 
             this.pending.update((p) => p.filter((item) => item.localId !== localId));
             this.rawMessages.set(sent._id, sent);
@@ -654,6 +704,14 @@ export class ChatStoreService {
             this.bumpChatPreview(chatId, sent);
             this.appendDecrypted(this.messages_.recordOutgoing(sent, text, attachments));
         } catch (error) {
+            if (this.isPeerDeleted(error)) {
+                // Not a failed send to retry: the conversation has become read-only. The draft is
+                // dropped from the pending list and the composer's banner explains why.
+                this.pending.update((p) => p.filter((item) => item.localId !== localId));
+                this.markPeerDeleted(chatId);
+                return;
+            }
+
             if (this.isMemberVerificationFailure(error)) {
                 // Blocking, not retryable: we refused to hand keys to a roster we cannot verify.
                 this.memberVerificationError.set((error as Error).message);
@@ -1333,6 +1391,10 @@ export class ChatStoreService {
      */
     private isMemberVerificationFailure(error: unknown): boolean {
         return isRosterVerificationFailure(error);
+    }
+
+    private isPeerDeleted(error: unknown): boolean {
+        return error instanceof HttpErrorResponse && error.status === 409 && error.error?.error_code === 'PEER_DELETED';
     }
 
     private isIdempotencyKeyReused(error: unknown): boolean {

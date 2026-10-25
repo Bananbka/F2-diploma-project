@@ -51,6 +51,7 @@ import {
     ContextMenuItem,
     MenuAnchor,
 } from '../../../shared/ui/context-menu/context-menu.component';
+import { DELETED_USER_LABEL } from '../../../shared/utils/display';
 import { ComposedMessage, ComposerComponent } from '../composer/composer.component';
 import { MessageBubbleComponent } from '../message-bubble/message-bubble.component';
 
@@ -97,6 +98,7 @@ export class ChatViewComponent {
     readonly memberVerificationError = this.store.memberVerificationError;
     readonly encryptionUnavailable = this.store.encryptionUnavailable;
     readonly sendBlockedReason = this.store.sendBlockedReason;
+    readonly peerDeleted = this.store.peerDeleted;
     readonly pinnedMessages = this.store.pinnedMessages;
     readonly canPinMessages = this.store.canPinMessages;
 
@@ -127,7 +129,10 @@ export class ChatViewComponent {
      */
     readonly forwardTargets = computed(() => {
         const current = this.chatId();
-        return [...this.store.chats()].sort((a, b) => Number(b.id === current) - Number(a.id === current));
+        // A read-only chat (deleted peer) is not a target: the server would refuse every copy.
+        return [...this.store.chats()]
+            .filter((chat) => !(chat.chat_type === 'private' && chat.peer_is_deleted))
+            .sort((a, b) => Number(b.id === current) - Number(a.id === current));
     });
 
     isCurrentChat(chat: Chat): boolean {
@@ -141,6 +146,9 @@ export class ChatViewComponent {
         const chat = this.chat();
         if (!chat) {
             return '';
+        }
+        if (chat.chat_type === 'private' && chat.peer_is_deleted) {
+            return DELETED_USER_LABEL;
         }
         return chat.title ?? (chat.chat_type === 'channel' ? 'Channel' : 'Untitled chat');
     });
@@ -157,6 +165,10 @@ export class ChatViewComponent {
         }
         if (typing.length > 1) {
             return `${typing.length} people are typing…`;
+        }
+
+        if (chat.chat_type === 'private' && chat.peer_is_deleted) {
+            return 'Account deleted · read-only';
         }
 
         if (chat.chat_type === 'private') {
@@ -490,6 +502,9 @@ export class ChatViewComponent {
     }
 
     titleOfChat(chat: Chat): string {
+        if (chat.chat_type === 'private' && chat.peer_is_deleted) {
+            return DELETED_USER_LABEL;
+        }
         return chat.title ?? (chat.chat_type === 'channel' ? 'Channel' : 'Untitled chat');
     }
 

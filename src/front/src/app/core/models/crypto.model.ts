@@ -15,6 +15,11 @@ export interface PublicKey {
     identity_key_signature: string;
     signed_prekey_public: string | null;
     signed_prekey_signature: string | null;
+    /**
+     * False for the retained keys of a deleted account, kept only so old messages stay verifiable.
+     * Nothing may ever be wrapped to a key with `is_active === false`. Absent means active.
+     */
+    is_active?: boolean;
 }
 
 export interface OwnIdentity extends PublicKey {
@@ -38,6 +43,8 @@ export interface RosterEntry {
     signed_prekey_public: string | null;
     /** Ed25519 over DS_PREKEY_BIND || user_id || device_id || signed_prekey_public. */
     signed_prekey_signature: string | null;
+    /** Defensive: the roster never lists deleted accounts, but a wrap must still refuse one. */
+    is_active?: boolean;
 }
 
 export interface ChatRoster {

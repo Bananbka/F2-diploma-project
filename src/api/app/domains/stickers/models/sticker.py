@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import ForeignKey, Integer, String, Text
+from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -26,3 +26,7 @@ class Sticker(Base):
     position: Mapped[int] = mapped_column(Integer, nullable=False)
 
     pack = relationship("StickerPack", back_populates="stickers")
+
+    __table_args__ = (
+        UniqueConstraint("pack_id", "position", name="uq_stickers_pack_position"),
+    )

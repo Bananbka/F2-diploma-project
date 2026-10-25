@@ -37,6 +37,7 @@ import { CryptoApiService } from '../../../core/services/crypto-api.service';
 import { DirectoryService } from '../../../core/services/directory.service';
 import { SessionService } from '../../../core/services/session.service';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
+import { DELETED_USER_LABEL } from '../../../shared/utils/display';
 import { safetyNumberGroups } from '../../../shared/utils/display';
 
 interface MemberRow {
@@ -49,6 +50,8 @@ interface MemberRow {
     isMe: boolean;
     /** True when the roster publishes an identity key for this member's device. */
     hasKeys: boolean;
+    /** The account was deleted; its retained keys verify old messages but receive nothing. */
+    deleted: boolean;
 }
 
 @Component({
@@ -156,6 +159,10 @@ export class ChatInfoComponent {
             return '';
         }
 
+        if (chat.chat_type === 'private' && chat.peer_is_deleted) {
+            return DELETED_USER_LABEL;
+        }
+
         if (chat.chat_type === 'private') {
             // The chat list *does* carry the resolved counterpart name, so prefer it and fall back
             // to the directory only when this screen was opened without the list loaded.
@@ -192,12 +199,13 @@ export class ChatInfoComponent {
                 role: participant.role,
                 isMe: participant.user_id === me,
                 hasKeys: keyed.has(participant.user_id),
+                deleted: identity.deleted === true || (chat.peer_is_deleted === true && participant.user_id !== me),
             };
         });
     });
 
     readonly peerId = computed(() => this.members().find((m) => !m.isMe)?.userId ?? null);
-    readonly membersWithoutKeys = computed(() => this.members().filter((m) => !m.hasKeys).length);
+    readonly membersWithoutKeys = computed(() => this.members().filter((m) => !m.hasKeys && !m.deleted).length);
     readonly safetyPreview = computed(() => safetyNumberGroups(this.safetyNumber() ?? '').slice(0, 3));
 
     /** Only an owner or admin may change membership; the API rejects a member outright. */

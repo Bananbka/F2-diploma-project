@@ -14,6 +14,7 @@ import { SessionService } from './session.service';
 import { WebSocketService } from './websocket.service';
 
 const CHAT = 'a0000000-0000-4000-8000-000000000001';
+const PEER = 'b0000000-0000-4000-8000-000000000002';
 
 function decrypted(id: string, status: DecryptStatus): DecryptedMessage {
     return {
@@ -114,7 +115,11 @@ describe('ChatStoreService', () => {
                 },
                 {
                     provide: DirectoryService,
-                    useValue: jasmine.createSpyObj('DirectoryService', ['resolveMissing', 'rememberPrivateChatPeer']),
+                    useValue: jasmine.createSpyObj('DirectoryService', [
+                        'resolveMissing',
+                        'rememberPrivateChatPeer',
+                        'markDeleted',
+                    ]),
                 },
                 { provide: SessionService, useValue: { user: () => null } },
                 {
@@ -235,6 +240,123 @@ describe('ChatStoreService', () => {
                 // queue implying it will go out later.
                 expect(store.pending().length).withContext('no pending row may survive').toBe(0);
             }
+        });
+    });
+
+    /**
+     * A private chat whose peer deleted their account is read-only: the history still opens and
+     * verifies, nothing new can be sent. It is its own state, not the member-set alarm or the
+     * encryption-unavailable limit.
+     */
+    describe('deleted peer (read-only private chat)', () => {
+        let messages: jasmine.SpyObj<MessageService>;
+
+        beforeEach(() => {
+            messages = TestBed.inject(MessageService) as jasmine.SpyObj<MessageService>;
+        });
+
+        it('blocks sending and says why when the chat is flagged peer_is_deleted', () => {
+            store.chats.set([chat({ chat_type: 'private', peer_is_deleted: true })]);
+            store.activeChatId.set(CHAT);
+
+            expect(store.peerDeleted()).toBeTrue();
+            expect(store.canSend()).toBeFalse();
+            expect(store.sendBlockedReason()).toContain('deleted their account');
+        });
+
+        it('leaves an ordinary private chat sendable', () => {
+            store.chats.set([chat({ chat_type: 'private' })]);
+            store.activeChatId.set(CHAT);
+
+            expect(store.peerDeleted()).toBeFalse();
+            expect(store.canSend()).toBeTrue();
+        });
+
+        it('never treats a group as read-only because of the flag', () => {
+            store.chats.set([chat({ chat_type: 'group', peer_is_deleted: true })]);
+            store.activeChatId.set(CHAT);
+
+            expect(store.peerDeleted()).toBeFalse();
+        });
+
+        it('keeps the member-set alarm ahead of the deleted-peer notice', () => {
+            store.chats.set([chat({ chat_type: 'private', peer_is_deleted: true })]);
+            store.activeChatId.set(CHAT);
+            store.memberVerificationError.set('roster mismatch');
+
+            expect(store.sendBlockedReason()).toContain('member set');
+        });
+
+        it('does not call the API at all while read-only', async () => {
+            store.chats.set([chat({ chat_type: 'private', peer_is_deleted: true })]);
+            store.activeChatId.set(CHAT);
+
+            await store.send('hello');
+
+            expect(messages.sendText).not.toHaveBeenCalled();
+            expect(store.pending().length).toBe(0);
+        });
+
+        it('turns a 409 PEER_DELETED into the read-only state, not a retryable failure', async () => {
+            store.chats.set([chat({ chat_type: 'private' })]);
+            store.activeChatId.set(CHAT);
+            messages.sendText.and.rejectWith(
+                new HttpErrorResponse({ status: 409, error: { error_code: 'PEER_DELETED' } })
+            );
+
+            await store.send('hello');
+
+            expect(store.pending().length).withContext('no failed row to retry').toBe(0);
+            expect(store.peerDeleted()).toBeTrue();
+            expect(store.canSend()).toBeFalse();
+        });
+
+        it('flips the chat read-only on a chat_updated push carrying peer_deleted', () => {
+            const ws = TestBed.inject(WebSocketService) as unknown as { messages: Subject<unknown> };
+            const directory = TestBed.inject(DirectoryService) as jasmine.SpyObj<DirectoryService>;
+            store.chats.set([chat({ chat_type: 'private' })]);
+            store.activeChatId.set(CHAT);
+            store.bindRealtime();
+
+            ws.messages.next({
+                event_type: 'chat_updated',
+                chat_id: CHAT,
+                user_id: null,
+                payload: { peer_deleted: true, user_id: PEER },
+            });
+
+            expect(store.peerDeleted()).toBeTrue();
+            expect(directory.markDeleted).toHaveBeenCalledWith(PEER);
+        });
+
+        it('refetches the list for an ordinary chat_updated push', () => {
+            const ws = TestBed.inject(WebSocketService) as unknown as { messages: Subject<unknown> };
+            const chatApi = TestBed.inject(ChatApiService) as jasmine.SpyObj<ChatApiService>;
+            chatApi.getChats.and.returnValue(of([]));
+            store.bindRealtime();
+
+            ws.messages.next({ event_type: 'chat_updated', chat_id: CHAT, user_id: null, payload: { owner_id: PEER } });
+
+            expect(chatApi.getChats).toHaveBeenCalled();
+        });
+
+        it('marks the peer deleted in the directory when the list says so', async () => {
+            const chatApi = TestBed.inject(ChatApiService) as jasmine.SpyObj<ChatApiService>;
+            const directory = TestBed.inject(DirectoryService) as jasmine.SpyObj<DirectoryService>;
+            chatApi.getChats.and.returnValue(
+                of([
+                    chat({
+                        chat_type: 'private',
+                        title: 'Deleted user',
+                        peer_is_deleted: true,
+                        participants: [{ user_id: PEER, role: 'member', joined_at: '' }],
+                    }),
+                ])
+            );
+
+            await store.loadChats();
+
+            expect(directory.rememberPrivateChatPeer).toHaveBeenCalledWith(PEER, 'Deleted user', null, true);
         });
     });
 

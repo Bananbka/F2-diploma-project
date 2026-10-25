@@ -1,5 +1,5 @@
 import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
-import { Hash, LucideAngularModule } from 'lucide-angular';
+import { Hash, LucideAngularModule, UserX } from 'lucide-angular';
 
 import { avatarColor, initials } from '../../utils/display';
 
@@ -21,10 +21,13 @@ export class AvatarComponent {
     readonly size = input<AvatarSize>('md');
     /** Omit entirely to render no presence dot — absent and offline are different things. */
     readonly online = input<boolean | undefined>(undefined);
+    /** A deleted account: a neutral grey face with no initials, never a stale photo or colour. */
+    readonly deleted = input(false);
 
     readonly monogram = computed(() => initials(this.name()));
     readonly color = computed(() => avatarColor(this.seed() || this.name()));
     readonly isChannel = computed(() => this.name().startsWith('#'));
 
     readonly hashIcon = Hash;
+    readonly deletedIcon = UserX;
 }

@@ -49,6 +49,12 @@ export interface Chat {
      */
     muted_until: string | null;
     is_muted: boolean;
+    /**
+     * Private chats only: the other party deleted their account. The history stays readable and
+     * verifiable, but the server refuses new messages (409 `PEER_DELETED`), so the chat is
+     * read-only. Absent means false.
+     */
+    peer_is_deleted?: boolean;
 }
 
 export interface UserProfile {
@@ -61,6 +67,7 @@ export interface UserProfile {
     bio: string | null;
     avatar: string | null;
     is_active: boolean;
+    is_deleted?: boolean;
 }
 
 export interface UserSearchResult {
@@ -68,6 +75,11 @@ export interface UserSearchResult {
     full_name: string;
     username: string;
     avatar_url: string | null;
+    /**
+     * The account was deleted. The server already substitutes a neutral name and no avatar; this
+     * flag is what the UI keys its "Deleted user" treatment on, so it never has to guess from text.
+     */
+    is_deleted?: boolean;
 }
 
 export interface Contact {

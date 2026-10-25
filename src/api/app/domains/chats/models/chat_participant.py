@@ -1,7 +1,7 @@
 ﻿import enum
 import uuid
 
-from sqlalchemy import UUID, ForeignKey, Enum, DateTime, func, Integer, String, UniqueConstraint
+from sqlalchemy import CHAR, CheckConstraint, UUID, ForeignKey, Enum, DateTime, func, Integer, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.infrastructure.postgres import Base
@@ -26,7 +26,7 @@ class ChatParticipant(Base):
     muted_until: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     joined_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    last_read_message_id = mapped_column(String, nullable=True)
+    last_read_message_id = mapped_column(CHAR(24), nullable=True)
 
     # Epoch this participant joined at. Under HistoryVisibility.JOINED they receive grants only
     # from here onward.
@@ -38,11 +38,19 @@ class ChatParticipant(Base):
     # historical ciphertext: unreadable, but leaking sender, timing, size and reply structure for
     # the entire history. Stored explicitly rather than derived from joined_at, which is only
     # second-granular and would include or exclude boundary messages arbitrarily.
-    history_start_message_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    history_start_message_id: Mapped[str | None] = mapped_column(CHAR(24), nullable=True)
 
     chat = relationship("Chat", back_populates="participants")
     user = relationship("User", back_populates="chats")
 
     __table_args__ = (
         UniqueConstraint('chat_id', 'user_id', name='uq_chat_user'),
+        CheckConstraint(
+            "last_read_message_id IS NULL OR last_read_message_id ~ '^[0-9a-f]{24}$'",
+            name='ck_participant_last_read_objectid',
+        ),
+        CheckConstraint(
+            "history_start_message_id IS NULL OR history_start_message_id ~ '^[0-9a-f]{24}$'",
+            name='ck_participant_history_start_objectid',
+        ),
     )

@@ -23,6 +23,7 @@ import {
     ShieldAlert,
     Sticker,
     Trash2,
+    UserX,
     X,
 } from 'lucide-angular';
 import { firstValueFrom } from 'rxjs';
@@ -81,6 +82,12 @@ export class ComposerComponent {
     /** False while the member set cannot be verified — sending is refused, not merely discouraged. */
     readonly canSend = input(true);
     readonly blockedReason = input<string | null>(null);
+    /**
+     * The block is a read-only conversation (the other party deleted their account) rather than a
+     * security fault. Rendered as a neutral notice, not the red alarm reserved for a member set
+     * that failed verification.
+     */
+    readonly readOnly = input(false);
     readonly rekeying = input(false);
     readonly placeholder = input('Message…');
     /** Pre-fills the box when an existing message is being edited. */
@@ -168,6 +175,7 @@ export class ComposerComponent {
     readonly paperclipIcon = Paperclip;
     readonly refreshIcon = RefreshCw;
     readonly shieldAlertIcon = ShieldAlert;
+    readonly userXIcon = UserX;
     readonly filmIcon = Film;
     readonly closeIcon = X;
     readonly stickerIcon = Sticker;

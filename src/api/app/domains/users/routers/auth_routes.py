@@ -75,6 +75,10 @@ REGISTER_PER_IP = 5
 CHANGE_PASSWORD_WINDOW = 300
 CHANGE_PASSWORD_PER_ACCOUNT = 8
 
+# Every endpoint that re-checks the password of a signed-in session (change-password, delete
+# account) draws on this one counter, so alternating between them does not multiply the guesses.
+REAUTH_SCOPE = "reauth"
+
 
 ### AUTHENTICATION
 @router.post("/register", response_model=SuccessResponse[UserResponse])
@@ -198,6 +202,9 @@ async def login(
     )
 
     user = await user_service.get_user_by_username(db, user_in.username)
+    if user is not None and user.deleted_at is not None:
+        # A tombstone is indistinguishable from an unknown name: same bcrypt cost, same error.
+        user = None
 
     # Always pay for one bcrypt comparison, so an unknown username is not distinguishable from a
     # wrong password by response time.
@@ -430,6 +437,8 @@ async def reset_password(
     )
 
     user = await get_user_by_username(db, user_data.username)
+    if user is not None and user.deleted_at is not None:
+        user = None
 
     # Same non-answer as forgot-password, for the same reason. The old 404 distinguished "no such
     # user" from "wrong code", so an attacker could enumerate accounts here as well.
@@ -494,7 +503,7 @@ async def change_password(
 ):
     await enforce_rate_limit(
         redis,
-        scope="change-password",
+        scope=REAUTH_SCOPE,
         identifier=str(current_user.id),
         limit=CHANGE_PASSWORD_PER_ACCOUNT,
         window_seconds=CHANGE_PASSWORD_WINDOW,
@@ -502,11 +511,18 @@ async def change_password(
     )
 
     if not verify_password(user_data.old_password, current_user.hashed_password):
+        await audit.record(
+            mongo_db,
+            AuditEvent.PASSWORD_REAUTH_FAILED,
+            user_id=current_user.id,
+            client_ip=client_identifier(request),
+            details={"action": "change_password"},
+        )
         raise AppException(401, "INVALID_PASSWORD", "Invalid password.")
 
     await reset_rate_limit(
         redis,
-        scope="change-password",
+        scope=REAUTH_SCOPE,
         identifier=str(current_user.id),
         window_seconds=CHANGE_PASSWORD_WINDOW,
     )

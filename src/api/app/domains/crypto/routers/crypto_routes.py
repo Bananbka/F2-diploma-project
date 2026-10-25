@@ -244,7 +244,7 @@ async def get_keys_batch(
     db: AsyncSession = Depends(get_db),
 ):
     """Batch-fetch public keys. Called before wrapping group keys for a chat's members."""
-    keys = await identity_service.get_active_keys_for_users(db, data.user_ids)
+    keys = await identity_service.get_keys_for_verification(db, data.user_ids)
     return SuccessResponse(data=keys, meta={"count": len(keys)})
 
 

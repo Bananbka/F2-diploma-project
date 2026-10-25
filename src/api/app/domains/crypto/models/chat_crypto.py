@@ -2,7 +2,10 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Integer, Text, DateTime, Enum, ForeignKey, func, UniqueConstraint
+from sqlalchemy import (
+    CHAR, CheckConstraint, ForeignKeyConstraint, Index, Integer, Text, DateTime, Enum, ForeignKey,
+    func, text, UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -94,7 +97,7 @@ class ChatKeyEpoch(Base):
     member_count: Mapped[int] = mapped_column(Integer, nullable=False)
     # SHA-256 over the sorted device set. Clients MUST verify this against the roster before
     # wrapping keys — it is the only defence against a server silently inserting a ghost device.
-    member_set_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    member_set_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -105,6 +108,20 @@ class ChatKeyEpoch(Base):
 
     __table_args__ = (
         UniqueConstraint("chat_id", "epoch", name="uq_chat_epoch"),
+        # Target of the composite FK from sender_key_distributions: a distribution's (epoch_id,
+        # chat_id) pair must name an epoch of that very chat, not merely an existing epoch.
+        UniqueConstraint("id", "chat_id", name="uq_chat_key_epochs_id_chat"),
+        # At most one open epoch per chat, enforced by the database and not only by the advisory
+        # lock in `allocate_epoch`.
+        Index(
+            "uq_open_epoch_per_chat",
+            "chat_id",
+            unique=True,
+            postgresql_where=text("closed_at IS NULL"),
+        ),
+        CheckConstraint(
+            "member_set_hash ~ '^[0-9a-f]{64}$'", name="ck_chat_key_epochs_member_set_hash"
+        ),
     )
 
 
@@ -119,9 +136,8 @@ class SenderKeyDistribution(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
-    epoch_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("chat_key_epochs.id", ondelete="CASCADE"), nullable=False, index=True
-    )
+    # FK is the composite (epoch_id, chat_id) declared in __table_args__.
+    epoch_id: Mapped[uuid.UUID] = mapped_column(nullable=False, index=True)
     # Denormalised: every read path filters by chat first.
     chat_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("chats.id", ondelete="CASCADE"), nullable=False, index=True
@@ -139,16 +155,16 @@ class SenderKeyDistribution(Base):
 
     algorithm: Mapped[str] = mapped_column(Text, nullable=False)
     # Per-chain Ed25519 key. The server uses it to verify message signatures on send.
-    signing_public_key: Mapped[str] = mapped_column(Text, nullable=False)
+    signing_public_key: Mapped[str] = mapped_column(CHAR(43), nullable=False)
     chain_start_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     # Signed by the sender's long-term identity key, vouching for signing_public_key.
-    signature: Mapped[str] = mapped_column(Text, nullable=False)
+    signature: Mapped[str] = mapped_column(CHAR(86), nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
-    epoch = relationship("ChatKeyEpoch")
+    epoch = relationship("ChatKeyEpoch", foreign_keys=[epoch_id, chat_id])
 
     # Deliberately not unique on (epoch_id, sender_device_id). A device may publish several chains
     # within one epoch, because chain state is secret and memory-only, so a client that reloads has
@@ -156,4 +172,12 @@ class SenderKeyDistribution(Base):
     # message from the envelope's `skid`, so concurrent chains from one sender are already handled.
     __table_args__ = (
         UniqueConstraint("chat_id", "sender_key_id", name="uq_skd_chat_sender_key_id"),
+        ForeignKeyConstraint(
+            ["epoch_id", "chat_id"],
+            ["chat_key_epochs.id", "chat_key_epochs.chat_id"],
+            ondelete="CASCADE",
+            name="fk_skd_epoch_chat",
+        ),
+        CheckConstraint("length(signing_public_key) = 43", name="ck_skd_signing_public_len"),
+        CheckConstraint("length(signature) = 86", name="ck_skd_signature_len"),
     )

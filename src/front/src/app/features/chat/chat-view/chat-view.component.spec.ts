@@ -77,6 +77,7 @@ function fakeStore() {
         memberVerificationError: signal<string | null>(null),
         encryptionUnavailable: signal<string | null>(null),
         sendBlockedReason: signal<string | null>(null),
+        peerDeleted: signal(false),
         pinnedMessages: signal<DecryptedMessage[]>([]),
         canPinMessages: signal(false),
         isSelecting: signal(false),
@@ -197,6 +198,33 @@ describe('ChatViewComponent', () => {
             expect(alarm?.textContent).toContain('Member verification failed');
             const composer = host.querySelector('app-composer');
             expect(composer).not.toBeNull();
+        });
+
+        /**
+         * A deleted peer is a read-only conversation, not a fault: the history stays on screen,
+         * the header names the peer neutrally, and the composer explains rather than alarms.
+         */
+        it('renders a deleted-peer private chat read-only with a neutral notice, not the alarm', () => {
+            const privateChat: Chat = {
+                ...CHAT,
+                chat_type: 'private',
+                title: 'Deleted user',
+                peer_is_deleted: true,
+                participants: [CHAT.participants[0], CHAT.participants[1]],
+            };
+            store.activeChat.set(privateChat);
+            store.chats.set([privateChat]);
+            store.peerDeleted.set(true);
+            store.canSend.set(false);
+            store.sendBlockedReason.set('The other person deleted their account. This conversation is read-only.');
+            const host = create();
+
+            expect(host.querySelector('.identity-name')?.textContent).toContain('Deleted user');
+            expect(host.querySelector('.identity-sub')?.textContent).toContain('read-only');
+            expect(host.textContent).toContain('The other person deleted their account.');
+            expect(host.querySelector('app-composer .strip.is-danger')).toBeNull();
+            expect(host.querySelector('.alarm')).toBeNull();
+            expect((host.querySelector('app-composer textarea') as HTMLTextAreaElement).disabled).toBeTrue();
         });
 
         it('shows the re-keying strip while the store reports isRekeying', () => {

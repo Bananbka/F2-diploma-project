@@ -38,6 +38,22 @@ export class ProfileApiService {
             .pipe(map((r) => r.data));
     }
 
+    /**
+     * Permanently delete the signed-in account (`DELETE /profile`).
+     *
+     * The password is re-entered rather than trusted from the session, so a stolen cookie is not
+     * enough to destroy an account. It travels in a JSON body on a DELETE, which `HttpClient.delete`
+     * cannot express — hence `request`. Errors callers should expect: 401 `INVALID_PASSWORD`, and
+     * 429 once the attempt limit is hit.
+     */
+    deleteAccount(password: string): Observable<unknown> {
+        return this.http
+            .request<SuccessResponse<unknown>>('DELETE', `${this.configService.apiUrl}profile`, {
+                body: { password },
+            })
+            .pipe(map((r) => r.data));
+    }
+
     isUsernameAvailable(username: string): Observable<boolean> {
         return this.http
             .get<SuccessResponse<boolean>>(`${this.configService.apiUrl}profile/is-username-available/${username}`)

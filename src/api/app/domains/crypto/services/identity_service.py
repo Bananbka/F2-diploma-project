@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AppException
 from app.domains.crypto.models import UserDevice, UserIdentityKey
+from app.domains.users.models import User
 from app.domains.crypto.reference.identity import (
     safety_number,
     user_fingerprint_material,
@@ -252,6 +253,38 @@ async def get_active_keys_for_users(
         )
     )
     return list((await db.execute(stmt)).scalars().all())
+
+
+async def get_keys_for_verification(
+    db: AsyncSession,
+    user_ids: list[uuid.UUID],
+) -> list[UserIdentityKey]:
+    """Active keys, plus the retained keys of deleted accounts.
+
+    A client that has not yet cached a sender's chain must fetch that sender's identity key to
+    verify the distribution that vouches for the chain. For a deleted account the key is no longer
+    active, so the plain active-keys query returned nothing and the client, correctly failing
+    closed, refused to open a message that was perfectly valid. Deleted accounts therefore
+    contribute their newest key per device, flagged `is_active=False` in the response.
+
+    This is for verification and display only. Wrapping goes through the roster, which never
+    contains an inactive device.
+    """
+    keys = await get_active_keys_for_users(db, user_ids)
+    if not user_ids:
+        return keys
+
+    deleted_ids = select(User.id).where(User.id.in_(user_ids), User.deleted_at.is_not(None))
+    retained = (
+        await db.execute(
+            select(UserIdentityKey)
+            .where(UserIdentityKey.user_id.in_(deleted_ids))
+            .distinct(UserIdentityKey.device_id)
+            .order_by(UserIdentityKey.device_id, UserIdentityKey.version.desc())
+        )
+    ).scalars().all()
+
+    return keys + list(retained)
 
 
 async def get_active_signing_keys(

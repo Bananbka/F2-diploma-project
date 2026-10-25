@@ -27,6 +27,7 @@ from app.domains.messages.schemas.messages_schemas import (
     MessageUpdateRequest,
 )
 from app.domains.stickers.models import Sticker, StickerPack, StickerPackSubscription
+from app.domains.users.models import User
 from app.infrastructure.minio import minio_manager
 
 # Many messengers cap simultaneous pins (Telegram allows unlimited but most others bound it); a
@@ -79,6 +80,29 @@ async def get_chat_or_403(
 
     _, chat = row.ChatParticipant, row.Chat
     return chat
+
+
+async def ensure_peer_not_deleted(db: AsyncSession, chat: Chat, user_id: uuid.UUID) -> None:
+    """Refuse writes into a private chat whose other party deleted their account.
+
+    The history stays readable. Only new content is refused: the peer has no devices left, so
+    nothing sealed for them could ever be opened.
+    """
+    if chat.chat_type is not ChatType.PRIVATE:
+        return
+
+    peer_deleted = await db.scalar(
+        select(User.deleted_at.is_not(None))
+        .join(ChatParticipant, ChatParticipant.user_id == User.id)
+        .where(ChatParticipant.chat_id == chat.id, ChatParticipant.user_id != user_id)
+        .limit(1)
+    )
+    if peer_deleted:
+        raise AppException(
+            409,
+            "PEER_DELETED",
+            "The other person deleted their account. This conversation is now read-only.",
+        )
 
 
 def objectify_id(id_: str) -> ObjectId:
@@ -510,6 +534,8 @@ async def send_message(
         if existing is not None:
             return await _replay(db, existing, chat, message_in)
 
+    await ensure_peer_not_deleted(db, chat, user_id)
+
     await _authorize_attachments(db, mongo_db, user_id, message_in.attachments)
 
     settings = await epoch_service.get_settings(db, message_in.chat_id)
@@ -625,6 +651,7 @@ async def update_message(
 
     chat_id = msg.get("chat_id")
     chat = await get_chat_or_403(db, chat_id, user_id)
+    await ensure_peer_not_deleted(db, chat, user_id)
 
     # A channel post is signed over its own content, so replacing that content through the edit
     # path would leave a document whose stored signature covers something else entirely — an
@@ -822,6 +849,7 @@ async def toggle_reaction(
     """
     collection = mongo_db["messages"]
     msg, chat = await get_message_for_participant(db, collection, msg_id, user_id)
+    await ensure_peer_not_deleted(db, chat, user_id)
 
     pull_result = await collection.update_one(
         {"_id": msg["_id"]},
@@ -871,6 +899,7 @@ async def remove_reaction(
     with an error."""
     collection = mongo_db["messages"]
     msg, chat = await get_message_for_participant(db, collection, msg_id, user_id)
+    await ensure_peer_not_deleted(db, chat, user_id)
 
     await collection.update_one(
         {"_id": msg["_id"]},
@@ -897,6 +926,7 @@ async def pin_message(
     """
     collection = mongo_db["messages"]
     msg, chat = await get_message_for_participant(db, collection, msg_id, user_id)
+    await ensure_peer_not_deleted(db, chat, user_id)
     await _authorize_pin_action(db, chat, user_id)
 
     if not msg.get("is_pinned"):
@@ -938,6 +968,7 @@ async def unpin_message(
     """Unpin a message. Idempotent: unpinning an unpinned message is a no-op, not an error."""
     collection = mongo_db["messages"]
     msg, chat = await get_message_for_participant(db, collection, msg_id, user_id)
+    await ensure_peer_not_deleted(db, chat, user_id)
     await _authorize_pin_action(db, chat, user_id)
 
     await collection.update_one(

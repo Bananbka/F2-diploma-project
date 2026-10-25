@@ -148,6 +148,25 @@
     </section>
 
     <section class="group">
+        <p class="section">Danger zone</p>
+        <button
+            type="button"
+            class="tile is-danger"
+            (click)="openDelete()"
+        >
+            <span class="tile-icon">
+                <lucide-icon [img]="deleteIcon" />
+            </span>
+            <span class="tile-text">
+                <span class="tile-title">Delete account</span>
+                <span class="tile-sub"
+                    >Permanently erase your profile and sign out everywhere. This cannot be undone.</span
+                >
+            </span>
+        </button>
+    </section>
+
+    <section class="group">
         <p class="section">Your devices</p>
 
         @if (devicesLoading()) {
@@ -270,3 +289,85 @@
         </p>
     </section>
 </div>
+
+@if (deleteOpen()) {
+    <div
+        class="dialog-backdrop"
+        (click)="closeDelete()"
+    ></div>
+    <div
+        class="dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="delete-title"
+        (keydown.escape)="closeDelete()"
+    >
+        <form (ngSubmit)="confirmDelete()">
+            <h3
+                id="delete-title"
+                class="dialog-title"
+            >
+                Delete your account?
+            </h3>
+
+            <div class="warning">
+                <lucide-icon [img]="warnIcon" />
+                <div>
+                    <p class="warning-title">This is permanent and cannot be undone</p>
+                    <ul class="warning-list">
+                        <li>Your name, username, email, phone number, bio and avatar are erased.</li>
+                        <li>Every device is revoked and you are signed out everywhere.</li>
+                        <li>
+                            Messages you sent stay in other people's chats, still readable to them, and are shown as
+                            "Deleted user". They are not removed.
+                        </li>
+                        <li>Private chats with you become read-only for the other person.</li>
+                        <li>
+                            Groups you own pass to their longest-standing admin, or otherwise their oldest member. A
+                            group with no one else in it is deleted.
+                        </li>
+                        <li>Your contacts, folders and sticker packs are deleted.</li>
+                    </ul>
+                </div>
+            </div>
+
+            <div class="field">
+                <label for="deletePassword">Enter your password to confirm</label>
+                <input
+                    id="deletePassword"
+                    type="password"
+                    autocomplete="current-password"
+                    [formControl]="deletePassword"
+                    [attr.aria-invalid]="deletePassword.touched && deletePassword.invalid"
+                />
+            </div>
+
+            @if (deleteError()) {
+                <p
+                    class="error"
+                    role="alert"
+                >
+                    {{ deleteError() }}
+                </p>
+            }
+
+            <div class="dialog-actions">
+                <button
+                    type="button"
+                    class="dialog-cancel"
+                    [disabled]="deleting()"
+                    (click)="closeDelete()"
+                >
+                    Cancel
+                </button>
+                <button
+                    type="submit"
+                    class="dialog-confirm"
+                    [disabled]="deleting() || deletePassword.invalid"
+                >
+                    {{ deleting() ? 'Deleting…' : 'Delete my account' }}
+                </button>
+            </div>
+        </form>
+    </div>
+}

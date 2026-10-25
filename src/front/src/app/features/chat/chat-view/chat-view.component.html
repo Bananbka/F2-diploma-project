@@ -28,7 +28,8 @@
             <app-avatar
                 [name]="title()"
                 [seed]="chat()!.id"
-                [imageUrl]="chat()!.avatar_url"
+                [imageUrl]="peerDeleted() ? null : chat()!.avatar_url"
+                [deleted]="peerDeleted()"
             />
             <span class="identity-text">
                 <span class="identity-line">
@@ -430,6 +431,7 @@
             [editing]="!!editing()"
             [canSend]="canSend()"
             [blockedReason]="sendBlockedReason()"
+            [readOnly]="peerDeleted() && !memberVerificationError()"
             [rekeying]="isRekeying()"
             [placeholder]="isChannel() ? 'Post to channel…' : 'Message…'"
             (submitted)="send($event)"

@@ -1,6 +1,7 @@
 import { inject, Injectable, signal } from '@angular/core';
 import { firstValueFrom } from 'rxjs';
 
+import { DELETED_USER_LABEL } from '../../shared/utils/display';
 import { UserSearchResult } from '../models/chat.model';
 import { ChatApiService } from './chat-api.service';
 import { ContactsApiService } from './contacts-api.service';
@@ -13,6 +14,12 @@ export interface DisplayIdentity {
     avatarUrl: string | null;
     /** False when the name is a placeholder we derived from the id rather than a real profile. */
     resolved: boolean;
+    /**
+     * The account was deleted. Its messages are still readable and verifiable — the identity keys
+     * are retained for exactly that — but the person is gone, and the UI says so rather than
+     * showing the neutral name as if it were a profile.
+     */
+    deleted?: boolean;
 }
 
 /**
@@ -83,10 +90,11 @@ export class DirectoryService {
         for (const result of results) {
             this.remember({
                 userId: result.id,
-                name: result.full_name,
-                username: result.username,
-                avatarUrl: result.avatar_url,
+                name: result.is_deleted ? DELETED_USER_LABEL : result.full_name,
+                username: result.is_deleted ? null : result.username,
+                avatarUrl: result.is_deleted ? null : result.avatar_url,
                 resolved: true,
+                deleted: result.is_deleted === true,
             });
         }
     }
@@ -101,11 +109,31 @@ export class DirectoryService {
      * A private chat's title is the counterpart's display name, resolved server-side against the
      * contact alias. That makes it the one place a DM peer's name is reliably available.
      */
-    rememberPrivateChatPeer(userId: string, title: string | null, avatarUrl: string | null): void {
+    rememberPrivateChatPeer(userId: string, title: string | null, avatarUrl: string | null, deleted = false): void {
+        if (deleted) {
+            this.markDeleted(userId);
+            return;
+        }
         if (!title) {
             return;
         }
         this.remember({ userId, name: title, username: null, avatarUrl, resolved: true });
+    }
+
+    /** A user's account was deleted (a `chat_updated` push, or a flag on a fetched chat). */
+    markDeleted(userId: string): void {
+        this.remember({
+            userId,
+            name: DELETED_USER_LABEL,
+            username: null,
+            avatarUrl: null,
+            resolved: true,
+            deleted: true,
+        });
+    }
+
+    isDeleted(userId: string): boolean {
+        return this.known().get(userId)?.deleted === true;
     }
 
     /**

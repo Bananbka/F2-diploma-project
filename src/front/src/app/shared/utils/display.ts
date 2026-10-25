@@ -1,3 +1,6 @@
+/** What a deleted account is called everywhere; mirrors the server's tombstone `full_name`. */
+export const DELETED_USER_LABEL = 'Deleted user';
+
 /** Two-letter monogram, matching the design's avatar treatment. */
 export function initials(name: string): string {
     const parts = name.trim().replace(/^[#@]/, '').split(/\s+/).filter(Boolean);

@@ -11,7 +11,17 @@
     </div>
 }
 
-@if (!canSend()) {
+@if (!canSend() && readOnly()) {
+    <!-- Nothing is wrong with anyone's keys: there is simply no one left to send to. The history
+         above stays readable and verifiable. -->
+    <div
+        class="strip"
+        role="status"
+    >
+        <lucide-icon [img]="userXIcon" />
+        {{ blockedReason() ?? 'This conversation is read-only.' }}
+    </div>
+} @else if (!canSend()) {
     <!-- Hard block. Distributing keys to a roster we cannot verify is the one thing the client must
          refuse outright, so the composer is disabled rather than left to fail on submit. -->
     <div
@@ -190,7 +200,7 @@
             <textarea
                 #area
                 rows="1"
-                [placeholder]="canSend() ? placeholder() : 'Sending is blocked'"
+                [placeholder]="canSend() ? placeholder() : readOnly() ? 'Read-only conversation' : 'Sending is blocked'"
                 [disabled]="!canSend()"
                 [value]="text()"
                 (input)="onInput($any($event.target).value)"

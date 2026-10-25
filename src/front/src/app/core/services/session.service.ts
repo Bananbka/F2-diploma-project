@@ -6,6 +6,7 @@ import { AuthApiService, RegisterRequest, RewrappedIdentity } from './auth-api.s
 import { CryptoApiService } from './crypto-api.service';
 import { KeyStoreService, UnlockStageReporter } from './key-store.service';
 import { MessageService } from './message.service';
+import { ProfileApiService } from './profile-api.service';
 import { WebSocketService } from './websocket.service';
 
 /**
@@ -47,6 +48,7 @@ export class SessionService {
     private readonly keyStore = inject(KeyStoreService);
     private readonly messages = inject(MessageService);
     private readonly ws = inject(WebSocketService);
+    private readonly profileApi = inject(ProfileApiService);
 
     readonly user = signal<UserProfile | null>(null);
     /** False until the initial `me()` probe settles, so guards do not redirect on a cold reload. */
@@ -200,6 +202,29 @@ export class SessionService {
                 rewrapped_identities: rewrapped,
             })
         );
+    }
+
+    /**
+     * Permanently delete the account, then drop every trace of it from this tab.
+     *
+     * Local state is cleared only after the server confirms: a wrong password (401) or a rate limit
+     * (429) leaves the account fully intact and the user still signed in, so tearing the keys down
+     * early would strand a live account. Once it succeeds the unwrapped keys, retained plaintext and
+     * socket go, exactly as on logout, plus the device id — the server keeps the deleted account's
+     * public keys under it.
+     *
+     * `TrustStoreService` is deliberately left alone. It holds public fingerprints of *other* people,
+     * keyed by their user id, so it is no part of this account's data; and forgetting a confirmed
+     * number costs the only defence against a later key substitution.
+     */
+    async deleteAccount(password: string): Promise<void> {
+        await firstValueFrom(this.profileApi.deleteAccount(password));
+
+        this.ws.disconnect();
+        this.keyStore.lock();
+        this.keyStore.forgetDeviceId();
+        this.messages.forgetOpened();
+        this.user.set(null);
     }
 
     async logout(): Promise<void> {
