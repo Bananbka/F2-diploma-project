@@ -1,11 +1,15 @@
 import uuid
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.rate_limit import enforce_rate_limit
 from app.core.responses import SuccessResponse
 from app.domains.stickers.schemas.sticker_schemas import (
     StickerCreateRequest,
+    StickerByUrlQuery,
     StickerPackCreateRequest,
     StickerPackResponse,
     StickerPackSummary,
@@ -16,8 +20,32 @@ from app.domains.stickers.services import sticker_pack_service, sticker_service
 from app.domains.users.dependencies import get_current_user
 from app.domains.users.models import User
 from app.infrastructure.postgres import get_db
+from app.infrastructure.redis import get_redis
 
 router = APIRouter(prefix="/stickers", tags=["Stickers"])
+
+STICKER_LOOKUP_LIMIT = 120
+STICKER_LOOKUP_WINDOW = 60
+
+
+@router.get("/by-url", response_model=SuccessResponse[StickerPackResponse])
+async def get_pack_by_sticker_url(
+    query: Annotated[StickerByUrlQuery, Query()],
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+):
+    """The pack owning the sticker stored at `url` (a message attachment carries only the url).
+    Owner, public or subscribed packs only; anything else, and unknown urls, are one 404."""
+    await enforce_rate_limit(
+        redis,
+        scope="sticker-by-url",
+        identifier=str(user.id),
+        limit=STICKER_LOOKUP_LIMIT,
+        window_seconds=STICKER_LOOKUP_WINDOW,
+    )
+    pack = await sticker_pack_service.get_pack_by_sticker_url(db, query.url, user.id)
+    return SuccessResponse(data=pack)
 
 
 @router.post("/packs", response_model=SuccessResponse[StickerPackResponse])

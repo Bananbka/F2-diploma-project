@@ -646,3 +646,105 @@ async def test_delete_pack_removes_its_stickers_from_minio_and_db():
         assert r.status_code == 404, r.text
     finally:
         await alice.aclose()
+
+
+# --- GET /stickers/by-url -------------------------------------------------------------------
+
+
+async def test_by_url_returns_own_private_pack():
+    alice, _ = await _register_user()
+    try:
+        pack_id = await _create_pack(alice)
+        sticker = await _add_sticker(alice, pack_id)
+
+        r = await alice.get("/stickers/by-url", params={"url": sticker["image_url"]})
+        assert r.status_code == 200, r.text
+        data = r.json()["data"]
+        assert data["id"] == pack_id
+        assert [s["id"] for s in data["stickers"]] == [sticker["id"]]
+    finally:
+        await alice.aclose()
+
+
+async def test_by_url_returns_public_pack_of_another_user():
+    alice, _ = await _register_user()
+    bob, _ = await _register_user()
+    try:
+        pack_id = await _create_pack(alice, is_public=True)
+        sticker = await _add_sticker(alice, pack_id)
+
+        r = await bob.get("/stickers/by-url", params={"url": sticker["image_url"]})
+        assert r.status_code == 200, r.text
+        assert r.json()["data"]["id"] == pack_id
+    finally:
+        await alice.aclose()
+        await bob.aclose()
+
+
+async def test_by_url_returns_subscribed_pack_after_it_goes_private():
+    alice, _ = await _register_user()
+    bob, _ = await _register_user()
+    try:
+        pack_id = await _create_pack(alice, is_public=True)
+        sticker = await _add_sticker(alice, pack_id)
+        r = await bob.post(f"/stickers/packs/{pack_id}/subscribe")
+        assert r.status_code == 200, r.text
+        r = await alice.patch(f"/stickers/packs/{pack_id}", json={"is_public": False})
+        assert r.status_code == 200, r.text
+
+        r = await bob.get("/stickers/by-url", params={"url": sticker["image_url"]})
+        assert r.status_code == 200, r.text
+        assert r.json()["data"]["id"] == pack_id
+    finally:
+        await alice.aclose()
+        await bob.aclose()
+
+
+async def test_by_url_private_pack_of_someone_else_is_indistinguishable_from_unknown():
+    alice, _ = await _register_user()
+    bob, _ = await _register_user()
+    try:
+        pack_id = await _create_pack(alice)
+        sticker = await _add_sticker(alice, pack_id)
+        unknown = sticker["image_url"].rsplit("/", 1)[0] + f"/{uuid.uuid4()}.png"
+
+        private = await bob.get("/stickers/by-url", params={"url": sticker["image_url"]})
+        missing = await bob.get("/stickers/by-url", params={"url": unknown})
+        assert private.status_code == missing.status_code == 404
+        assert private.json() == missing.json()
+        assert private.json()["error_code"] == "STICKER_PACK_UNAVAILABLE"
+    finally:
+        await alice.aclose()
+        await bob.aclose()
+
+
+@pytest.mark.parametrize(
+    "suffix_url",
+    [
+        "http://evil.example/x.png",
+        "BUCKET/",
+        "BUCKET/a/b.png",
+        "BUCKET_OTHER/x.png",
+        "",
+    ],
+)
+async def test_by_url_rejects_bad_url_with_422(suffix_url):
+    alice, _ = await _register_user()
+    try:
+        base = f"{settings.MINIO_PUBLIC_URL}/{settings.MINIO_STICKER_BUCKET}"
+        url = suffix_url.replace("BUCKET_OTHER", f"{settings.MINIO_PUBLIC_URL}/other")
+        url = url.replace("BUCKET", base) if url.startswith("BUCKET") else url
+        r = await alice.get("/stickers/by-url", params={"url": url})
+        assert r.status_code == 422, r.text
+    finally:
+        await alice.aclose()
+
+
+async def test_by_url_rejects_overlong_url_with_422():
+    alice, _ = await _register_user()
+    try:
+        base = f"{settings.MINIO_PUBLIC_URL}/{settings.MINIO_STICKER_BUCKET}"
+        r = await alice.get("/stickers/by-url", params={"url": f"{base}/{'a' * 3000}"})
+        assert r.status_code == 422, r.text
+    finally:
+        await alice.aclose()

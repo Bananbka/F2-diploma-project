@@ -62,6 +62,38 @@ async def get_pack_or_403(
     return pack
 
 
+async def get_pack_by_sticker_url(
+    db: AsyncSession, url: str, user_id: uuid.UUID
+) -> StickerPack:
+    """Resolve the pack owning the sticker stored under `url`, for a viewer who may see it:
+    owner, public, or subscribed. Unknown url and not-visible both raise the same 404, so the
+    endpoint cannot be used to probe whether a private pack's sticker exists."""
+    unavailable = AppException(
+        404, "STICKER_PACK_UNAVAILABLE", "That sticker pack is not available."
+    )
+    pack_id = (
+        await db.execute(select(Sticker.pack_id).where(Sticker.image_url == url).limit(1))
+    ).scalar_one_or_none()
+    if pack_id is None:
+        raise unavailable
+
+    pack = await _get_pack(db, pack_id)
+    if pack is None:
+        raise unavailable
+
+    if pack.owner_id != user_id and not pack.is_public:
+        subscribed = await db.scalar(
+            select(StickerPackSubscription.pack_id).where(
+                StickerPackSubscription.user_id == user_id,
+                StickerPackSubscription.pack_id == pack_id,
+            )
+        )
+        if subscribed is None:
+            raise unavailable
+
+    return pack
+
+
 async def get_owned_pack_or_403(
     db: AsyncSession, pack_id: uuid.UUID, user_id: uuid.UUID
 ) -> StickerPack:

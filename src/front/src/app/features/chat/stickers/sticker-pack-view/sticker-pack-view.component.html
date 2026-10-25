@@ -1,0 +1,32 @@
+<h3 class="title">{{ pack().title }}</h3>
+<p class="sub">{{ pack().stickers.length }} {{ pack().stickers.length === 1 ? 'sticker' : 'stickers' }}</p>
+
+@if (pack().stickers.length === 0) {
+    <p class="muted">This pack has no stickers.</p>
+} @else {
+    <ul class="grid">
+        @for (sticker of pack().stickers; track sticker.id) {
+            <li class="sticker">
+                <img
+                    [src]="sticker.image_url"
+                    [alt]="sticker.emoji || 'Sticker'"
+                />
+            </li>
+        }
+    </ul>
+}
+
+@if (isOwn()) {
+    <p class="muted">This is your pack.</p>
+} @else if (subscribed() || pack().is_public) {
+    <button
+        type="button"
+        class="subscribe-btn"
+        [class.is-on]="subscribed()"
+        [disabled]="busy()"
+        (click)="subscribeToggled.emit()"
+    >
+        <lucide-icon [img]="subscribed() ? checkIcon : plusIcon" />
+        {{ subscribed() ? 'Unsubscribe' : 'Subscribe' }}
+    </button>
+}

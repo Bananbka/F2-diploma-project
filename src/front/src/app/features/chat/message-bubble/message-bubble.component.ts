@@ -209,6 +209,8 @@ export class MessageBubbleComponent {
      * we already hold and a fresh pick from the tray both go through the same event.
      */
     readonly reactionToggled = output<string>();
+    /** A sticker was activated — asks the chat to show the pack that sticker belongs to. */
+    readonly stickerPackRequested = output<string>();
 
     /** True while a bulk selection is in progress anywhere in the conversation. */
     readonly selecting = input(false);
@@ -263,6 +265,14 @@ export class MessageBubbleComponent {
             message.attachments[0].kind === 'sticker'
         );
     });
+
+    /**
+     * A sticker opens its pack only on a message we opened and the server accepted. A pending or
+     * failed send has no accepted sticker to look up, and a bulk selection turns clicks into picks.
+     */
+    readonly canOpenStickerPack = computed(
+        () => this.canRenderMedia() && this.delivery() === 'sent' && !this.selecting()
+    );
 
     /** Per-attachment decrypt state, keyed by url. A `Map` so one re-render covers every tile. */
     readonly mediaState = signal<Map<string, MediaEntry>>(new Map());
@@ -459,6 +469,16 @@ export class MessageBubbleComponent {
         event.preventDefault();
         window.getSelection()?.removeAllRanges();
         this.replyRequested.emit(this.message());
+    }
+
+    openStickerPack(event: Event, file: MessageAttachment): void {
+        // Space would scroll the conversation; the click must not reach the bubble's own handlers.
+        event.preventDefault();
+        event.stopPropagation();
+        if (!this.canOpenStickerPack()) {
+            return;
+        }
+        this.stickerPackRequested.emit(file.url);
     }
 
     /** While a selection is in progress a plain click picks messages rather than doing nothing. */

@@ -1,0 +1,70 @@
+<div
+    class="backdrop"
+    (click)="closed.emit()"
+></div>
+<div
+    class="dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Sticker pack"
+>
+    <button
+        type="button"
+        class="close"
+        aria-label="Close"
+        (click)="closed.emit()"
+    >
+        <lucide-icon [img]="closeIcon" />
+    </button>
+
+    @switch (state()) {
+        @case ('loading') {
+            <p class="muted">Loading pack…</p>
+        }
+        @case ('unavailable') {
+            <div
+                class="unavailable"
+                role="alert"
+            >
+                <p class="unavailable-title">Pack is unavailable</p>
+                <p class="muted">
+                    The author may have deleted this pack or made it private, so it cannot be shown here.
+                </p>
+            </div>
+        }
+        @case ('error') {
+            <div
+                class="unavailable"
+                role="alert"
+            >
+                <p class="unavailable-title">Could not load this pack</p>
+                <button
+                    type="button"
+                    class="retry"
+                    (click)="load(stickerUrl())"
+                >
+                    Try again
+                </button>
+            </div>
+        }
+        @case ('ready') {
+            @if (pack(); as p) {
+                <app-sticker-pack-view
+                    [pack]="p"
+                    [subscribed]="subscribed()"
+                    [isOwn]="isOwn(p)"
+                    [busy]="busy()"
+                    (subscribeToggled)="toggleSubscribe()"
+                />
+            }
+            @if (actionError()) {
+                <p
+                    class="error"
+                    role="alert"
+                >
+                    {{ actionError() }}
+                </p>
+            }
+        }
+    }
+</div>
