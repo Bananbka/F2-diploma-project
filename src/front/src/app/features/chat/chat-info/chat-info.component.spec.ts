@@ -1,5 +1,5 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { Router } from '@angular/router';
+import { provideRouter } from '@angular/router';
 import { of, throwError } from 'rxjs';
 
 import { Chat, InviteLink } from '../../../core/models/chat.model';
@@ -89,7 +89,6 @@ describe('ChatInfoComponent', () => {
             loadChats: async () => {},
             setMuted: async () => {},
         } as unknown as ChatStoreService;
-        const router = jasmine.createSpyObj<Router>('Router', ['navigate']);
 
         await TestBed.configureTestingModule({
             imports: [ChatInfoComponent],
@@ -100,7 +99,7 @@ describe('ChatInfoComponent', () => {
                 { provide: ContactsApiService, useValue: contactsApi },
                 { provide: SessionService, useValue: session },
                 { provide: ChatStoreService, useValue: store },
-                { provide: Router, useValue: router },
+                provideRouter([]),
             ],
         }).compileComponents();
 
@@ -167,5 +166,51 @@ describe('ChatInfoComponent', () => {
 
         expect(fixture.componentInstance.confirming()).toBeNull();
         expect(chatApi.revokeInviteLink).not.toHaveBeenCalled();
+    });
+
+    describe('embedded in the side panel', () => {
+        const PEER_ID = 'cccccccc-0000-4000-8000-000000000003';
+        const PRIVATE: Chat = {
+            ...CHAT,
+            chat_type: 'private',
+            title: null,
+            participants: [
+                { user_id: OWNER_ID, role: 'member', joined_at: '2024-01-01T00:00:00Z' },
+                { user_id: PEER_ID, role: 'member', joined_at: '2024-01-01T00:00:00Z' },
+            ],
+        };
+
+        async function openEmbedded(chat: Chat): Promise<HTMLElement> {
+            chatApi.getChat.and.returnValue(of(chat));
+            fixture = TestBed.createComponent(ChatInfoComponent);
+            fixture.componentRef.setInput('chatId', CHAT_ID);
+            fixture.componentRef.setInput('embedded', true);
+            fixture.detectChanges();
+            await fixture.whenStable();
+            fixture.detectChanges();
+            return fixture.nativeElement as HTMLElement;
+        }
+
+        it('drops the screen header but keeps the content', async () => {
+            const host = await openEmbedded(CHAT);
+
+            expect(host.querySelector('.head')).toBeNull();
+            expect(host.classList.contains('is-embedded')).toBeTrue();
+            expect(host.querySelector('.profile-name')?.textContent).toContain('Test group');
+        });
+
+        it('shows the peer’s name and username in a private chat', async () => {
+            const host = await openEmbedded(PRIVATE);
+
+            expect(host.querySelector('.profile-username')?.textContent).toContain('@owner');
+        });
+
+        it('shows "Deleted user" and no username or avatar image for a deleted peer', async () => {
+            const host = await openEmbedded({ ...PRIVATE, peer_is_deleted: true });
+
+            expect(host.querySelector('.profile-name')?.textContent).toContain('Deleted user');
+            expect(host.querySelector('.profile-username')).toBeNull();
+            expect(host.querySelector('.profile img')).toBeNull();
+        });
     });
 });

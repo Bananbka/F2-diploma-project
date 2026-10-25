@@ -36,4 +36,8 @@
     >
         <router-outlet />
     </main>
+
+    @if (panelOpen() && activeChatId(); as chatId) {
+        <app-chat-panel [chatId]="chatId" />
+    }
 </div>

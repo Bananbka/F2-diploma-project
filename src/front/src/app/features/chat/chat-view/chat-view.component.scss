@@ -38,7 +38,14 @@
     gap: 0.75rem;
     flex: 1;
     min-width: 0;
+    padding: 0;
+    background: none;
+    border: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
     text-decoration: none;
+    cursor: pointer;
     transition: opacity 0.15s ease;
 
     &:hover {
@@ -99,6 +106,10 @@
     @include ui.icon-button(2.25rem);
 
     text-decoration: none;
+
+    &.is-active {
+        color: var(--primary);
+    }
 
     lucide-icon {
         width: 1.125rem;
@@ -162,6 +173,7 @@
     font-weight: 500;
     text-decoration: none;
     white-space: nowrap;
+    cursor: pointer;
 
     &:hover {
         background: rgb(239 68 68 / 30%);

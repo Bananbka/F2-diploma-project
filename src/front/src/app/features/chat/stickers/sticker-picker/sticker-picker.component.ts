@@ -5,6 +5,7 @@ import {
     DestroyRef,
     ElementRef,
     inject,
+    input,
     output,
     signal,
 } from '@angular/core';
@@ -32,11 +33,15 @@ import { StickerApiService } from '../../../../core/services/sticker-api.service
     templateUrl: './sticker-picker.component.html',
     styleUrl: './sticker-picker.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
+    host: { '[class.is-embedded]': 'embedded()' },
 })
 export class StickerPickerComponent {
     private readonly stickerApi = inject(StickerApiService);
     private readonly destroyRef = inject(DestroyRef);
     private readonly elementRef = inject<ElementRef<HTMLElement>>(ElementRef);
+
+    /** Rendered inline inside the side panel: static layout, no outside-click dismissal. */
+    readonly embedded = input(false);
 
     readonly closeRequested = output<void>();
     readonly stickerPicked = output<Sticker>();
@@ -75,6 +80,9 @@ export class StickerPickerComponent {
         // without it, the mousedown that is about to close the tray would fire first, and the click
         // that follows on the same button would immediately reopen it.
         const onPointerDown = (event: MouseEvent): void => {
+            if (this.embedded()) {
+                return;
+            }
             const target = event.target as HTMLElement;
             if (!this.elementRef.nativeElement.contains(target) && !target.closest('.sticker-trigger')) {
                 this.closeRequested.emit();

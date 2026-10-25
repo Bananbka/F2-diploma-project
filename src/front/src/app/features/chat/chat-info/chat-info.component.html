@@ -1,14 +1,16 @@
-<header class="head">
-    <button
-        type="button"
-        class="back"
-        aria-label="Back to conversation"
-        (click)="back()"
-    >
-        <lucide-icon [img]="arrowLeftIcon" />
-    </button>
-    <h2>Chat info</h2>
-</header>
+@if (!embedded()) {
+    <header class="head">
+        <button
+            type="button"
+            class="back"
+            aria-label="Back to conversation"
+            (click)="back()"
+        >
+            <lucide-icon [img]="arrowLeftIcon" />
+        </button>
+        <h2>Chat info</h2>
+    </header>
+}
 
 <div class="body">
     @if (loading()) {
@@ -30,6 +32,9 @@
                 [deleted]="chat()!.peer_is_deleted === true"
             />
             <h3 class="profile-name">{{ title() }}</h3>
+            @if (peerUsername()) {
+                <p class="profile-username">&#64;{{ peerUsername() }}</p>
+            }
 
             @if (isChannel()) {
                 <p class="profile-tag is-warn">

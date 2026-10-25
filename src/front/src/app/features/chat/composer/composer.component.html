@@ -166,6 +166,28 @@
         <div class="sticker-trigger-wrap">
             <button
                 type="button"
+                class="side emoji-trigger"
+                title="Insert an emoji"
+                aria-haspopup="dialog"
+                [attr.aria-expanded]="emojiPickerOpen()"
+                [disabled]="unavailableReason() !== null"
+                (click)="toggleEmojiPicker()"
+            >
+                <lucide-icon [img]="smileIcon" />
+                <span class="sr-only">Insert an emoji</span>
+            </button>
+
+            @if (emojiPickerOpen() && unavailableReason() === null) {
+                <app-emoji-picker
+                    (pick)="onEmojiPicked($event)"
+                    (closeRequested)="emojiPickerOpen.set(false)"
+                />
+            }
+        </div>
+
+        <div class="sticker-trigger-wrap">
+            <button
+                type="button"
                 class="side sticker-trigger"
                 title="Send a sticker"
                 aria-haspopup="dialog"

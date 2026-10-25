@@ -244,10 +244,12 @@ Raised by the user on 2026-10-14; recorded here rather than acted on immediately
   termination (see §1), structured metrics/tracing, CI (lint/test/build on push), dependency/image
   scanning, and a documented deployment target — not just incremental fixes to the dev compose
   file like the gateway split or RustFS migration already done in §7 and this session.
-- **No chat-view side panel for emoji/stickers.** Telegram-style: a panel on the right side of the
-  conversation (or a slide-over) exposing the emoji picker and sticker tray together, rather than
-  today's composer-trigger-opens-a-popover pattern (`shared/ui/emoji-picker/`,
-  `features/chat/stickers/sticker-picker/`). Not scoped or designed yet.
+- **Chat-view side panel for emoji/stickers: closed.** The conversation now has a Telegram-style right
+  panel (`features/chat/chat-panel/`, toggled from the header, open state remembered in localStorage) with
+  Profile (chat info, embedded), Stickers and Emoji tabs; it is docked on wide screens and a slide-over
+  below 72rem. Both pickers keep their composer popovers; the panel reaches the composer only through the
+  bridge in `ChatPanelStoreService`, so the composer's editing/blocked/read-only guards apply to it too.
+  Not done: peer bio (no endpoint returns it by user id) and inserting emoji while editing a message.
 - **Chat list shows a bare username/title, not a message preview, in some path(s) the user has
   seen.** `chat-sidebar.component.ts`/`.html` already has a `preview(chat)` mechanism driven by
   `chat.last_message` (readable/sealed states, used for the list's timestamp too), so this may be a

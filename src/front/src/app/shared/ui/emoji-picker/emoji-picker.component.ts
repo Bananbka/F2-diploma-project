@@ -1,4 +1,13 @@
-import { ChangeDetectionStrategy, Component, DestroyRef, ElementRef, inject, output, signal } from '@angular/core';
+import {
+    ChangeDetectionStrategy,
+    Component,
+    DestroyRef,
+    ElementRef,
+    inject,
+    input,
+    output,
+    signal,
+} from '@angular/core';
 
 import { TwemojiPipe } from '../../emoji/twemoji.pipe';
 import { EMOJI_CATEGORIES } from './emoji-data';
@@ -23,10 +32,17 @@ import { EMOJI_CATEGORIES } from './emoji-data';
     templateUrl: './emoji-picker.component.html',
     styleUrl: './emoji-picker.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
+    host: { '[class.is-embedded]': 'embedded()' },
 })
 export class EmojiPickerComponent {
     private readonly destroyRef = inject(DestroyRef);
     private readonly elementRef = inject<ElementRef<HTMLElement>>(ElementRef);
+
+    /**
+     * Rendered inline inside a panel rather than as a popover: static layout, fills its container,
+     * and never asks to be closed (outside clicks and Escape belong to whoever hosts it).
+     */
+    readonly embedded = input(false);
 
     readonly pick = output<string>();
     readonly closeRequested = output<void>();
@@ -36,13 +52,16 @@ export class EmojiPickerComponent {
 
     constructor() {
         const onPointerDown = (event: MouseEvent): void => {
+            if (this.embedded()) {
+                return;
+            }
             const target = event.target as HTMLElement;
             if (!this.elementRef.nativeElement.contains(target) && !target.closest('.emoji-trigger')) {
                 this.closeRequested.emit();
             }
         };
         const onKeyDown = (event: KeyboardEvent): void => {
-            if (event.key === 'Escape') {
+            if (event.key === 'Escape' && !this.embedded()) {
                 this.closeRequested.emit();
             }
         };
