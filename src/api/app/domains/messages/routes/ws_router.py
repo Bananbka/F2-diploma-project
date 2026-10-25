@@ -1,4 +1,6 @@
 import asyncio
+import json
+import time
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from loguru import logger
@@ -8,12 +10,17 @@ from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.exceptions import AppException
 from app.domains.chats.models import ChatParticipant
 from app.domains.chats.services.chat_services import update_participant_last_read
 from app.domains.messages.schemas.ws_schemas import WSEventType, WSMessageEnvelope
 from app.domains.messages.services import messages_service
-from app.domains.users.dependencies import check_ws_origin, get_ws_current_user
+from app.domains.users.dependencies import (
+    check_ws_origin,
+    get_ws_current_user,
+    ws_session_is_valid,
+)
 from app.domains.users.models import User
 from app.infrastructure.mongo import get_mongo_db
 from app.infrastructure.postgres import get_db
@@ -22,17 +29,95 @@ from app.infrastructure.redis import get_redis
 ws_router = APIRouter()
 
 
-async def listen_to_redis(pubsub, websocket: WebSocket):
+# Close code for a socket whose session is no longer valid (4xxx is the application-defined range).
+WS_CLOSE_SESSION_REVOKED = 4401
+
+
+async def _close_revoked(websocket: WebSocket) -> None:
+    try:
+        await websocket.close(code=WS_CLOSE_SESSION_REVOKED)
+    except Exception as exc:
+        logger.debug(f"socket already closed while revoking: {exc}")
+
+
+async def listen_to_redis(pubsub, websocket: WebSocket, redis: Redis, token: str):
     try:
         async for message in pubsub.listen():
             if message["type"] == "message":
                 text_data = message["data"]
+
+                # A revocation is never relayed. Each socket re-validates its own token, so a
+                # logout that revoked only one token closes only the sockets using it.
+                if '"session_revoked"' in text_data:
+                    try:
+                        is_revocation = (
+                            json.loads(text_data).get("event_type")
+                            == WSEventType.SESSION_REVOKED.value
+                        )
+                    except ValueError:
+                        is_revocation = False
+
+                    if is_revocation:
+                        if not await ws_session_is_valid(redis, token):
+                            await _close_revoked(websocket)
+                            return
+                        continue
+
                 await websocket.send_text(text_data)
 
     except asyncio.CancelledError:
         pass
     except Exception as e:
         logger.error(f"redis fan-out task failed: {e}")
+
+
+async def watch_session(websocket: WebSocket, redis: Redis, token: str):
+    """Backstop for revocations that publish nothing: token expiry and a disabled account."""
+    try:
+        while True:
+            await asyncio.sleep(settings.WS_SESSION_RECHECK_SECONDS)
+            if not await ws_session_is_valid(redis, token):
+                await _close_revoked(websocket)
+                return
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.error(f"session watcher failed: {e}")
+
+
+class TokenBucket:
+    """Per-socket allowance for inbound frames that fan out to other users."""
+
+    def __init__(self, capacity: float, refill_per_second: float):
+        self.capacity = capacity
+        self.refill = refill_per_second
+        self.tokens = capacity
+        self.updated = time.monotonic()
+
+    def allow(self) -> bool:
+        now = time.monotonic()
+        self.tokens = min(self.capacity, self.tokens + (now - self.updated) * self.refill)
+        self.updated = now
+        if self.tokens >= 1:
+            self.tokens -= 1
+            return True
+        return False
+
+
+# Typing and read frames are relayed to every other member, so one socket can otherwise turn a
+# flood of tiny frames into a flood of publishes. A burst of 10 then 2 per second is far above
+# what a person produces.
+RELAY_BUCKET_CAPACITY = 10
+RELAY_BUCKET_REFILL_PER_SECOND = 2
+RELAY_THROTTLE_NOTICE_INTERVAL = 5.0
+
+# What a client may put in `payload` for each event it can send. Anything else is dropped before
+# the frame is relayed to peers, so the field cannot be used to smuggle data to other users.
+ALLOWED_INBOUND_PAYLOAD_KEYS: dict[str, frozenset[str]] = {
+    WSEventType.TYPING_START.value: frozenset(),
+    WSEventType.TYPING_STOP.value: frozenset(),
+    WSEventType.MESSAGE_READ.value: frozenset({"last_read_message_id"}),
+}
 
 
 PRESENCE_TTL_SECONDS = 86400
@@ -129,6 +214,10 @@ async def websocket_endpoint(
     pubsub = None
     redis_task = None
     channel_name = f"user:{user.id}"
+    token = websocket.cookies.get("access_token")
+    watcher_task = None
+    relay_bucket = TokenBucket(RELAY_BUCKET_CAPACITY, RELAY_BUCKET_REFILL_PER_SECOND)
+    last_throttle_notice = 0.0
 
     try:
         connection_count = await redis.incr(f"presence:{user.id}")
@@ -141,7 +230,8 @@ async def websocket_endpoint(
         pubsub = redis.pubsub()
         await pubsub.subscribe(channel_name)
 
-        redis_task = asyncio.create_task(listen_to_redis(pubsub, websocket))
+        redis_task = asyncio.create_task(listen_to_redis(pubsub, websocket, redis, token))
+        watcher_task = asyncio.create_task(watch_session(websocket, redis, token))
 
         while True:
             # receive_text, not receive_json: a frame that is not valid JSON used to raise out of
@@ -164,6 +254,27 @@ async def websocket_endpoint(
             try:
                 ws_event = WSMessageEnvelope.model_validate_json(text)
                 ws_event.user_id = user.id
+
+                allowed_keys = ALLOWED_INBOUND_PAYLOAD_KEYS.get(ws_event.event_type)
+                if allowed_keys is not None:
+                    ws_event.payload = {
+                        k: v for k, v in ws_event.payload.items() if k in allowed_keys
+                    }
+
+                    if not relay_bucket.allow():
+                        now = time.monotonic()
+                        if now - last_throttle_notice >= RELAY_THROTTLE_NOTICE_INTERVAL:
+                            last_throttle_notice = now
+                            await websocket.send_text(
+                                WSMessageEnvelope(
+                                    event_type=WSEventType.ERROR,
+                                    payload={
+                                        "error_code": "RATE_LIMITED",
+                                        "message": "Too many events. Slow down.",
+                                    },
+                                ).model_dump_json()
+                            )
+                        continue
 
                 if ws_event.event_type in (
                     WSEventType.TYPING_START,
@@ -190,7 +301,11 @@ async def websocket_endpoint(
                 elif ws_event.event_type == WSEventType.MESSAGE_READ:
                     last_read_id = ws_event.payload.get("last_read_message_id")
 
-                    if not ws_event.chat_id or not last_read_id:
+                    if (
+                        not ws_event.chat_id
+                        or not last_read_id
+                        or not isinstance(last_read_id, str)
+                    ):
                         continue
 
                     # Validate and canonicalize before anything touches Postgres or Mongo.
@@ -271,6 +386,9 @@ async def websocket_endpoint(
         # and a teardown that raises half way through would skip the decrement it exists for.
         if redis_task is not None:
             redis_task.cancel()
+
+        if watcher_task is not None:
+            watcher_task.cancel()
 
         if pubsub is not None:
             try:

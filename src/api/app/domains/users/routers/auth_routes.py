@@ -15,6 +15,7 @@ from app.core.rate_limit import client_identifier, enforce_rate_limit, reset_rat
 from app.core.responses import SuccessResponse
 from app.core.security import (
     create_access_token,
+    DUMMY_PASSWORD_HASH,
     create_refresh_token,
     delete_token_cookies,
     denylist_key,
@@ -26,6 +27,7 @@ from app.core.security import (
 )
 from app.domains.crypto.models import EpochReason
 from app.domains.crypto.services import epoch_service, identity_service
+from app.infrastructure.services.redis_service import publish_session_revoked
 from app.domains.users.dependencies import get_current_unverified_user, get_current_user
 from app.domains.users.models.user import User
 from app.domains.users.schemas.user_schemas import (
@@ -197,7 +199,13 @@ async def login(
 
     user = await user_service.get_user_by_username(db, user_in.username)
 
-    if not user or not verify_password(user_in.password, user.hashed_password):
+    # Always pay for one bcrypt comparison, so an unknown username is not distinguishable from a
+    # wrong password by response time.
+    password_ok = verify_password(
+        user_in.password, user.hashed_password if user else DUMMY_PASSWORD_HASH
+    )
+
+    if not user or not password_ok:
         # Recorded with the attempted username rather than a user id, since there may be no such
         # user — that is the difference between a typo and someone walking the directory.
         await audit.record(
@@ -287,6 +295,7 @@ async def logout(
 
     if subject:
         try:
+            await publish_session_revoked(redis, uuid.UUID(subject), "token")
             await audit.record(
                 mongo_db,
                 AuditEvent.LOGOUT,
@@ -425,6 +434,8 @@ async def reset_password(
     # Same non-answer as forgot-password, for the same reason. The old 404 distinguished "no such
     # user" from "wrong code", so an attacker could enumerate accounts here as well.
     if not user:
+        # Do the same Redis round-trip a real lookup would, so the two cases take alike.
+        await check_otp(redis, "password_reset", "no-such-user", user_data.otp)
         raise AppException(400, "INVALID_OTP", "Invalid or expired code.")
 
     is_valid = await check_otp(redis, "password_reset", user.id, user_data.otp)
@@ -453,6 +464,7 @@ async def reset_password(
     # Every device is revoked, and no replacement session is issued here — the user must log in
     # again with the new password.
     await redis.setex(f"force_logout:{user.id}", 604800, revocation_cutoff())
+    await publish_session_revoked(redis, user.id, "all")
 
     # The most consequential event in the system: the identity is destroyed and every device
     # revoked, so all history becomes unreadable. If it was not the account holder who did this,
@@ -519,6 +531,7 @@ async def change_password(
     # every token issued before it, down to the fraction of a second, does not.
     cutoff = revocation_cutoff()
     await redis.setex(f"force_logout:{current_user.id}", 604800, cutoff)
+    await publish_session_revoked(redis, current_user.id, "all")
 
     new_access_token = create_access_token(data={"sub": str(current_user.id)})
     new_refresh_token = create_refresh_token(data={"sub": str(current_user.id)})

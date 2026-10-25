@@ -64,9 +64,16 @@ jobs:
       RATE_LIMIT_ENABLED: "true"
       RATE_LIMIT_TEST_BYPASS_TOKEN: ci-token
       EXPOSE_API_DOCS: "false"
-      # ALLOWED_WS_ORIGINS intentionally unset: the default (http://localhost:4200) is what the
-      # WebSocket tests send as Origin. SMTP_* intentionally unset: no test needs a mail server
-      # (OTPs are planted in Redis by tests/crypto/otp_helpers.py).
+      # users/tasks.py builds the mail ConnectionConfig at import time, and pydantic rejects a
+      # None username, password or sender, so the API will not start without these. They are
+      # placeholders: no test needs a mail server (OTPs are planted in Redis by
+      # tests/crypto/otp_helpers.py, and the mail tests monkeypatch the sender).
+      # Lets the periodic WebSocket session re-check test finish quickly.
+      WS_SESSION_RECHECK_SECONDS: "3"
+      SMTP_USER: ci@example.com
+      SMTP_PASSWORD: ci-password
+      # ALLOWED_ORIGINS intentionally unset: the default (http://localhost:4200) is what the
+      # WebSocket tests send as Origin.
 
     steps:
       - uses: actions/checkout@v4

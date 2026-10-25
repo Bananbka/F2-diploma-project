@@ -1,10 +1,12 @@
 ﻿import time
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from contextlib import asynccontextmanager
 from loguru import logger
 
 from app.core.config import settings
+from app.core.responses import ErrorResponse
 from app.core.logger import setup_logging
 from app.core.exceptions import (
     AppException,
@@ -78,6 +80,31 @@ def _loggable_path(path: str) -> str:
         if token:
             return f"{prefix}<redacted>{('/' + tail) if tail else ''}"
     return path
+
+
+STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+@app.middleware("http")
+async def enforce_origin(request: Request, call_next):
+    """Refuse a state-changing request whose Origin is present and not allow-listed.
+
+    SameSite=Lax does not stop a request from another origin on the same site (another port in
+    development, a sibling subdomain in production). A request with no Origin header is let
+    through: non-browser clients send none, and the browser cannot be made to omit it cross-site.
+    This is a middleware, so it returns the error body itself rather than raising AppException.
+    """
+    if request.method in STATE_CHANGING_METHODS:
+        origin = request.headers.get("origin")
+        if origin is not None and origin not in settings.ALLOWED_ORIGINS:
+            return JSONResponse(
+                status_code=403,
+                content=ErrorResponse(
+                    error_code="ORIGIN_NOT_ALLOWED",
+                    message="Requests from this origin are not allowed.",
+                ).model_dump(),
+            )
+    return await call_next(request)
 
 
 @app.middleware("http")

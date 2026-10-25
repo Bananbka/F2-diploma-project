@@ -193,7 +193,7 @@ async def test_websocket_requires_an_allowed_origin():
 
 def test_api_docs_are_off_unless_enabled():
     assert Settings.model_fields["EXPOSE_API_DOCS"].default is False
-    assert ALLOWED_ORIGIN in Settings.model_fields["ALLOWED_WS_ORIGINS"].default
+    assert ALLOWED_ORIGIN in Settings.model_fields["ALLOWED_ORIGINS"].default
 
 
 def test_docs_endpoints_return_404_when_the_flag_is_off():
@@ -652,3 +652,218 @@ async def test_idempotency_index_is_partial_and_unique():
     index = indexes["ux_chat_sender_client_msg"]
     assert index["unique"] is True
     assert index["partialFilterExpression"] == {"client_message_id": {"$type": "binData"}}
+
+
+# --- WebSocket session revocation ---
+
+
+async def _login_again(username: str) -> httpx.AsyncClient:
+    from tests.crypto.test_identity_api import rate_limit_bypass_headers
+
+    second = httpx.AsyncClient(
+        base_url=BASE, timeout=30.0, headers=rate_limit_bypass_headers()
+    )
+    r = await second.post(
+        "/auth/login", json={"username": username, "password": "TestPassw0rd!"}
+    )
+    assert r.status_code == 200, r.text
+    return second
+
+
+def _ws(client):
+    return websockets.connect(
+        WS_BASE,
+        additional_headers={"Cookie": _cookie_header(client), "Origin": ALLOWED_ORIGIN},
+    )
+
+
+async def _closed_with(socket, timeout: float = 5.0):
+    """The close code if the server closes the socket within `timeout`, else None."""
+    try:
+        while True:
+            await asyncio.wait_for(socket.recv(), timeout)
+    except websockets.exceptions.ConnectionClosed:
+        return socket.close_code
+    except asyncio.TimeoutError:
+        return None
+
+
+async def test_logout_closes_only_the_sockets_using_the_revoked_token():
+    first, _ = await _register_user()
+    username = (await first.get("/profile/me")).json()["data"]["username"]
+    second = await _login_again(username)
+    try:
+        async with _ws(first) as first_socket, _ws(second) as second_socket:
+            assert (await first.post("/auth/logout")).status_code == 200
+
+            assert await _closed_with(first_socket) == 4401
+            # The other device holds a different, unrevoked token and must stay connected.
+            assert await _closed_with(second_socket, timeout=2.0) is None
+    finally:
+        await first.aclose()
+        await second.aclose()
+
+
+async def test_password_change_closes_every_older_socket():
+    first, _ = await _register_user()
+    username = (await first.get("/profile/me")).json()["data"]["username"]
+    second = await _login_again(username)
+    try:
+        async with _ws(first) as first_socket, _ws(second) as second_socket:
+            r = await second.post("/auth/change-password", json={
+                "old_password": "TestPassw0rd!",
+                "new_password": "BrandNewPassw0rd!",
+                "rewrapped_identities": [],
+            })
+            assert r.status_code == 200, r.text
+
+            assert await _closed_with(first_socket) == 4401
+            assert await _closed_with(second_socket) == 4401
+    finally:
+        await first.aclose()
+        await second.aclose()
+
+
+@pytest.mark.skipif(
+    settings.WS_SESSION_RECHECK_SECONDS > 10,
+    reason="needs WS_SESSION_RECHECK_SECONDS <= 10 on the server",
+)
+async def test_periodic_recheck_closes_a_socket_revoked_without_an_event(redis):
+    client, _ = await _register_user()
+    key = f"blacklist:{hashlib.sha256(client.cookies.get('access_token').encode()).hexdigest()}"
+    try:
+        async with _ws(client) as socket:
+            # Denylisted directly: nothing is published, so only the timer can notice.
+            await redis.setex(key, 60, "revoked")
+            code = await _closed_with(socket, timeout=settings.WS_SESSION_RECHECK_SECONDS + 5)
+            assert code == 4401
+    finally:
+        await redis.delete(key)
+        await client.aclose()
+
+
+# --- HTTP Origin check ---
+
+
+async def test_state_changing_requests_from_foreign_origins_are_refused():
+    client, _ = await _register_user()
+    try:
+        evil = {"Origin": "https://evil.example"}
+        for method in ("post", "put", "patch", "delete"):
+            r = await getattr(client, method)("/profile/me", headers=evil)
+            assert r.status_code == 403, (method, r.text)
+            assert r.json()["error_code"] == "ORIGIN_NOT_ALLOWED"
+
+        r = await client.post("/auth/logout", headers={"Origin": "null"})
+        assert r.status_code == 403
+
+        # Reads, allow-listed origins and requests with no Origin header are unaffected.
+        assert (await client.get("/profile/me", headers=evil)).status_code == 200
+        r = await client.patch("/profile/me", json={"bio": "x"}, headers={"Origin": ALLOWED_ORIGIN})
+        assert r.status_code == 200, r.text
+        r = await client.patch("/profile/me", json={"bio": "y"})
+        assert r.status_code == 200, r.text
+    finally:
+        await client.aclose()
+
+
+def test_old_ws_origins_name_is_still_read_as_a_fallback(monkeypatch):
+    monkeypatch.delenv("ALLOWED_ORIGINS", raising=False)
+    monkeypatch.setenv("ALLOWED_WS_ORIGINS", '["https://old.example"]')
+    assert Settings().ALLOWED_ORIGINS == ["https://old.example"]
+
+    monkeypatch.setenv("ALLOWED_ORIGINS", '["https://new.example"]')
+    assert Settings().ALLOWED_ORIGINS == ["https://new.example"]
+
+
+# --- WebSocket inbound hygiene ---
+
+
+async def test_typing_payload_is_stripped_before_relay():
+    alice, _ = await _register_user()
+    bob, bob_id = await _register_user()
+    try:
+        chat_id = await _group_with(alice, bob_id)
+        async with _ws(alice) as a_socket, _ws(bob) as b_socket:
+            await asyncio.sleep(0.5)  # let both sockets finish subscribing
+            await a_socket.send(json.dumps({
+                "event_type": "typing_start",
+                "chat_id": str(chat_id),
+                "payload": {"smuggled": "data", "html": "<b>x</b>"},
+            }))
+            while True:
+                frame = json.loads(await asyncio.wait_for(b_socket.recv(), 5))
+                if frame["event_type"] == "typing_start":
+                    break
+            assert frame["payload"] == {}
+    finally:
+        await alice.aclose()
+        await bob.aclose()
+
+
+async def test_flooding_typing_frames_is_throttled():
+    alice, _ = await _register_user()
+    bob, bob_id = await _register_user()
+    try:
+        chat_id = await _group_with(alice, bob_id)
+        async with _ws(alice) as a_socket, _ws(bob) as b_socket:
+            await asyncio.sleep(0.5)  # let both sockets finish subscribing
+            frame = json.dumps({"event_type": "typing_start", "chat_id": str(chat_id), "payload": {}})
+            for _ in range(60):
+                await a_socket.send(frame)
+
+            while True:
+                notice = json.loads(await asyncio.wait_for(a_socket.recv(), 5))
+                if notice["event_type"] == "error":
+                    break
+            assert notice["payload"]["error_code"] == "RATE_LIMITED"
+
+            relayed = 0
+            try:
+                while True:
+                    f = json.loads(await asyncio.wait_for(b_socket.recv(), 1.5))
+                    relayed += f["event_type"] == "typing_start"
+            except asyncio.TimeoutError:
+                pass
+            assert 1 <= relayed <= 15
+    finally:
+        await alice.aclose()
+        await bob.aclose()
+
+
+def test_inbound_payload_whitelist_covers_every_relayed_event():
+    from app.domains.messages.routes.ws_router import ALLOWED_INBOUND_PAYLOAD_KEYS
+
+    assert ALLOWED_INBOUND_PAYLOAD_KEYS["typing_start"] == frozenset()
+    assert ALLOWED_INBOUND_PAYLOAD_KEYS["typing_stop"] == frozenset()
+    assert ALLOWED_INBOUND_PAYLOAD_KEYS["message_read"] == frozenset({"last_read_message_id"})
+
+
+# --- login timing ---
+
+
+async def test_login_with_an_unknown_user_costs_a_password_hash_too():
+    import statistics
+    import time
+
+    from tests.crypto.test_identity_api import rate_limit_bypass_headers
+
+    client, _ = await _register_user()
+    username = (await client.get("/profile/me")).json()["data"]["username"]
+    anon = httpx.AsyncClient(base_url=BASE, timeout=30.0, headers=rate_limit_bypass_headers())
+    try:
+        async def timed(name):
+            start = time.perf_counter()
+            r = await anon.post("/auth/login", json={"username": name, "password": "WrongPassw0rd!"})
+            assert r.status_code == 401, r.text
+            return time.perf_counter() - start
+
+        known = statistics.median([await timed(username) for _ in range(5)])
+        unknown = statistics.median([await timed(f"nobody{uuid.uuid4().hex[:10]}") for _ in range(5)])
+
+        # bcrypt dominates a real check (~100 ms+); without the dummy compare the unknown case
+        # is an order of magnitude faster.
+        assert unknown > known * 0.5, (known, unknown)
+    finally:
+        await anon.aclose()
+        await client.aclose()

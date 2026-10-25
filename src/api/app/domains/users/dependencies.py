@@ -4,6 +4,7 @@ import jwt
 from fastapi import Depends, Request, WebSocketException
 from fastapi.security import OAuth2PasswordBearer
 from redis import Redis
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette import status
 from starlette.websockets import WebSocket
@@ -13,7 +14,7 @@ from app.core.exceptions import AppException
 from app.core.security import is_token_revoked
 from app.domains.users.models.user import User
 from app.domains.users.services.user_service import get_user_by_id
-from app.infrastructure.postgres import get_db
+from app.infrastructure.postgres import AsyncSessionLocal, get_db
 from app.infrastructure.redis import get_redis
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
@@ -96,8 +97,40 @@ async def check_ws_origin(websocket: WebSocket) -> None:
     socket in their browser. Non-browser clients must send an allowed Origin explicitly.
     """
     origin = websocket.headers.get("origin")
-    if not origin or origin not in settings.ALLOWED_WS_ORIGINS:
+    if not origin or origin not in settings.ALLOWED_ORIGINS:
         raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION)
+
+
+async def ws_session_is_valid(redis, token: str) -> bool:
+    """Re-run the handshake checks for a socket that is already open.
+
+    The handshake validates the session once; without this an open socket would outlive logout,
+    a password change, account disabling and the token's own expiry. A fresh DB session is used
+    because the socket's request-scoped one is busy in the receive loop.
+    """
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        user_id = uuid.UUID(payload.get("sub"))
+    except (jwt.PyJWTError, TypeError, ValueError):
+        return False
+
+    if payload.get("refresh") or await is_token_revoked(redis, token):
+        return False
+
+    iat = payload.get("iat")
+    if iat:
+        logout_timestamp = await redis.get(f"force_logout:{user_id}")
+        if logout_timestamp and float(iat) < float(logout_timestamp):
+            return False
+
+    async with AsyncSessionLocal() as session:
+        row = (
+            await session.execute(
+                select(User.is_active, User.is_verified).where(User.id == user_id)
+            )
+        ).one_or_none()
+
+    return row is not None and bool(row.is_active) and bool(row.is_verified)
 
 
 async def get_ws_current_user(

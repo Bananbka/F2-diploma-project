@@ -1,3 +1,4 @@
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -51,11 +52,20 @@ class Settings(BaseSettings):
     # `None` by default, and leaving it unset is what keeps this dead code in production.
     RATE_LIMIT_TEST_BYPASS_TOKEN: str | None = None
 
-    # Origins allowed to open the WebSocket. Browsers always send Origin on a WS handshake, so a
-    # missing or foreign one is refused: cookie auth alone would let any site the user visits
-    # open an authenticated socket (cross-site WebSocket hijacking).
-    # Set from the environment as JSON, e.g. ALLOWED_WS_ORIGINS=["https://chat.example.com"].
-    ALLOWED_WS_ORIGINS: list[str] = ["http://localhost:4200", "http://127.0.0.1:4200"]
+    # Browser origins the API trusts. Browsers always send Origin on a WS handshake, so a missing
+    # or foreign one is refused there: cookie auth alone would let any site the user visits open an
+    # authenticated socket (cross-site WebSocket hijacking). The same list gates state-changing
+    # HTTP methods, but only when an Origin header is present (non-browser clients send none).
+    # Set from the environment as JSON, e.g. ALLOWED_ORIGINS=["https://chat.example.com"].
+    # The earlier name ALLOWED_WS_ORIGINS is still read as a fallback.
+    ALLOWED_ORIGINS: list[str] = Field(
+        default=["http://localhost:4200", "http://127.0.0.1:4200"],
+        validation_alias=AliasChoices("ALLOWED_ORIGINS", "ALLOWED_WS_ORIGINS"),
+    )
+
+    # How often an open WebSocket re-validates its session (denylist, force_logout, is_active,
+    # token expiry), in seconds. Revocation events close it immediately; this is the backstop.
+    WS_SESSION_RECHECK_SECONDS: int = 60
 
     # Swagger/ReDoc/openapi.json are off unless explicitly enabled (dev only).
     EXPOSE_API_DOCS: bool = False

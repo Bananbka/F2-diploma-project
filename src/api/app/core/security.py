@@ -48,6 +48,10 @@ async def is_token_revoked(redis, token: str) -> bool:
     )
 
 
+# Verified against when a login names no real user, so both paths cost one bcrypt comparison.
+DUMMY_PASSWORD_HASH = get_password_hash("dummy-password-for-constant-time-login")
+
+
 def issued_now() -> float:
     """The `iat` to stamp on a token, as a fractional epoch second.
 

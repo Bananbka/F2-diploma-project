@@ -1,3 +1,4 @@
+import time
 import uuid
 
 from redis.asyncio import Redis
@@ -29,6 +30,20 @@ async def send_key_epoch_started(
 
     for recipient_id in set(recipient_ids):
         await redis.publish(f"user:{recipient_id}", event_json)
+
+
+async def publish_session_revoked(redis: Redis, user_id: uuid.UUID, scope: str) -> None:
+    """Tell every open socket of a user that a session was revoked (`scope`: "token" or "all").
+
+    Sockets re-check their own session on receipt, so a logout that revokes one token closes only
+    the sockets authenticated with it, while a force_logout closes all of those it covers.
+    """
+    envelope = WSMessageEnvelope(
+        event_type=WSEventType.SESSION_REVOKED,
+        user_id=user_id,
+        payload={"scope": scope, "revoked_at": time.time()},
+    )
+    await redis.publish(f"user:{user_id}", envelope.model_dump_json())
 
 
 async def _publish(redis: Redis, envelope: WSMessageEnvelope, recipient_ids) -> None:
