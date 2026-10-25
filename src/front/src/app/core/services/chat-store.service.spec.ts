@@ -7,7 +7,7 @@ import { ChatKeys, MessageAttachment, MessageResponse } from '../models/crypto.m
 import { ChatApiService } from './chat-api.service';
 import { ChatStoreService } from './chat-store.service';
 import { CryptoApiService } from './crypto-api.service';
-import { RosterVerificationError } from './crypto-errors';
+import { MemberSetMismatchError, RetryLimitExceededError, RosterVerificationError } from './crypto-errors';
 import { DirectoryService } from './directory.service';
 import { DecryptedMessage, DecryptStatus, MessageService } from './message.service';
 import { SessionService } from './session.service';
@@ -110,6 +110,7 @@ describe('ChatStoreService', () => {
                         'sendChannelPost',
                         'recordOutgoing',
                         'patchMeta',
+                        'forgetOne',
                         'editText',
                     ]),
                 },
@@ -126,6 +127,7 @@ describe('ChatStoreService', () => {
                     provide: WebSocketService,
                     useValue: {
                         messages: new Subject(),
+                        reconnected: new Subject<void>(),
                         isConnected: () => true,
                         sendRead: () => undefined,
                         sendTyping: () => undefined,
@@ -399,6 +401,52 @@ describe('ChatStoreService', () => {
             expect(store.pending()[0].clientMessageId).toBe(failed.clientMessageId);
             // The retry is the same message, not a stripped copy of it.
             expect(messages.sendText.calls.argsFor(1)[2]).toBe('reply-target');
+        });
+
+        it('ends a send that stays EPOCH_STALE as failed with a working Retry, keeping the id', async () => {
+            const stale = new HttpErrorResponse({
+                status: 409,
+                error: { error_code: 'EPOCH_STALE', details: { current_epoch: 3 } },
+            });
+            // MessageService has already spent its single automatic re-seal when this reaches us.
+            messages.sendText.and.rejectWith(stale);
+            await store.send('hello');
+
+            const failed = store.pending()[0];
+            expect(failed.status).toBe('failed');
+            expect(failed.rekeyFailure).toBeTrue();
+            expect(failed.clientMessageId).toBe(idOfCall(0));
+            // The store must not loop on its own: one call, then it waits for the user.
+            expect(messages.sendText).toHaveBeenCalledTimes(1);
+
+            messages.sendText.and.resolveTo(messageResponse({ _id: 'z1' }));
+            messages.recordOutgoing.and.returnValue(decrypted('z1', 'ok'));
+            await store.retry(failed.localId);
+
+            expect(idOfCall(1)).toBe(failed.clientMessageId);
+            expect(store.pending().length).toBe(0);
+        });
+
+        it('shows RETRY_LIMIT_EXCEEDED as its own retryable failure, not a roster alarm', async () => {
+            messages.sendText.and.rejectWith(new RetryLimitExceededError(3, new Error('503')));
+            await store.send('hello');
+
+            const failed = store.pending()[0];
+            expect(failed.status).toBe('failed');
+            expect(failed.keyPublishFailure).toBeTrue();
+            expect(failed.rekeyFailure).toBeFalse();
+            expect(store.canSend()).toBeTrue();
+            expect(store.memberVerificationError()).toBeNull();
+        });
+
+        it('records which roster refusal fired', async () => {
+            messages.sendText.and.rejectWith(new MemberSetMismatchError('Member set verification failed'));
+            await store.send('a');
+            expect(store.memberVerificationCode()).toBe('MEMBER_SET_MISMATCH');
+
+            messages.sendText.and.rejectWith(new RosterVerificationError('Roster verification failed'));
+            await store.send('b');
+            expect(store.memberVerificationCode()).toBe('ROSTER_VERIFICATION_FAILED');
         });
 
         it('mints a fresh id on Retry only after IDEMPOTENCY_KEY_REUSED', async () => {
@@ -777,6 +825,140 @@ describe('ChatStoreService', () => {
 
             expect(store.activeChat()?.participants).toEqual(hydrated.participants);
             expect(store.readReceipt(decrypted('a', 'ok'))).toEqual({ readCount: 1, total: 1 });
+        });
+    });
+
+    describe('event stream', () => {
+        let ws: { messages: Subject<unknown>; reconnected: Subject<void> };
+        let chatApi: jasmine.SpyObj<ChatApiService>;
+        let messages: jasmine.SpyObj<MessageService>;
+
+        beforeEach(() => {
+            ws = TestBed.inject(WebSocketService) as unknown as typeof ws;
+            chatApi = TestBed.inject(ChatApiService) as jasmine.SpyObj<ChatApiService>;
+            messages = TestBed.inject(MessageService) as jasmine.SpyObj<MessageService>;
+            chatApi.getChats.and.returnValue(of([chat()]));
+            chatApi.getPinnedMessages.and.returnValue(of([]) as never);
+            chatApi.getReadState.and.returnValue(of([]) as never);
+            messages.loadMessages.and.resolveTo({ raw: [], messages: [] });
+            store.chats.set([chat()]);
+            store.activeChatId.set(CHAT);
+            store.bindRealtime();
+            // The session-teardown effect runs once on creation; let it, so it cannot fire mid-test.
+            TestBed.flushEffects();
+        });
+
+        const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+        it('reloads the chat list and open conversation on resync_required', async () => {
+            chatApi.getChats.calls.reset();
+            messages.loadMessages.calls.reset();
+
+            ws.messages.next({
+                event_type: 'resync_required',
+                payload: { reason: 'stream_gap', cursor: '5-0' },
+            });
+            await settle();
+
+            expect(chatApi.getChats).toHaveBeenCalledTimes(1);
+            expect(messages.loadMessages).toHaveBeenCalled();
+        });
+
+        it('treats an unknown resync reason like any other resync', async () => {
+            chatApi.getChats.calls.reset();
+            ws.messages.next({ event_type: 'resync_required', payload: { reason: 'something_new', cursor: null } });
+            await settle();
+            expect(chatApi.getChats).toHaveBeenCalledTimes(1);
+        });
+
+        it('still reloads over HTTP after a plain reconnect', async () => {
+            chatApi.getChats.calls.reset();
+            ws.reconnected.next();
+            await settle();
+            expect(chatApi.getChats).toHaveBeenCalledTimes(1);
+        });
+
+        it('does not duplicate a replayed message', async () => {
+            messages.decrypt.and.resolveTo(decrypted('64b000000000000000000001', 'ok'));
+            const frame = {
+                event_type: 'new_message',
+                chat_id: CHAT,
+                stream_id: '10-0',
+                payload: { _id: '64b000000000000000000001' },
+            };
+
+            ws.messages.next(frame);
+            await settle();
+            ws.messages.next(frame);
+            await settle();
+
+            expect(store.messages().filter((m) => m.id === '64b000000000000000000001').length).toBe(1);
+        });
+
+        const ID = '64b000000000000000000009';
+        const created = { event_type: 'new_message', chat_id: CHAT, payload: { _id: ID } };
+        const edited = { event_type: 'message_edited', chat_id: CHAT, payload: { _id: ID } };
+        const deleted = { event_type: 'message_deleted', chat_id: CHAT, payload: { message_id: ID } };
+
+        it('applies a replayed create, edit and delete in order, ending with the message gone', async () => {
+            const order: string[] = [];
+            messages.decrypt.and.callFake(async () => {
+                order.push('decrypt');
+                // The first decrypt is slower than the events behind it.
+                await new Promise((resolve) => setTimeout(resolve, order.length === 1 ? 30 : 1));
+                return { ...decrypted(ID, 'ok'), text: `v${order.length}` };
+            });
+
+            ws.messages.next(created);
+            ws.messages.next(edited);
+            ws.messages.next(deleted);
+            await new Promise((resolve) => setTimeout(resolve, 100));
+
+            expect(order).toEqual(['decrypt', 'decrypt']);
+            expect(store.messages().some((m) => m.id === ID)).toBeFalse();
+        });
+
+        it('ignores a decrypt that finishes after the message was deleted', async () => {
+            let release!: () => void;
+            messages.decrypt.and.callFake(
+                () => new Promise((resolve) => (release = () => resolve(decrypted(ID, 'ok'))))
+            );
+
+            ws.messages.next(created);
+            await settle();
+            ws.messages.next(deleted);
+            release();
+            await new Promise((resolve) => setTimeout(resolve, 50));
+
+            expect(store.messages().some((m) => m.id === ID)).toBeFalse();
+        });
+
+        it('does not resurrect a deleted message from a late replay of its creation', async () => {
+            messages.decrypt.and.resolveTo(decrypted(ID, 'ok'));
+
+            ws.messages.next(deleted);
+            await settle();
+            ws.messages.next(created);
+            await settle();
+
+            expect(store.messages().some((m) => m.id === ID)).toBeFalse();
+            expect(messages.decrypt).not.toHaveBeenCalled();
+        });
+
+        it('does not count a replayed message twice towards unread in a closed chat', async () => {
+            store.activeChatId.set(null);
+            store.chats.set([chat({ unread_count: 0 })]);
+            const frame = {
+                event_type: 'new_message',
+                chat_id: CHAT,
+                payload: { _id: '64b000000000000000000002' },
+            };
+
+            ws.messages.next(frame);
+            ws.messages.next(frame);
+            await settle();
+
+            expect(store.chats()[0].unread_count).toBe(1);
         });
     });
 });

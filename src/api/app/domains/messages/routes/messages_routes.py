@@ -2,6 +2,7 @@
 from fastapi import Path
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from sqlalchemy.ext.asyncio import AsyncSession
+from loguru import logger
 from redis.asyncio import Redis
 
 from app.core.exceptions import AppException
@@ -22,6 +23,10 @@ from app.domains.users.models import User
 from app.infrastructure.mongo import get_mongo_db
 from app.infrastructure.postgres import get_db
 from app.infrastructure.redis import get_redis
+from app.infrastructure.services.event_publisher import (
+    EventPublisher,
+    get_event_publisher,
+)
 
 router = APIRouter(prefix="/messages", tags=["Messages"])
 
@@ -40,19 +45,39 @@ PIN_WRITE_WINDOW = 60
 PIN_WRITE_LIMIT = 60
 
 
-async def _broadcast(
-    redis: Redis, db: AsyncSession, event_type: WSEventType, msg: MessageResponse, user_id
+async def _fan_out(
+    publisher: EventPublisher, db: AsyncSession, chat_id, envelope: WSMessageEnvelope
 ) -> None:
-    participant_ids = await get_chat_participants_ids(db, msg.chat_id)
-    ws_envelope = WSMessageEnvelope(
-        event_type=event_type,
-        chat_id=msg.chat_id,
-        user_id=user_id,
-        payload=msg.model_dump(mode="json", by_alias=True),
+    """Deliver an event to every participant of a chat, after the write it describes was saved.
+
+    A failure here is logged and swallowed. The message is already committed, so answering 5xx
+    would make the client retry and the user see a duplicate (or a spurious "not sent"); the
+    response stays what the write actually was. Members who missed the live event get it from
+    their stream cursor or the next HTTP reload.
+    """
+    try:
+        participant_ids = await get_chat_participants_ids(db, chat_id)
+        await publisher.publish_durable(envelope, participant_ids)
+    except Exception:
+        logger.exception(
+            f"event fan-out failed after save: type={envelope.event_type} chat={chat_id}"
+        )
+
+
+async def _broadcast(
+    publisher: EventPublisher, db: AsyncSession, event_type: WSEventType, msg: MessageResponse, user_id
+) -> None:
+    await _fan_out(
+        publisher,
+        db,
+        msg.chat_id,
+        WSMessageEnvelope(
+            event_type=event_type,
+            chat_id=msg.chat_id,
+            user_id=user_id,
+            payload=msg.model_dump(mode="json", by_alias=True),
+        ),
     )
-    message_json = ws_envelope.model_dump_json()
-    for participant_id in participant_ids:
-        await redis.publish(f"user:{participant_id}", message_json)
 
 
 # MESSAGES CRUD
@@ -62,6 +87,7 @@ async def _broadcast(
 async def create_message(
         message_in: MessageCreateRequest, response: Response, user: User = Depends(get_current_user),
         db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis),
+        publisher: EventPublisher = Depends(get_event_publisher),
         mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db)
 ):
     await enforce_rate_limit(
@@ -80,17 +106,7 @@ async def create_message(
         # between the insert and the publish, and clients dedup by message id.
         response.status_code = 200
 
-    participant_ids = await get_chat_participants_ids(db, new_msg.chat_id)
-    ws_envelope = WSMessageEnvelope(
-        event_type=WSEventType.NEW_MESSAGE,
-        chat_id=new_msg.chat_id,
-        user_id=user.id,
-        payload=new_msg.model_dump(mode='json', by_alias=True)
-    )
-
-    message_json = ws_envelope.model_dump_json()
-    for user_id in participant_ids:
-        await redis.publish(f"user:{user_id}", message_json)
+    await _broadcast(publisher, db, WSEventType.NEW_MESSAGE, new_msg, user.id)
 
     return SuccessResponse(data=new_msg)
 
@@ -100,7 +116,8 @@ async def edit_message(
         message_in: MessageUpdateRequest,
         message_id: str = Path(..., description="Message ID"), user: User = Depends(get_current_user),
         db: AsyncSession = Depends(get_db), mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
-        redis: Redis = Depends(get_redis)
+        redis: Redis = Depends(get_redis),
+        publisher: EventPublisher = Depends(get_event_publisher)
 ):
     await enforce_rate_limit(
         redis,
@@ -113,17 +130,7 @@ async def edit_message(
 
     upd_msg = await messages_service.update_message(db, mongo_db, user.id, message_id, message_in)
 
-    participant_ids = await get_chat_participants_ids(db, upd_msg.chat_id)
-    ws_envelope = WSMessageEnvelope(
-        event_type=WSEventType.MESSAGE_EDITED,
-        chat_id=upd_msg.chat_id,
-        user_id=user.id,
-        payload=upd_msg.model_dump(mode='json', by_alias=True)
-    )
-
-    message_json = ws_envelope.model_dump_json()
-    for user_id in participant_ids:
-        await redis.publish(f"user:{user_id}", message_json)
+    await _broadcast(publisher, db, WSEventType.MESSAGE_EDITED, upd_msg, user.id)
 
     return SuccessResponse(data=upd_msg)
 
@@ -132,21 +139,21 @@ async def edit_message(
 async def delete_message(
         message_id: str = Path(..., description="Message ID"), user: User = Depends(get_current_user),
         db: AsyncSession = Depends(get_db), mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
-        redis: Redis = Depends(get_redis)
+        publisher: EventPublisher = Depends(get_event_publisher)
 ):
     chat_id = await messages_service.delete_message(db, mongo_db, user.id, message_id)
 
-    participant_ids = await get_chat_participants_ids(db, chat_id)
-    ws_envelope = WSMessageEnvelope(
-        event_type=WSEventType.MESSAGE_DELETED,
-        chat_id=chat_id,
-        user_id=user.id,
-        payload={"message_id": str(message_id)}
+    await _fan_out(
+        publisher,
+        db,
+        chat_id,
+        WSMessageEnvelope(
+            event_type=WSEventType.MESSAGE_DELETED,
+            chat_id=chat_id,
+            user_id=user.id,
+            payload={"message_id": str(message_id)},
+        ),
     )
-
-    message_json = ws_envelope.model_dump_json()
-    for user_id in participant_ids:
-        await redis.publish(f"user:{user_id}", message_json)
 
     return SuccessResponse(data={"message": "Message deleted"})
 
@@ -157,7 +164,8 @@ async def react_to_message(
         reaction_in: ReactionRequest,
         message_id: str = Path(..., description="Message ID"), user: User = Depends(get_current_user),
         db: AsyncSession = Depends(get_db), mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
-        redis: Redis = Depends(get_redis)
+        redis: Redis = Depends(get_redis),
+        publisher: EventPublisher = Depends(get_event_publisher)
 ):
     """Toggle the caller's reaction with this emoji.
 
@@ -179,7 +187,7 @@ async def react_to_message(
     )
 
     await _broadcast(
-        redis,
+        publisher,
         db,
         WSEventType.MESSAGE_REACTION_ADDED if added else WSEventType.MESSAGE_REACTION_REMOVED,
         msg,
@@ -197,7 +205,8 @@ async def unreact_to_message(
         emoji: str = Path(..., description="The emoji to remove", min_length=1, max_length=8),
         user: User = Depends(get_current_user),
         db: AsyncSession = Depends(get_db), mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
-        redis: Redis = Depends(get_redis)
+        redis: Redis = Depends(get_redis),
+        publisher: EventPublisher = Depends(get_event_publisher)
 ):
     """Explicit removal, distinct from the toggle above and idempotent: removing a reaction that
     was never there is a success, not a 404."""
@@ -217,7 +226,7 @@ async def unreact_to_message(
 
     msg = await messages_service.remove_reaction(db, mongo_db, user.id, message_id, emoji)
 
-    await _broadcast(redis, db, WSEventType.MESSAGE_REACTION_REMOVED, msg, user.id)
+    await _broadcast(publisher, db, WSEventType.MESSAGE_REACTION_REMOVED, msg, user.id)
 
     return SuccessResponse(data=msg)
 
@@ -227,7 +236,8 @@ async def unreact_to_message(
 async def pin_message(
         message_id: str = Path(..., description="Message ID"), user: User = Depends(get_current_user),
         db: AsyncSession = Depends(get_db), mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
-        redis: Redis = Depends(get_redis)
+        redis: Redis = Depends(get_redis),
+        publisher: EventPublisher = Depends(get_event_publisher)
 ):
     """Pin a message. Open to either participant in a private chat; admins and the owner only in
     groups and channels. Idempotent, and bounded by a per-chat cap — see `messages_service.pin_message`."""
@@ -242,7 +252,7 @@ async def pin_message(
 
     msg = await messages_service.pin_message(db, mongo_db, user.id, message_id)
 
-    await _broadcast(redis, db, WSEventType.MESSAGE_PINNED, msg, user.id)
+    await _broadcast(publisher, db, WSEventType.MESSAGE_PINNED, msg, user.id)
 
     return SuccessResponse(data=msg)
 
@@ -251,7 +261,8 @@ async def pin_message(
 async def unpin_message(
         message_id: str = Path(..., description="Message ID"), user: User = Depends(get_current_user),
         db: AsyncSession = Depends(get_db), mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
-        redis: Redis = Depends(get_redis)
+        redis: Redis = Depends(get_redis),
+        publisher: EventPublisher = Depends(get_event_publisher)
 ):
     """Unpin a message. Same permission rule as pinning. Idempotent."""
     await enforce_rate_limit(
@@ -265,6 +276,6 @@ async def unpin_message(
 
     msg = await messages_service.unpin_message(db, mongo_db, user.id, message_id)
 
-    await _broadcast(redis, db, WSEventType.MESSAGE_UNPINNED, msg, user.id)
+    await _broadcast(publisher, db, WSEventType.MESSAGE_UNPINNED, msg, user.id)
 
     return SuccessResponse(data=msg)

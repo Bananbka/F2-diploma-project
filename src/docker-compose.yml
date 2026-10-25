@@ -35,7 +35,8 @@ services:
   redis:
     image: redis:8-alpine
     restart: always
-    # Redis carries the entire message fan-out, the access-token denylist and the Celery broker.
+    # Redis carries the access-token denylist, force-logout cutoffs, OTPs, rate limits, presence and
+    # the Celery broker. WebSocket events are NOT here any more: see `redis-events`.
     # Unauthenticated, anyone who can reach it can publish forged events into any user's channel,
     # clear the denylist, or queue arbitrary Celery tasks — so it needs a password, and it does
     # not need to be reachable from outside the compose network at all.
@@ -56,6 +57,32 @@ services:
       - redis_data:/data
     healthcheck:
       test: [ "CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Event traffic (WebSocket fan-out, per-user streams, replay cursors) lives here, apart from
+  # `redis`. The two have opposite requirements: `redis` holds the token denylist and must never
+  # evict or lose a key, while event streams are a bounded, disposable cache that must evict
+  # under pressure instead of failing writes. Sharing one instance made streams compete with
+  # `blacklist:` keys for a noeviction budget.
+  #
+  # No persistence on purpose (`--save ""`, no AOF): a restart empties it, every client then gets
+  # `resync_required` and reloads over HTTP, and deleted content cannot outlive its TTL on disk.
+  redis-events:
+    image: redis:8-alpine
+    restart: always
+    command: >
+      redis-server
+      --requirepass ${EVENTS_REDIS_PASSWORD:?EVENTS_REDIS_PASSWORD must be set in src/.env}
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+      --appendonly no
+    expose:
+      - "6379"
+    healthcheck:
+      test: [ "CMD", "redis-cli", "-a", "${EVENTS_REDIS_PASSWORD}", "ping" ]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -105,6 +132,8 @@ services:
         condition: service_started
       redis:
         condition: service_started
+      redis-events:
+        condition: service_healthy
       rustfs:
         condition: service_started
     # --no-access-log: uvicorn's default access logger writes the full request path — including

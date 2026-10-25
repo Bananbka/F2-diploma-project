@@ -34,6 +34,9 @@ class WSEventType(str, Enum):
     # Published on user:{id} when a session is revoked. Never relayed to the client: each socket
     # re-validates its own session on receipt and closes itself only if it is the one affected.
     SESSION_REVOKED = "session_revoked"
+    # Sent on connect when the client's cursor cannot be replayed from (malformed, older than the
+    # stream, beyond its TTL or cap, or ahead of it). The client reloads over HTTP.
+    RESYNC_REQUIRED = "resync_required"
     ERROR = "error"
 
 
@@ -42,6 +45,10 @@ class WSMessageEnvelope(BaseModel):
     chat_id: uuid.UUID | None = None
     user_id: uuid.UUID | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
+    # Id of this event in the recipient's `stream:user:{id}`; the cursor a client hands back on
+    # reconnect. Only durable events carry it, and it is added at publish time (per recipient, since
+    # every recipient has their own stream), so it is never set on an envelope by hand.
+    stream_id: str | None = None
 
     model_config = {
         "use_enum_values": True,

@@ -13,7 +13,10 @@ import {
     isCryptoNotEnabled,
     isEnableForbidden,
     isEncryptionRefused,
+    isRetryLimitExceeded,
     isRosterVerificationFailure,
+    RosterFailureCode,
+    RosterVerificationError,
 } from './crypto-errors';
 import { DirectoryService } from './directory.service';
 import { DecryptedMessage, MessageService } from './message.service';
@@ -44,6 +47,11 @@ export interface PendingMessage {
     status: 'sending' | 'failed';
     /** True when the failure survived the automatic EPOCH_STALE re-encrypt-and-retry. */
     rekeyFailure: boolean;
+    /**
+     * Publishing our sender key kept failing (RETRY_LIMIT_EXCEEDED). Nothing is wrong with the
+     * roster - the send just did not go through - so it is a retryable failure with its own wording.
+     */
+    keyPublishFailure?: boolean;
     /**
      * Idempotency key for this logical message, minted once and kept across every retry — the
      * automatic EPOCH_STALE one and the user-pressed "Retry" alike.
@@ -159,6 +167,12 @@ export class ChatStoreService {
      * distribution is refused and sending is blocked. This is the highest-severity state in the app.
      */
     readonly memberVerificationError = signal<string | null>(null);
+
+    /**
+     * Which of the two roster refusals fired. Kept beside the message because the binding-signature
+     * failure is the stronger signal and the banner says so (docs/ui-states.md).
+     */
+    readonly memberVerificationCode = signal<RosterFailureCode | null>(null);
 
     /**
      * Encryption could not be enabled for this chat — the group exceeds the member ceiling that
@@ -285,6 +299,17 @@ export class ChatStoreService {
 
     constructor() {
         // Reloading on chat change keeps the component free of imperative fetch orchestration.
+        // Session-scoped bookkeeping must not outlive the account that produced it.
+        effect(() => {
+            if (!this.session.user()) {
+                untracked(() => {
+                    this.deletedIds.clear();
+                    this.chatQueues.clear();
+                    this.countedUnread.clear();
+                });
+            }
+        });
+
         effect(() => {
             const chatId = this.activeChatId();
             untracked(() => {
@@ -297,6 +322,38 @@ export class ChatStoreService {
         });
     }
 
+    /**
+     * Ids of messages deleted this session. A decrypt or reload that finishes after the deletion
+     * must not bring the message back, and a replayed `new_message` for it must be ignored.
+     * Cleared on logout.
+     */
+    private readonly deletedIds = new Set<string>();
+
+    /** Per-chat tail of the event-handling chain, so replayed events apply in the order received. */
+    private readonly chatQueues = new Map<string, Promise<void>>();
+
+    private rememberDeleted(id: string): void {
+        this.deletedIds.add(id);
+        if (this.deletedIds.size > 5000) {
+            this.deletedIds.delete(this.deletedIds.values().next().value as string);
+        }
+    }
+
+    /** Run `work` after everything already queued for this chat has settled. Never rejects. */
+    private enqueue(chatId: string | null, work: () => Promise<void> | void): void {
+        const key = chatId ?? '';
+        const next = (this.chatQueues.get(key) ?? Promise.resolve()).then(work).catch(() => undefined);
+        this.chatQueues.set(key, next);
+        void next.then(() => {
+            if (this.chatQueues.get(key) === next) {
+                this.chatQueues.delete(key);
+            }
+        });
+    }
+
+    /** Message ids already counted as unread while their chat was closed; makes replay idempotent. */
+    private readonly countedUnread = new Set<string>();
+
     /** Subscribe to the realtime stream once. Safe to call from every shell instantiation. */
     bindRealtime(): void {
         if (this.wsBound) {
@@ -304,16 +361,24 @@ export class ChatStoreService {
         }
         this.wsBound = true;
 
+        // A plain reconnect reloads over HTTP even though the server may have replayed what we
+        // missed: replay is bounded and unacknowledged, so the reload stays the safety net.
+        this.ws.reconnected.subscribe(() => void this.reloadAfterGap());
+
         this.ws.messages.subscribe((event) => {
             switch (event.event_type) {
+                case 'resync_required':
+                    // The cursor was already adopted or cleared by the socket service.
+                    void this.reloadAfterGap();
+                    break;
                 case 'new_message':
-                    void this.onIncomingMessage(event.chat_id, event.payload);
+                    this.enqueue(event.chat_id, () => this.onIncomingMessage(event.chat_id, event.payload));
                     break;
                 case 'message_edited':
-                    void this.onMessageEdited(event.chat_id, event.payload);
+                    this.enqueue(event.chat_id, () => this.onMessageEdited(event.chat_id, event.payload));
                     break;
                 case 'message_deleted':
-                    this.onMessageDeleted(event.payload);
+                    this.enqueue(event.chat_id, () => this.onMessageDeleted(event.payload));
                     break;
                 case 'error':
                     this.onServerError(event.payload);
@@ -367,6 +432,41 @@ export class ChatStoreService {
                     break;
             }
         });
+    }
+
+    /**
+     * Re-fetch what may have changed while the socket was down: the chat list and the open
+     * conversation's newest page. Existing state is merged, not reset, so failed sends, selection and
+     * scroll context survive. Safe to run alongside replayed events, which are idempotent by id.
+     */
+    async reloadAfterGap(): Promise<void> {
+        await this.loadChats();
+
+        const chatId = this.activeChatId();
+        if (!chatId) {
+            return;
+        }
+
+        try {
+            const { raw, messages: loaded } = await this.messages_.loadMessages(chatId, PAGE_SIZE);
+            if (this.activeChatId() !== chatId) {
+                return;
+            }
+            const fresh = loaded.filter((m) => !this.deletedIds.has(m.id));
+            raw.forEach((message) => this.rawMessages.set(message._id, message));
+            await this.directory.resolveMissing(fresh.map((m) => m.senderId));
+
+            const oldest = fresh[0]?.id;
+            this.messages.update((current) =>
+                oldest === undefined ? current : [...current.filter((m) => m.id < oldest), ...fresh]
+            );
+            this.cachePreview(chatId, fresh);
+            this.scheduleGrantRetry(chatId);
+            void this.loadPinned(chatId);
+            void this.loadReadState(chatId);
+        } catch {
+            // The list is still what it was; the next event or reconnect tries again.
+        }
     }
 
     /** Flip a private chat to read-only and remember the peer as deleted. */
@@ -489,6 +589,7 @@ export class ChatStoreService {
         this.chatKeys.set(null);
         this.encryptionUnavailable.set(null);
         this.memberVerificationError.set(null);
+        this.memberVerificationCode.set(null);
         this.typingUserIds.set([]);
         this.hasMoreHistory.set(false);
     }
@@ -715,6 +816,7 @@ export class ChatStoreService {
             if (this.isMemberVerificationFailure(error)) {
                 // Blocking, not retryable: we refused to hand keys to a roster we cannot verify.
                 this.memberVerificationError.set((error as Error).message);
+                this.memberVerificationCode.set((error as RosterVerificationError).code);
                 this.pending.update((p) => p.filter((item) => item.localId !== localId));
                 return;
             }
@@ -726,6 +828,7 @@ export class ChatStoreService {
                               ...item,
                               status: 'failed' as const,
                               rekeyFailure: this.looksLikeRekey(error),
+                              keyPublishFailure: isRetryLimitExceeded(error),
                               // The server refused this id because it already belongs to different
                               // content. Retrying under it can only be refused again, so the next
                               // attempt gets a fresh one; every other failure keeps its id.
@@ -873,6 +976,7 @@ export class ChatStoreService {
 
     async deleteMessage(messageId: string): Promise<void> {
         await firstValueFrom(this.chatApi.deleteMessage(messageId));
+        this.rememberDeleted(messageId);
         this.messages.update((list) => list.filter((m) => m.id !== messageId));
     }
 
@@ -1063,6 +1167,7 @@ export class ChatStoreService {
         }
 
         this.memberVerificationError.set(null);
+        this.memberVerificationCode.set(null);
         await this.openChat(chatId);
     }
 
@@ -1221,13 +1326,21 @@ export class ChatStoreService {
 
     private async onIncomingMessage(chatId: string | null, payload: Record<string, unknown>): Promise<void> {
         const raw = payload as unknown as MessageResponse;
-        if (!chatId || !raw?._id) {
+        if (!chatId || !raw?._id || this.deletedIds.has(raw._id)) {
             return;
         }
 
         this.bumpChatPreview(chatId, raw);
 
         if (chatId !== this.activeChatId()) {
+            // A replayed event must not count twice towards the unread badge.
+            if (this.countedUnread.has(raw._id)) {
+                return;
+            }
+            this.countedUnread.add(raw._id);
+            if (this.countedUnread.size > 2000) {
+                this.countedUnread.delete(this.countedUnread.values().next().value as string);
+            }
             this.chats.update((list) =>
                 list.map((c) => (c.id === chatId ? { ...c, unread_count: c.unread_count + 1 } : c))
             );
@@ -1262,6 +1375,9 @@ export class ChatStoreService {
      * two never disagree.
      */
     private appendDecrypted(message: DecryptedMessage): void {
+        if (this.deletedIds.has(message.id)) {
+            return;
+        }
         this.messages.update((list) => {
             if (list.some((m) => m.id === message.id)) {
                 return list;
@@ -1283,7 +1399,7 @@ export class ChatStoreService {
      */
     private async onMessageEdited(chatId: string | null, payload: Record<string, unknown>): Promise<void> {
         const raw = payload as unknown as MessageResponse;
-        if (!chatId || !raw?._id || chatId !== this.activeChatId()) {
+        if (!chatId || !raw?._id || chatId !== this.activeChatId() || this.deletedIds.has(raw._id)) {
             return;
         }
 
@@ -1291,6 +1407,9 @@ export class ChatStoreService {
         this.messages_.forgetOne(raw._id);
 
         const decrypted = await this.messages_.decrypt(chatId, raw);
+        if (this.deletedIds.has(decrypted.id)) {
+            return;
+        }
         this.messages.update((list) => list.map((m) => (m.id === decrypted.id ? decrypted : m)));
 
         if (decrypted.status === 'no_key') {
@@ -1307,6 +1426,7 @@ export class ChatStoreService {
     private onMessageDeleted(payload: Record<string, unknown>): void {
         const id = payload['message_id'];
         if (typeof id === 'string') {
+            this.rememberDeleted(id);
             this.messages.update((list) => list.filter((m) => m.id !== id));
         }
     }

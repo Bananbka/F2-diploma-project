@@ -16,7 +16,7 @@ import {
 } from '../models/crypto.model';
 import { ChatApiService } from './chat-api.service';
 import { CryptoApiService } from './crypto-api.service';
-import { isCryptoNotEnabled } from './crypto-errors';
+import { httpErrorCode, isCryptoNotEnabled, RetryLimitExceededError } from './crypto-errors';
 import { KeyStoreService } from './key-store.service';
 
 /** How a message rendered out — the UI needs to distinguish these, not just show text or nothing. */
@@ -170,6 +170,11 @@ export class MessageService {
      * give away exactly what the ratchet's forward secrecy is protecting.
      */
     private readonly opened = new Map<string, DecryptedMessage>();
+    /** Envelope index each cached plaintext was opened from, so an older version cannot replace it. */
+    private readonly openedIdx = new Map<string, number>();
+    private readonly inflight = new Map<string, Promise<DecryptedMessage>>();
+    /** Failed results that only mean "index already consumed"; never cached as a verdict. */
+    private readonly consumedFailures = new WeakSet<DecryptedMessage>();
 
     /**
      * The freshest known reaction/pin state for a message, keyed by id, independent of whether
@@ -483,14 +488,50 @@ export class MessageService {
             return cached;
         }
 
+        // Concurrent calls for the same ciphertext share one run. The ratchet is single-use, so a
+        // second parallel attempt would find the index consumed by the first and could report a
+        // spurious `failed` for a message that opened fine. Keyed by envelope position as well as
+        // id, so an edit (a new index under the same id) is never answered with the old content.
+        const flightKey = `${message._id}:${message.envelope?.skid ?? ''}:${message.envelope?.idx ?? ''}`;
+        const running = this.inflight.get(flightKey);
+        if (running) {
+            return running;
+        }
+
+        const run = this.decryptAndCache(chatId, message, senderKeys).finally(() => this.inflight.delete(flightKey));
+        this.inflight.set(flightKey, run);
+        return run;
+    }
+
+    private async decryptAndCache(
+        chatId: string,
+        message: MessageResponse,
+        senderKeys?: Map<string, PublicKey>
+    ): Promise<DecryptedMessage> {
+        const idx = message.envelope?.idx ?? -1;
         const result = await this.decryptOnce(chatId, message, senderKeys);
 
         // `decryptOnce` awaits real crypto work, so a `patchMeta` call can land on the side-map
         // at any point during that wait. Overlaying here, right before caching, is the latest
         // possible read and so the one least likely to lose a concurrent update.
         const withMeta = this.applyMetaOverride(result);
-        if (withMeta.status !== 'no_key') {
+
+        // Something else may have opened this id while we were working. Never let a later or
+        // weaker result replace it: a lower envelope index is an older version of the message, and
+        // a `failed` beside an opened plaintext is only the ratchet refusing a second read.
+        const current = this.opened.get(message._id);
+        if (current) {
+            const currentIdx = this.openedIdx.get(message._id) ?? -1;
+            if (idx < currentIdx || (withMeta.status === 'failed' && current.status !== 'failed')) {
+                return current;
+            }
+        }
+
+        // A failure that is merely "this index was already consumed" says nothing about the
+        // message itself, so it is reported but not remembered as its verdict.
+        if (withMeta.status !== 'no_key' && !this.consumedFailures.has(result)) {
             this.opened.set(message._id, withMeta);
+            this.openedIdx.set(message._id, idx);
         }
         return withMeta;
     }
@@ -506,6 +547,8 @@ export class MessageService {
     /** Drop retained plaintext. Called when the key store closes; holding it open would outlive it. */
     forgetOpened(): void {
         this.opened.clear();
+        this.openedIdx.clear();
+        this.inflight.clear();
         this.metaOverrides.clear();
     }
 
@@ -517,6 +560,7 @@ export class MessageService {
      */
     forgetOne(messageId: string): void {
         this.opened.delete(messageId);
+        this.openedIdx.delete(messageId);
         this.metaOverrides.delete(messageId);
     }
 
@@ -684,14 +728,27 @@ export class MessageService {
                 status: 'ok',
                 senderVerified: Boolean(signingPublic),
             };
-        } catch {
+        } catch (error) {
             // Could be a consumed index, a stale grant, or genuine tampering. The UI must not
             // present any of those as ordinary text.
-            return { ...base, text: null, status: 'failed', senderVerified: false };
+            const failed: DecryptedMessage = { ...base, text: null, status: 'failed', senderVerified: false };
+            if (error instanceof Error && /already consumed/.test(error.message)) {
+                this.consumedFailures.add(failed);
+            }
+            return failed;
         }
     }
 
+    /**
+     * The epoch we sealed for is no longer current. Either the server said so (`EPOCH_STALE`), or
+     * publishing our sender key kept hitting `EPOCH_CLOSED` until the retry budget ran out - the
+     * same condition seen from the other endpoint, and cured the same way: re-seal for the epoch
+     * the chat is in now.
+     */
     private isEpochStale(error: unknown): boolean {
+        if (error instanceof RetryLimitExceededError) {
+            return httpErrorCode(error.lastError) === 'EPOCH_CLOSED';
+        }
         return error instanceof HttpErrorResponse && error.status === 409 && error.error?.error_code === 'EPOCH_STALE';
     }
 
