@@ -240,11 +240,25 @@
                             }
                             @case ('sticker') {
                                 <li class="sticker-tile">
-                                    <img
-                                        class="sticker-image"
-                                        [src]="file.url"
-                                        [alt]="file.name"
-                                    />
+                                    @if (canOpenStickerPack()) {
+                                        <img
+                                            class="sticker-image is-interactive"
+                                            role="button"
+                                            tabindex="0"
+                                            [src]="file.url"
+                                            [alt]="file.name"
+                                            aria-label="Open sticker pack"
+                                            (click)="openStickerPack($event, file)"
+                                            (keydown.enter)="openStickerPack($event, file)"
+                                            (keydown.space)="openStickerPack($event, file)"
+                                        />
+                                    } @else {
+                                        <img
+                                            class="sticker-image"
+                                            [src]="file.url"
+                                            [alt]="file.name"
+                                        />
+                                    }
                                 </li>
                             }
                             @default {

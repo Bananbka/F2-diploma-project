@@ -58,6 +58,19 @@ export class StickerApiService {
         return this.http.get<SuccessResponse<StickerPack>>(`${this.packsUrl}${packId}`).pipe(map((r) => r.data));
     }
 
+    /**
+     * Resolves the pack a sticker image belongs to — used when a sticker is tapped inside a message.
+     * Rejects with 404 `STICKER_PACK_UNAVAILABLE` when the pack was deleted, made private, or the url
+     * is not a pack sticker at all; callers must show that as its own state rather than swallow it.
+     */
+    getPackByUrl(url: string): Observable<StickerPack> {
+        return this.http
+            .get<SuccessResponse<StickerPack>>(
+                `${this.configService.apiUrl}stickers/by-url?url=${encodeURIComponent(url)}`
+            )
+            .pipe(map((r) => r.data));
+    }
+
     updatePack(packId: string, data: StickerPackUpdateRequest): Observable<StickerPack> {
         return this.http
             .patch<SuccessResponse<StickerPack>>(`${this.packsUrl}${packId}`, data)

@@ -54,6 +54,7 @@ import {
 import { DELETED_USER_LABEL } from '../../../shared/utils/display';
 import { ComposedMessage, ComposerComponent } from '../composer/composer.component';
 import { MessageBubbleComponent } from '../message-bubble/message-bubble.component';
+import { StickerPackDialogComponent } from '../stickers/sticker-pack-dialog/sticker-pack-dialog.component';
 
 /**
  * How far the pointer must travel before a press becomes a message sweep rather than a click.
@@ -71,6 +72,7 @@ const DRAG_SELECT_THRESHOLD_PX = 8;
         MessageBubbleComponent,
         ComposerComponent,
         ContextMenuComponent,
+        StickerPackDialogComponent,
     ],
     templateUrl: './chat-view.component.html',
     styleUrl: './chat-view.component.scss',
@@ -120,6 +122,8 @@ export class ChatViewComponent {
 
     /** Open only while choosing where to forward to. */
     readonly forwardPickerOpen = signal(false);
+    /** Image url of the sticker whose pack is open, or `null` when no pack dialog is showing. */
+    readonly stickerPackUrl = signal<string | null>(null);
 
     /**
      * Every conversation, including this one.

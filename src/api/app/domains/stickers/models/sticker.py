@@ -21,7 +21,7 @@ class Sticker(Base):
         ForeignKey("sticker_packs.id", ondelete="CASCADE"), nullable=False, index=True
     )
 
-    image_url: Mapped[str] = mapped_column(Text, nullable=False)
+    image_url: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     emoji: Mapped[str] = mapped_column(String(8), nullable=False)
     position: Mapped[int] = mapped_column(Integer, nullable=False)
 

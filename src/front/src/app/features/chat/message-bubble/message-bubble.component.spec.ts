@@ -229,6 +229,82 @@ describe('MessageBubbleComponent', () => {
         });
     });
 
+    describe('sticker pack opening', () => {
+        const STICKER_URL = 'https://files.test/sticker.webp';
+
+        function stickerMessage(overrides: Partial<DecryptedMessage> = {}): DecryptedMessage {
+            return buildMessage({
+                text: null,
+                attachments: [buildAttachment({ kind: 'sticker', url: STICKER_URL })],
+                ...overrides,
+            });
+        }
+
+        function stickerImage(host: HTMLElement): HTMLImageElement {
+            return host.querySelector<HTMLImageElement>('.sticker-image')!;
+        }
+
+        it('click on the sticker requests its pack by url', () => {
+            const host = create(stickerMessage());
+            const requested: string[] = [];
+            fixture.componentInstance.stickerPackRequested.subscribe((url) => requested.push(url));
+
+            stickerImage(host).click();
+
+            expect(requested).toEqual([STICKER_URL]);
+        });
+
+        it('is keyboard reachable: focusable, labelled, and activated by Enter and Space', () => {
+            const host = create(stickerMessage());
+            const requested: string[] = [];
+            fixture.componentInstance.stickerPackRequested.subscribe((url) => requested.push(url));
+            const img = stickerImage(host);
+
+            expect(img.getAttribute('tabindex')).toBe('0');
+            expect(img.getAttribute('role')).toBe('button');
+            expect(img.getAttribute('aria-label')).toBeTruthy();
+
+            const space = new KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true });
+            img.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+            img.dispatchEvent(space);
+
+            expect(requested).toEqual([STICKER_URL, STICKER_URL]);
+            expect(space.defaultPrevented).toBeTrue();
+        });
+
+        it('is inert for a message still sending or failed', () => {
+            for (const delivery of ['sending', 'failed'] as const) {
+                fixture = TestBed.createComponent(MessageBubbleComponent);
+                fixture.componentRef.setInput('message', stickerMessage());
+                fixture.componentRef.setInput('delivery', delivery);
+                fixture.detectChanges();
+                const host = fixture.nativeElement as HTMLElement;
+                const requested: string[] = [];
+                fixture.componentInstance.stickerPackRequested.subscribe((url) => requested.push(url));
+
+                stickerImage(host).click();
+
+                expect(stickerImage(host).getAttribute('tabindex')).toBeNull();
+                expect(requested).toEqual([]);
+            }
+        });
+
+        it('is inert while a bulk selection is in progress', () => {
+            fixture = TestBed.createComponent(MessageBubbleComponent);
+            fixture.componentRef.setInput('message', stickerMessage());
+            fixture.componentRef.setInput('selecting', true);
+            fixture.detectChanges();
+
+            expect(stickerImage(fixture.nativeElement as HTMLElement).getAttribute('tabindex')).toBeNull();
+        });
+
+        it('does not render a sticker image at all for an unreadable message', () => {
+            const host = create(stickerMessage({ status: 'failed' }));
+
+            expect(host.querySelector('.sticker-image')).toBeNull();
+        });
+    });
+
     describe('reaction picker outside-click dismiss', () => {
         it('closes when a click lands outside the picker and its trigger', () => {
             const host = create(buildMessage());

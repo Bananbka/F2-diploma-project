@@ -401,6 +401,16 @@
     display: block;
     width: 100%;
     height: auto;
+
+    &.is-interactive {
+        cursor: pointer;
+        border-radius: var(--radius-lg);
+
+        &:focus-visible {
+            outline: 2px solid var(--primary);
+            outline-offset: 2px;
+        }
+    }
 }
 
 /* A sticker-only message is a bare image — the surrounding bubble chrome would just frame empty

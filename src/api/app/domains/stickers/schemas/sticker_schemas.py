@@ -31,6 +31,26 @@ class StickerCreateRequest(BaseModel):
         return v
 
 
+class StickerByUrlQuery(BaseModel):
+    """Query model for `GET /stickers/by-url`. Same bucket anchoring as `StickerCreateRequest`,
+    plus a length cap, since the value is used as a lookup key."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(..., min_length=1, max_length=2048)
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        prefix = f"{settings.MINIO_PUBLIC_URL}/{settings.MINIO_STICKER_BUCKET}/"
+        if not v.startswith(prefix):
+            raise ValueError("url must point at the sticker assets bucket.")
+        object_key = v[len(prefix):]
+        if not object_key or "/" in object_key:
+            raise ValueError("url must reference a single object key.")
+        return v
+
+
 class StickerResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
