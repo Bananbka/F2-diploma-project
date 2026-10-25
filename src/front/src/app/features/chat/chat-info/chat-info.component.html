@@ -26,7 +26,8 @@
                 size="lg"
                 [name]="title()"
                 [seed]="chat()!.id"
-                [imageUrl]="chat()!.avatar_url"
+                [imageUrl]="chat()!.peer_is_deleted ? null : chat()!.avatar_url"
+                [deleted]="chat()!.peer_is_deleted === true"
             />
             <h3 class="profile-name">{{ title() }}</h3>
 
@@ -308,6 +309,7 @@
                             [name]="member.name"
                             [seed]="member.userId"
                             [imageUrl]="member.avatarUrl"
+                            [deleted]="member.deleted"
                         />
 
                         <span class="member-text">
@@ -322,7 +324,12 @@
                                      identity has been verified out of band. Those are different
                                      things and the label says which one this is. -->
                                 @if (!isChannel()) {
-                                    @if (member.hasKeys) {
+                                    <!-- A deleted member gets no pip at all: a check would imply a live,
+                                         verifiable identity, and an alert would imply a fault. The
+                                         subline below says what it is. -->
+                                    @if (member.deleted) {
+                                        <!-- intentionally empty -->
+                                    } @else if (member.hasKeys) {
                                         <span
                                             class="pip is-ok"
                                             title="Identity key published for this member"
@@ -341,13 +348,15 @@
                             </span>
                             <span class="member-sub">
                                 {{ member.role }}
-                                @if (member.username) {
+                                @if (member.deleted) {
+                                    · account deleted
+                                } @else if (member.username) {
                                     · &#64;{{ member.username }}
                                 }
                             </span>
                         </span>
 
-                        @if (!member.isMe && !contacted().has(member.userId)) {
+                        @if (!member.isMe && !member.deleted && !contacted().has(member.userId)) {
                             <button
                                 type="button"
                                 class="member-action"

@@ -1,8 +1,18 @@
 import { DatePipe } from '@angular/common';
+import { HttpErrorResponse } from '@angular/common/http';
 import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
-import { AbstractControl, FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
+import { AbstractControl, FormBuilder, FormControl, ReactiveFormsModule, Validators } from '@angular/forms';
 import { Router } from '@angular/router';
-import { ArrowLeft, Camera, KeyRound, LucideAngularModule, RefreshCw, Sticker } from 'lucide-angular';
+import {
+    AlertTriangle,
+    ArrowLeft,
+    Camera,
+    KeyRound,
+    LucideAngularModule,
+    RefreshCw,
+    Sticker,
+    UserX,
+} from 'lucide-angular';
 import { firstValueFrom } from 'rxjs';
 
 import { CryptoApiService } from '../../../core/services/crypto-api.service';
@@ -70,6 +80,15 @@ export class ProfileComponent {
     readonly keyIcon = KeyRound;
     readonly rotateIcon = RefreshCw;
     readonly stickerIcon = Sticker;
+    readonly deleteIcon = UserX;
+    readonly warnIcon = AlertTriangle;
+
+    // ── Account deletion ────────────────────────────────────────────────────────────────────
+
+    readonly deleteOpen = signal(false);
+    readonly deleting = signal(false);
+    readonly deleteError = signal<string | null>(null);
+    readonly deletePassword = new FormControl('', { nonNullable: true, validators: [Validators.required] });
 
     readonly rotatingPrekey = signal(false);
     readonly prekeyRotated = signal(false);
@@ -156,6 +175,62 @@ export class ProfileComponent {
 
     async goToStickers(): Promise<void> {
         await this.router.navigate(['/stickers/manage']);
+    }
+
+    openDelete(): void {
+        this.deletePassword.reset('');
+        this.deleteError.set(null);
+        this.deleteOpen.set(true);
+    }
+
+    closeDelete(): void {
+        // Not dismissible mid-request: the account may already be gone by the time it answers.
+        if (this.deleting()) {
+            return;
+        }
+        this.deletePassword.reset('');
+        this.deleteOpen.set(false);
+    }
+
+    /**
+     * Delete the account for good.
+     *
+     * Irreversible, so the dialog states the consequences first and the server demands the password
+     * again. On success the session has already torn down local state; all that is left is to leave
+     * the app. Any failure keeps the dialog open with the account untouched.
+     */
+    async confirmDelete(): Promise<void> {
+        if (this.deletePassword.invalid || this.deleting()) {
+            this.deletePassword.markAsTouched();
+            return;
+        }
+
+        this.deleting.set(true);
+        this.deleteError.set(null);
+
+        try {
+            await this.session.deleteAccount(this.deletePassword.value);
+        } catch (error) {
+            this.deleting.set(false);
+            this.deleteError.set(this.deleteErrorText(error));
+            return;
+        }
+
+        this.deleting.set(false);
+        this.deleteOpen.set(false);
+        await this.router.navigate(['/login']);
+    }
+
+    private deleteErrorText(error: unknown): string {
+        if (error instanceof HttpErrorResponse) {
+            if (error.status === 401) {
+                return 'That is not your password. Your account has not been deleted.';
+            }
+            if (error.status === 429) {
+                return 'Too many attempts. Wait a few minutes and try again. Your account has not been deleted.';
+            }
+        }
+        return 'Could not delete your account. Nothing was changed — please try again.';
     }
 
     private async loadDevices(): Promise<void> {

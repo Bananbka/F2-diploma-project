@@ -3,7 +3,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.domains.crypto.reference.primitives import b64u_decode
+from app.domains.crypto.reference.primitives import b64u_decode, b64u_encode
 
 RAW_KEY_BYTES = 32
 SIGNATURE_BYTES = 64
@@ -28,6 +28,12 @@ def _b64u_of_length(value: str, expected: int, label: str) -> str:
 
     if len(raw) != expected:
         raise ValueError(f"{label} must decode to {expected} bytes, got {len(raw)}")
+
+    # Stored in fixed-width columns (43 / 86 chars) guarded by CHECK constraints, so only the
+    # canonical unpadded spelling is accepted: padded or non-canonical encodings of the same
+    # bytes would otherwise reach the database and fail there with a 500.
+    if b64u_encode(raw) != value:
+        raise ValueError(f"{label} must be canonical unpadded base64url")
 
     return value
 
@@ -178,6 +184,9 @@ class PublicKeyResponse(BaseModel):
     identity_key_signature: str
     signed_prekey_public: str | None = None
     signed_prekey_signature: str | None = None
+    # False for the retained keys of a deleted account, returned so old messages stay verifiable.
+    # Never wrap anything to a key with is_active=false.
+    is_active: bool = True
 
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 

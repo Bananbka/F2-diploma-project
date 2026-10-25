@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, func
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -54,3 +54,9 @@ class ChatInviteLink(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     chat = relationship("Chat")
+
+    __table_args__ = (
+        CheckConstraint(
+            "max_uses IS NULL OR use_count <= max_uses", name="ck_invite_links_use_count_le_max"
+        ),
+    )

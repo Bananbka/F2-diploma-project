@@ -3,13 +3,14 @@ import uuid
 from fastapi import APIRouter, Depends, Path, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from redis.asyncio import Redis
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import audit
 from app.core.audit import AuditEvent
 from app.core.exceptions import AppException
 from app.core.responses import SuccessResponse
-from app.domains.chats.models import ChatType, ParticipantRole
+from app.domains.chats.models import ChatParticipant, ChatType, ParticipantRole
 from app.domains.chats.schemas.chat_schemas import (
     ChangeRoleRequest,
     ChannelCreateRequest,
@@ -163,6 +164,16 @@ async def get_chat(
     # Not populated by `get_chat_by_id` itself, since mute is per-participant, not a chat-level
     # column — the list endpoint gets it from the join in `get_user_chats` instead.
     chat.muted_until = participant.muted_until
+
+    if chat.chat_type == ChatType.PRIVATE:
+        chat.peer_is_deleted = bool(
+            await db.scalar(
+                select(User.deleted_at.is_not(None))
+                .join(ChatParticipant, ChatParticipant.user_id == User.id)
+                .where(ChatParticipant.chat_id == chat_id, ChatParticipant.user_id != user.id)
+                .limit(1)
+            )
+        )
 
     return SuccessResponse(data=chat)
 

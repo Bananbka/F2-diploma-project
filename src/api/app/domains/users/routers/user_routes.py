@@ -98,6 +98,8 @@ async def find_user(
         else await user_service.get_user_by_username(db, query)
     )
 
-    if not user_data:
+    # A tombstone is not findable: its placeholders mean nothing, and a real former username or
+    # number must not resolve to it.
+    if not user_data or user_data.deleted_at is not None:
         raise AppException(404, "USER_NOT_FOUND", "User not found.")
     return SuccessResponse(data=user_data)

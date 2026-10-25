@@ -10,7 +10,7 @@ import { DirectoryService } from '../../../core/services/directory.service';
 import { Folder, FolderApiService } from '../../../core/services/folder-api.service';
 import { ToastService } from '../../../core/services/toast.service';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
-import { chatListTime } from '../../../shared/utils/display';
+import { chatListTime, DELETED_USER_LABEL } from '../../../shared/utils/display';
 import { ChatFilter } from '../navigation-rail/navigation-rail.component';
 
 @Component({
@@ -155,6 +155,9 @@ export class ChatSidebarComponent {
     private searchTimer: ReturnType<typeof setTimeout> | null = null;
 
     titleOf(chat: Chat): string {
+        if (chat.chat_type === 'private' && chat.peer_is_deleted) {
+            return DELETED_USER_LABEL;
+        }
         return chat.title ?? (chat.chat_type === 'channel' ? 'Channel' : 'Untitled chat');
     }
 

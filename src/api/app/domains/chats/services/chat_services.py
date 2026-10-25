@@ -7,6 +7,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
 
+from app.core.config import settings
 from app.core.exceptions import AppException
 from app.domains.chats.models import (
     Chat,
@@ -23,7 +24,63 @@ from app.domains.crypto.models import (
     EpochReason,
 )
 from app.domains.crypto.services import epoch_service
+from app.domains.users.models import User
+from app.infrastructure.minio import minio_manager
 from app.domains.users.services.user_service import get_user_by_id
+
+
+async def lock_chat(db: AsyncSession, chat_id: uuid.UUID) -> None:
+    """Take the chat's row lock for the rest of the transaction.
+
+    Every operation that changes who is in a chat or who owns it (add, remove, leave, transfer,
+    invite-link join, account deletion) takes this lock first, so they serialise per chat instead of
+    each acting on a membership snapshot another one is already changing. Locks must be taken in
+    ascending chat id order when several are needed.
+    """
+    found = await db.scalar(select(Chat.id).where(Chat.id == chat_id).with_for_update())
+    if found is None:
+        raise AppException(404, "NOT_FOUND", "Chat doesn't exist.")
+
+
+async def purge_chat_messages(mongo_db, chat_ids: list[uuid.UUID]) -> None:
+    """Delete every message of the given chats, then the attachment objects only they used.
+
+    Mongo first, objects after, and an object is kept if any surviving message still references it
+    (a user can name any url in their own attachments, so a document alone is not proof of
+    ownership). Object deletion failures are swallowed by `minio_manager.delete_file`.
+    """
+    if not chat_ids:
+        return
+
+    collection = mongo_db["messages"]
+    urls: set[str] = set()
+    async for doc in collection.find(
+        {"chat_id": {"$in": list(chat_ids)}, "attachments.url": {"$exists": True}},
+        {"attachments.url": 1},
+    ):
+        for attachment in doc.get("attachments") or []:
+            if attachment.get("url"):
+                urls.add(attachment["url"])
+
+    await collection.delete_many({"chat_id": {"$in": list(chat_ids)}})
+
+    for url in urls:
+        if await collection.find_one({"attachments.url": url}, {"_id": 1}):
+            continue
+        await minio_manager.delete_file(url, settings.MINIO_MESSAGE_BUCKET)
+
+
+async def _reject_deleted_users(db: AsyncSession, user_ids) -> None:
+    """A deleted account is a tombstone with no devices; putting it in a chat would only break the roster."""
+    ids = set(user_ids)
+    if not ids:
+        return
+
+    deleted = await db.scalar(
+        select(func.count()).select_from(User).where(User.id.in_(ids), User.deleted_at.is_not(None))
+    )
+    if deleted:
+        raise AppException(400, "USER_DELETED", "One or more of these users have deleted their account.")
 
 
 async def get_or_create_private_chat(
@@ -84,6 +141,8 @@ async def get_or_create_private_chat(
 async def create_group_chat(
     db: AsyncSession, user_id: uuid.UUID, data: GroupChatCreateRequest
 ) -> Chat:
+    await _reject_deleted_users(db, data.participant_ids)
+
     new_chat = Chat(
         **data.model_dump(exclude={"participant_ids"}), chat_type=ChatType.GROUP
     )
@@ -117,6 +176,8 @@ async def create_channel(
     the choice is explicit and auditable rather than an absence. Subscribers join as MEMBER, which
     is the role the send path gates posting on.
     """
+    await _reject_deleted_users(db, data.subscriber_ids)
+
     new_chat = Chat(
         **data.model_dump(exclude={"subscriber_ids"}),
         chat_type=ChatType.CHANNEL,
@@ -382,6 +443,7 @@ async def enrich_chats_with_mongo_data(
 
         display_name = chat.title
         partner_avatar = chat.avatar_url
+        peer_is_deleted = False
         if chat.chat_type == ChatType.PRIVATE:
             partner = next(
                 (p.user for p in chat.participants if p.user_id != user_id), None
@@ -390,6 +452,7 @@ async def enrich_chats_with_mongo_data(
             if partner:
                 partner_avatar = partner.avatar_url
                 display_name = getattr(chat, "partner_alias", None) or partner.full_name
+                peer_is_deleted = partner.deleted_at is not None
 
         result.append(
             {
@@ -400,6 +463,7 @@ async def enrich_chats_with_mongo_data(
                 "unread_count": stats["unread_count"],
                 "last_message": last_msg,
                 "muted_until": getattr(chat, "muted_until", None),
+                "peer_is_deleted": peer_is_deleted,
                 "created_at": chat.created_at,
                 "updated_at": chat.updated_at,
             }
@@ -463,6 +527,8 @@ async def delete_chat_participants(
     member keeps every key they already held, so anything sent under the old epoch after they left
     would still be readable by them.
     """
+    await lock_chat(db, chat_id)
+
     stmt = delete(ChatParticipant).where(
         ChatParticipant.chat_id == chat_id, ChatParticipant.user_id.in_(user_ids)
     )
@@ -494,6 +560,9 @@ async def add_chat_participants(
     at which point its `count()` observes the first call's inserts. Without the lock, two concurrent
     calls near the cap could both read the same count, both pass, and both commit, overshooting it.
     """
+    await _reject_deleted_users(db, user_ids)
+    await lock_chat(db, chat_id)
+
     crypto_settings = (
         await db.execute(
             select(ChatCryptoSettings)
@@ -562,6 +631,7 @@ async def leave_chat(
     mongo_db=None,
 ) -> "ChatKeyEpoch | None":
     """Remove yourself from a chat. Same rotation requirement as being removed by an admin."""
+    await lock_chat(db, chat_id)
     await db.execute(
         delete(ChatParticipant).where(
             ChatParticipant.chat_id == chat_id,
@@ -592,6 +662,18 @@ async def transfer_ownership(
     One statement per row inside one transaction, so the chat can never be observed with two
     owners or none.
     """
+    await lock_chat(db, chat_id)
+
+    # Re-checked under the lock: the caller's ownership was read before it, and an account deletion
+    # or another transfer may have moved it since. Acting on the stale read would leave two owners.
+    still_owner = await db.scalar(
+        select(ChatParticipant.role).where(
+            ChatParticipant.chat_id == chat_id, ChatParticipant.user_id == current_owner_id
+        )
+    )
+    if still_owner is not ParticipantRole.OWNER:
+        raise AppException(403, "ACCESS_DENIED", "Only the owner can transfer ownership.")
+
     target = (
         await db.execute(
             select(ChatParticipant).where(
@@ -641,7 +723,7 @@ async def delete_chat(
     """
     participant_ids = list(await get_chat_participants_ids(db, chat_id))
 
-    await mongo_db["messages"].delete_many({"chat_id": chat_id})
+    await purge_chat_messages(mongo_db, [chat_id])
 
     await db.execute(delete(Chat).where(Chat.id == chat_id))
     await db.commit()

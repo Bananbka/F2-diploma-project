@@ -1,6 +1,6 @@
 ﻿import uuid
 
-from sqlalchemy import ForeignKey, String, DateTime, func
+from sqlalchemy import CheckConstraint, ForeignKey, String, DateTime, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.infrastructure.postgres import Base
@@ -16,3 +16,7 @@ class Contact(Base):
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     user = relationship("User", foreign_keys=[contact_id])
+
+    __table_args__ = (
+        CheckConstraint("owner_id <> contact_id", name="ck_contacts_not_self"),
+    )

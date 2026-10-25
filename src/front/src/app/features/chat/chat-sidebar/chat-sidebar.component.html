@@ -168,7 +168,8 @@
             <app-avatar
                 [name]="titleOf(chat)"
                 [seed]="chat.id"
-                [imageUrl]="chat.avatar_url"
+                [imageUrl]="chat.peer_is_deleted ? null : chat.avatar_url"
+                [deleted]="chat.peer_is_deleted === true"
             />
 
             <span class="body">

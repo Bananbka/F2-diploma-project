@@ -55,4 +55,6 @@ class ProfileRequestSchema(BaseModel):
             raise ValueError(
                 "Username must start with a letter and contain only letters, numbers, and underscore (_)"
             )
+        if v.lower().startswith("deleted"):
+            raise ValueError("Usernames starting with 'deleted' are reserved.")
         return v

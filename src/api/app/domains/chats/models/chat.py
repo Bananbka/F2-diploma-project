@@ -2,7 +2,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import UUID, Enum, String, Text, DateTime, func
+from sqlalchemy import UUID, Enum, Index, String, Text, DateTime, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.infrastructure.postgres import Base
@@ -28,3 +28,7 @@ class Chat(Base):
     updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
 
     participants = relationship("ChatParticipant", back_populates="chat", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("ix_chats_updated_at", updated_at.desc()),
+    )

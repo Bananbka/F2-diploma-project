@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Text, DateTime, ForeignKey, func, Index, UniqueConstraint
+from sqlalchemy import CHAR, CheckConstraint, Text, DateTime, ForeignKey, func, Index, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -49,7 +49,7 @@ class SenderKeyGrant(Base):
     )
 
     wrap_algorithm: Mapped[str] = mapped_column(Text, nullable=False)
-    ephemeral_public_key: Mapped[str] = mapped_column(Text, nullable=False)
+    ephemeral_public_key: Mapped[str] = mapped_column(CHAR(43), nullable=False)
     wrapped_chain_key: Mapped[str] = mapped_column(Text, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
@@ -65,4 +65,8 @@ class SenderKeyGrant(Base):
         ),
         # The hot read: "every grant addressed to me in this chat".
         Index("ix_grant_chat_recipient", "chat_id", "recipient_device_id"),
+        # Revoking a device or superseding an identity key looks grants up by recipient alone.
+        Index("ix_grant_recipient_device", "recipient_device_id"),
+        Index("ix_grant_recipient_identity_key", "recipient_identity_key_id"),
+        CheckConstraint("length(ephemeral_public_key) = 43", name="ck_grant_ephemeral_public_len"),
     )

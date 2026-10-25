@@ -143,8 +143,13 @@ across `tests/crypto`+`tests/stickers`, all green with limits genuinely on. See 
   state in IndexedDB under a key wrapped by the KEK is the documented intent.
 - **Two `Cache-Control` headers on static assets** — nginx emits one from `expires 1y` and one from
   `add_header`. Harmless (browsers take the first) but untidy.
-- **No account deletion.** A user can be disabled via `is_active`, but nothing exposes it and
-  there is no way to erase an account.
+- **Account deletion is a tombstone, not an erasure.** `DELETE /profile` anonymises the `users` row
+  and keeps messages, public keys, distributions and grants, so other members can still open and
+  verify old history (see `docs/account-deletion-plan.md`).
+- **Видалення власника каналу без адміністраторів.** Володіння переходить до найстаршого учасника,
+  тобто підписник без жодних прав стає власником каналу. Для груп це прийнятно, для каналу з
+  відкритою підпискою це підвищення привілеїв, яке власник не обирав. Вирішення: у каналі без
+  адміністраторів видаляти канал або вимагати явного призначення спадкоємця до видалення акаунта.
 
 ---
 

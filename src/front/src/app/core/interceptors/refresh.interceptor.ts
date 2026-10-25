@@ -38,6 +38,13 @@ export const refreshInterceptor: HttpInterceptorFn = (req: HttpRequest<unknown>,
                 return throwError(() => error);
             }
 
+            // A re-entered password that is wrong (account deletion) is the answer, not a stale
+            // token. Refreshing and replaying would send the same wrong password a second time,
+            // counting twice against the server's attempt limit.
+            if (error.error?.error_code === 'INVALID_PASSWORD') {
+                return throwError(() => error);
+            }
+
             refreshInFlight ??= authApi.refresh().pipe(
                 // shareReplay so latecomers get the same result rather than starting another refresh;
                 // the flag is cleared either way so a later 401 can try again.

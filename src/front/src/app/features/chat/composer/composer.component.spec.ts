@@ -67,6 +67,52 @@ describe('ComposerComponent', () => {
         }).compileComponents();
     });
 
+    describe('read-only conversation (deleted peer)', () => {
+        function strip(host: HTMLElement): HTMLElement | null {
+            return host.querySelector('.strip');
+        }
+
+        it('shows a neutral explanatory notice, not the red alarm', () => {
+            const host = create();
+            fixture.componentRef.setInput('canSend', false);
+            fixture.componentRef.setInput('readOnly', true);
+            fixture.componentRef.setInput('blockedReason', 'The other person deleted their account.');
+            fixture.detectChanges();
+
+            const notice = strip(host);
+            expect(notice?.textContent).toContain('The other person deleted their account.');
+            expect(notice?.classList.contains('is-danger')).toBeFalse();
+            expect(notice?.getAttribute('role')).toBe('status');
+        });
+
+        it('disables the box and the send action', () => {
+            const host = create();
+            fixture.componentRef.setInput('canSend', false);
+            fixture.componentRef.setInput('readOnly', true);
+            fixture.detectChanges();
+
+            const area = host.querySelector('textarea') as HTMLTextAreaElement;
+            expect(area.disabled).toBeTrue();
+            expect(area.placeholder).toBe('Read-only conversation');
+
+            fixture.componentInstance.text.set('hello');
+            const spy = jasmine.createSpy('submitted');
+            fixture.componentInstance.submitted.subscribe(spy);
+            fixture.componentInstance.send();
+            expect(spy).not.toHaveBeenCalled();
+        });
+
+        it('keeps the red alarm for a block that is not read-only', () => {
+            const host = create();
+            fixture.componentRef.setInput('canSend', false);
+            fixture.componentRef.setInput('blockedReason', 'Blocked: the member set could not be verified.');
+            fixture.detectChanges();
+
+            expect(strip(host)?.classList.contains('is-danger')).toBeTrue();
+            expect((host.querySelector('textarea') as HTMLTextAreaElement).placeholder).toBe('Sending is blocked');
+        });
+    });
+
     describe('send()', () => {
         it('does nothing when there is no text and no attachment', () => {
             const host = create();

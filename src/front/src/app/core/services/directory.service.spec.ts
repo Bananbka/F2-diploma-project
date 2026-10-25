@@ -97,6 +97,59 @@ describe('DirectoryService', () => {
         expect(service.lookup(PEER).name).toBe('Work Alice');
     });
 
+    describe('deleted users', () => {
+        it('shows a deleted account neutrally, whatever the server sent', async () => {
+            chatApi.getUsersBatch.and.returnValue(
+                of([
+                    {
+                        id: STRANGER,
+                        full_name: 'Deleted user',
+                        username: 'deleted',
+                        avatar_url: null,
+                        is_deleted: true,
+                    },
+                ])
+            );
+
+            await service.resolveMissing([STRANGER]);
+
+            const identity = service.lookup(STRANGER);
+            expect(identity.name).toBe('Deleted user');
+            expect(identity.deleted).toBeTrue();
+            expect(identity.username).toBeNull();
+            expect(identity.avatarUrl).toBeNull();
+            expect(identity.resolved).withContext('a tombstone is a known fact, not an unresolved id').toBeTrue();
+            expect(service.isDeleted(STRANGER)).toBeTrue();
+        });
+
+        it('does not flag an ordinary user as deleted', async () => {
+            chatApi.getUsersBatch.and.returnValue(
+                of([{ id: STRANGER, full_name: 'Sam Okafor', username: 'sam', avatar_url: null }])
+            );
+
+            await service.resolveMissing([STRANGER]);
+
+            expect(service.isDeleted(STRANGER)).toBeFalse();
+        });
+
+        it('overrides a previously known live identity once the account is marked deleted', async () => {
+            contactsApi.getContacts.and.returnValue(of([contact(PEER, 'Work Alice', 'Alice Kowalski')]));
+            await service.warm();
+
+            service.markDeleted(PEER);
+
+            expect(service.lookup(PEER).name).toBe('Deleted user');
+            expect(service.isDeleted(PEER)).toBeTrue();
+        });
+
+        it('remembers a private-chat peer as deleted instead of using the chat title', () => {
+            service.rememberPrivateChatPeer(PEER, 'Deleted user', 'https://x/a.png', true);
+
+            expect(service.isDeleted(PEER)).toBeTrue();
+            expect(service.lookup(PEER).avatarUrl).toBeNull();
+        });
+    });
+
     it('makes no request when every id is already known', async () => {
         contactsApi.getContacts.and.returnValue(of([contact(PEER, null, 'Alice')]));
         await service.warm();

@@ -3,7 +3,8 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
-    Text, Integer, Boolean, DateTime, Enum, ForeignKey, func, text, UniqueConstraint, Index
+    CHAR, Text, Integer, Boolean, DateTime, Enum, ForeignKey, func, text, UniqueConstraint, Index,
+    CheckConstraint,
 )
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -44,16 +45,18 @@ class UserIdentityKey(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
     # base64url, unpadded, 32 raw bytes each.
-    identity_public_key: Mapped[str] = mapped_column(Text, nullable=False)   # X25519, key agreement
-    signing_public_key: Mapped[str] = mapped_column(Text, nullable=False)    # Ed25519, signatures
+    # Fixed width (43 chars = 32 bytes, 86 chars = 64 bytes), enforced by the column type and by
+    # CHECK constraints below: bpchar would silently pad a short value, the CHECK rejects it.
+    identity_public_key: Mapped[str] = mapped_column(CHAR(43), nullable=False)   # X25519, key agreement
+    signing_public_key: Mapped[str] = mapped_column(CHAR(43), nullable=False)    # Ed25519, signatures
     # Ed25519 over DS_IDENTITY_BIND || user_id || device_id || identity_public_key.
     # Verified server-side on publish; proves both keys belong to the same identity.
-    identity_key_signature: Mapped[str] = mapped_column(Text, nullable=False)
+    identity_key_signature: Mapped[str] = mapped_column(CHAR(86), nullable=False)
 
     # Medium-term prekey, rotated ~weekly. Gives forward secrecy for key wrapping without the
     # inventory/refill/exhaustion machinery that one-time prekeys (full X3DH) would require.
-    signed_prekey_public: Mapped[str | None] = mapped_column(Text, nullable=True)
-    signed_prekey_signature: Mapped[str | None] = mapped_column(Text, nullable=True)
+    signed_prekey_public: Mapped[str | None] = mapped_column(CHAR(43), nullable=True)
+    signed_prekey_signature: Mapped[str | None] = mapped_column(CHAR(86), nullable=True)
     signed_prekey_created_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -73,6 +76,17 @@ class UserIdentityKey(Base):
     device = relationship("UserDevice")
 
     __table_args__ = (
+        CheckConstraint("length(identity_public_key) = 43", name="ck_identity_key_identity_public_len"),
+        CheckConstraint("length(signing_public_key) = 43", name="ck_identity_key_signing_public_len"),
+        CheckConstraint("length(identity_key_signature) = 86", name="ck_identity_key_signature_len"),
+        CheckConstraint(
+            "signed_prekey_public IS NULL OR length(signed_prekey_public) = 43",
+            name="ck_identity_key_prekey_public_len",
+        ),
+        CheckConstraint(
+            "signed_prekey_signature IS NULL OR length(signed_prekey_signature) = 86",
+            name="ck_identity_key_prekey_signature_len",
+        ),
         UniqueConstraint("device_id", "version", name="uq_identity_key_device_version"),
         # At most one active key per device, enforced by the database rather than by convention.
         # Partial unique index: superseded rows (is_active=False) are retained for audit.

@@ -225,3 +225,96 @@
     color: var(--ok);
     font-size: 0.8125rem;
 }
+
+/* ── Danger zone ──────────────────────────────────────────────────────────────────────────── */
+
+.tile.is-danger {
+    &:hover {
+        border-color: var(--danger-border);
+    }
+
+    .tile-icon {
+        background: var(--danger-surface);
+        color: var(--danger);
+    }
+
+    .tile-title {
+        color: var(--danger-strong);
+    }
+}
+
+.dialog-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    background: rgb(0 0 0 / 60%);
+}
+
+.dialog {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    z-index: 41;
+    width: min(32rem, calc(100vw - 2rem));
+    max-height: calc(100vh - 2rem);
+    padding: 1.5rem;
+    overflow-y: auto;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-2xl);
+    transform: translate(-50%, -50%);
+}
+
+.dialog-title {
+    margin: 0 0 1rem;
+    color: var(--foreground);
+    font-size: 1.125rem;
+    font-weight: 600;
+}
+
+.warning {
+    @include ui.destructive-notice;
+
+    margin-bottom: 1rem;
+}
+
+.warning-list {
+    margin: 0.5rem 0 0;
+    padding-left: 1.125rem;
+    color: var(--danger);
+    font-size: 0.75rem;
+    line-height: 1.6;
+}
+
+.dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    margin-top: 1.25rem;
+}
+
+.dialog-cancel,
+.dialog-confirm {
+    padding: 0.5rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    font-size: 0.8125rem;
+    font-weight: 500;
+
+    &:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+}
+
+.dialog-cancel {
+    background: none;
+    color: var(--foreground);
+}
+
+.dialog-confirm {
+    background: var(--danger);
+    border-color: var(--danger);
+    color: #1a0a0a;
+    font-weight: 600;
+}

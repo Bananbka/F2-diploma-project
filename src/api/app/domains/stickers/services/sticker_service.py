@@ -1,17 +1,23 @@
 import uuid
 
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.exceptions import AppException
-from app.domains.stickers.models import Sticker
+from app.domains.stickers.models import Sticker, StickerPack
 from app.domains.stickers.schemas.sticker_schemas import StickerCreateRequest
 from app.domains.stickers.services.sticker_pack_service import (
     MAX_STICKERS_PER_PACK,
     get_owned_pack_or_403,
 )
 from app.infrastructure.minio import minio_manager
+
+
+async def _lock_pack(db: AsyncSession, pack_id: uuid.UUID) -> None:
+    """Serialise position assignment per pack, so two concurrent adds cannot both pick max+1."""
+    await db.execute(select(StickerPack.id).where(StickerPack.id == pack_id).with_for_update())
 
 
 async def add_sticker(
@@ -21,6 +27,7 @@ async def add_sticker(
     data: StickerCreateRequest,
 ) -> Sticker:
     await get_owned_pack_or_403(db, pack_id, owner_id)
+    await _lock_pack(db, pack_id)
 
     current_count = await db.scalar(
         select(func.count()).select_from(Sticker).where(Sticker.pack_id == pack_id)
@@ -33,6 +40,20 @@ async def add_sticker(
         )
 
     position = data.position
+    if position is not None:
+        # (pack_id, position) is unique, so an explicit position that is taken is a conflict the
+        # caller should resolve (reorder, or omit the position), not a 500 from the database.
+        taken = await db.scalar(
+            select(func.count())
+            .select_from(Sticker)
+            .where(Sticker.pack_id == pack_id, Sticker.position == position)
+        )
+        if taken:
+            raise AppException(
+                409,
+                "STICKER_POSITION_TAKEN",
+                "Another sticker in this pack already occupies that position.",
+            )
     if position is None:
         max_position = await db.scalar(
             select(func.max(Sticker.position)).where(Sticker.pack_id == pack_id)
@@ -102,6 +123,14 @@ async def reorder_stickers(
             "STICKER_SET_MISMATCH",
             "The given sticker ids must be exactly the stickers currently in this pack.",
         )
+
+    await _lock_pack(db, pack_id)
+
+    # (pack_id, position) is unique and checked row by row, so renumbering in place can collide
+    # with a not-yet-updated neighbour. Park every sticker on a distinct negative position first.
+    await db.execute(
+        update(Sticker).where(Sticker.pack_id == pack_id).values(position=-Sticker.position - 1)
+    )
 
     for position, sticker_id in enumerate(ordered_sticker_ids):
         await db.execute(

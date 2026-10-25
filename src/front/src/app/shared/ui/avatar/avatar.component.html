@@ -1,4 +1,15 @@
-@if (imageUrl()) {
+@if (deleted()) {
+    <span
+        class="face monogram is-deleted"
+        aria-hidden="true"
+    >
+        <lucide-icon
+            [img]="deletedIcon"
+            class="hash"
+        />
+    </span>
+    <span class="sr-only">{{ name() }}</span>
+} @else if (imageUrl()) {
     <img
         class="face"
         [src]="imageUrl()"

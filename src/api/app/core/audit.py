@@ -49,6 +49,8 @@ class AuditEvent(str, enum.Enum):
     PASSWORD_CHANGED = "password_changed"
     PASSWORD_RESET = "password_reset"
     EMAIL_VERIFIED = "email_verified"
+    ACCOUNT_DELETED = "account_deleted"
+    PASSWORD_REAUTH_FAILED = "password_reauth_failed"
     RATE_LIMITED = "rate_limited"
 
     # Key lifecycle. The ones that matter most: a key change is what a successful server-side

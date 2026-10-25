@@ -21,7 +21,7 @@ async def add_user_to_contacts(
         )
 
     target_user = await db.get(User, target_id)
-    if not target_user:
+    if not target_user or target_user.deleted_at is not None:
         raise AppException(404, "USER_NOT_FOUND", "User not found.")
 
     stmt = select(Contact).where(

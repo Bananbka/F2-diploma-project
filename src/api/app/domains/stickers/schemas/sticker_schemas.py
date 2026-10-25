@@ -10,7 +10,7 @@ class StickerCreateRequest(BaseModel):
 
     image_url: str
     emoji: str = Field(..., max_length=8)
-    position: int | None = None
+    position: int | None = Field(None, ge=0)
 
     @field_validator("image_url")
     @classmethod

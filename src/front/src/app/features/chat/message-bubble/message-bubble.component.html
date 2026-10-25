@@ -17,6 +17,7 @@
         [name]="sender().name"
         [seed]="sender().userId"
         [imageUrl]="sender().avatarUrl"
+        [deleted]="sender().deleted === true"
     />
 }
 
@@ -25,7 +26,7 @@
         <p class="sender">
             <span
                 class="sender-name"
-                [class.is-unresolved]="!sender().resolved"
+                [class.is-unresolved]="!sender().resolved || sender().deleted"
                 >{{ sender().name }}</span
             >
             @if (showVerified()) {

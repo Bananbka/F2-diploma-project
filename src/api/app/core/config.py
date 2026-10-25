@@ -70,6 +70,10 @@ class Settings(BaseSettings):
     # Swagger/ReDoc/openapi.json are off unless explicitly enabled (dev only).
     EXPOSE_API_DOCS: bool = False
 
+    # Log every SQL statement. It was hardcoded on, which made the logs enormous and put bound
+    # parameters (user data) in them; opt in with SQL_ECHO=true when debugging queries.
+    SQL_ECHO: bool = False
+
     # EMAIL
     SMTP_HOST: str = "smtp.gmail.com"
     SMTP_PORT: int = 587

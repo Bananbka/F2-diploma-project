@@ -29,11 +29,18 @@ class User(Base):
     avatar_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Set when the account is deleted. The row stays as a tombstone, so keys, distributions and
+    # grants that other members still need to open and verify old messages keep their parent.
+    deleted_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
 
     chats = relationship("ChatParticipant", back_populates="user")
     folders = relationship("ChatFolder", cascade="all, delete-orphan")
+
+    @property
+    def is_deleted(self) -> bool:
+        return self.deleted_at is not None
 
     def __repr__(self) -> str:
         return f'<User {self.username}>'

@@ -2,7 +2,7 @@ import re
 import uuid
 
 import phonenumbers
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from app.domains.crypto.schemas.crypto_schemas import RewrappedIdentity
 
@@ -25,6 +25,10 @@ class UserCreate(BaseModel):
             raise ValueError(
                 "Username must start with a letter and contain only letters, numbers, and underscore (_)"
             )
+        # Deleted accounts are tombstoned under `deleted-<id>` and shown as "deleted"; keeping the
+        # whole prefix unregistrable stops anyone from posing as one.
+        if v.lower().startswith("deleted"):
+            raise ValueError("Usernames starting with 'deleted' are reserved.")
         return v
 
     @field_validator("phone_number")
@@ -63,19 +67,46 @@ class UserResponse(BaseModel):
     # the owner's own avatar always serialised as null.
     avatar_url: str | None = None
     is_active: bool
+    is_deleted: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
 
+# What every public projection shows for a tombstoned account. The stored placeholders are unique
+# values that exist only to keep the UNIQUE columns valid; none of them is ever sent to a client.
+DELETED_USER_FULL_NAME = "Deleted user"
+DELETED_USER_USERNAME = "deleted"
+
+
 class UserSearchResponse(BaseModel):
+    """Public projection of a user. A deleted account collapses to a neutral one.
+
+    `is_deleted` is the flag clients key their "Deleted user" rendering on; the other fields carry
+    no trace of the former owner.
+    """
+
     id: uuid.UUID
     full_name: str
     username: str
     avatar_url: str | None = None
     bio: str | None = None
+    is_deleted: bool = False
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _mask_deleted(cls, data):
+        if getattr(data, "deleted_at", None) is not None:
+            return {
+                "id": data.id,
+                "full_name": DELETED_USER_FULL_NAME,
+                "username": DELETED_USER_USERNAME,
+                "avatar_url": None,
+                "bio": None,
+                "is_deleted": True,
+            }
+        return data
 
 
 class UserBatchRequest(BaseModel):
@@ -119,6 +150,13 @@ class PasswordChange(BaseModel):
     new_encrypted_private_key: str | None = None
     # New-world equivalent: same keypair, re-wrapped under the new password.
     rewrapped_identities: list[RewrappedIdentity] | None = None
+
+
+class AccountDeleteRequest(BaseModel):
+    """Re-entering the password is mandatory: a stolen session must not be enough to destroy an account."""
+    model_config = ConfigDict(extra="forbid")
+
+    password: str = Field(..., min_length=1, max_length=72)
 
 
 class EmailVerification(BaseModel):

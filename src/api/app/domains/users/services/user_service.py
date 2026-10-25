@@ -29,7 +29,11 @@ async def get_user_by_email_and_username(
     db: AsyncSession, username: str, email: str
 ) -> User | None:
     result = await db.execute(
-        select(User).where(User.username == username, User.email == email)
+        select(User).where(
+            User.username == username,
+            User.email == email,
+            User.deleted_at.is_(None),
+        )
     )
     return result.scalar_one_or_none()
 

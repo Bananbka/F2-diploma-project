@@ -1,9 +1,14 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.domains.crypto.models import CryptoMode, EpochReason, HistoryVisibility
+from app.domains.crypto.schemas.crypto_schemas import (
+    RAW_KEY_BYTES,
+    SIGNATURE_BYTES,
+    _b64u_of_length,
+)
 
 
 class EpochResponse(BaseModel):
@@ -61,6 +66,11 @@ class GrantUpload(BaseModel):
     ephemeral_public_key: str
     wrapped_chain_key: str
 
+    @field_validator("ephemeral_public_key")
+    @classmethod
+    def _ephemeral_len(cls, v: str) -> str:
+        return _b64u_of_length(v, RAW_KEY_BYTES, "ephemeral_public_key")
+
 
 class SenderKeyUpload(BaseModel):
     """A sender's chain for one epoch, plus one wrapped copy per recipient device."""
@@ -73,6 +83,16 @@ class SenderKeyUpload(BaseModel):
     chain_start_index: int = Field(0, ge=0)
     signature: str
     grants: list[GrantUpload] = Field(..., min_length=1)
+
+    @field_validator("signing_public_key")
+    @classmethod
+    def _signing_len(cls, v: str) -> str:
+        return _b64u_of_length(v, RAW_KEY_BYTES, "signing_public_key")
+
+    @field_validator("signature")
+    @classmethod
+    def _signature_len(cls, v: str) -> str:
+        return _b64u_of_length(v, SIGNATURE_BYTES, "signature")
 
 
 class GrantResponse(BaseModel):
