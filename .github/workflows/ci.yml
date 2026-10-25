@@ -93,7 +93,9 @@ jobs:
 
       - name: Start events Redis (evicting, no persistence, as in docker-compose.yml)
         run: |
-          docker run -d --name redis-events -p 6380:6379 redis:8-alpine \n            redis-server --requirepass ci-events-redis-password --maxmemory 256mb \n            --maxmemory-policy allkeys-lru --save "" --appendonly no
+          docker run -d --name redis-events -p 6380:6379 redis:8-alpine \
+            redis-server --requirepass ci-events-redis-password --maxmemory 256mb \
+            --maxmemory-policy allkeys-lru --save "" --appendonly no
           for i in $(seq 1 30); do
             docker exec redis-events redis-cli -a ci-events-redis-password ping 2>/dev/null | grep -q PONG && exit 0
             sleep 1
