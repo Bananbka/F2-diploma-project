@@ -22,14 +22,40 @@ export type WsEventType =
     | 'message_reaction_removed'
     | 'message_pinned'
     | 'message_unpinned'
+    | 'resync_required'
     | 'error';
 
 export interface WsEnvelope {
     event_type: WsEventType;
+    /** Position in this user's durable event stream, "<ms>-<seq>". Absent on non-durable events. */
+    stream_id?: string;
     chat_id: string | null;
     user_id: string | null;
     payload: Record<string, unknown>;
 }
+
+const STREAM_ID = /^(\d{1,16})-(\d{1,16})$/;
+
+/** True for a well-formed stream id. Anything else is never adopted as a cursor. */
+export function isStreamId(value: unknown): value is string {
+    return typeof value === 'string' && STREAM_ID.test(value);
+}
+
+/**
+ * Order two stream ids as (ms, seq) number pairs. A string compare would put "10-0" before "9-1".
+ * Negative when `a` is older than `b`.
+ */
+export function compareStreamIds(a: string, b: string): number {
+    const [aMs, aSeq] = (STREAM_ID.exec(a) as RegExpExecArray).slice(1).map(BigInt);
+    const [bMs, bSeq] = (STREAM_ID.exec(b) as RegExpExecArray).slice(1).map(BigInt);
+    if (aMs !== bMs) {
+        return aMs < bMs ? -1 : 1;
+    }
+    return aSeq === bSeq ? 0 : aSeq < bSeq ? -1 : 1;
+}
+
+/** Application close code meaning "authentication failed or expired". Reconnecting cannot help. */
+export const SESSION_ENDED_CLOSE_CODE = 4401;
 
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
@@ -56,6 +82,16 @@ export class WebSocketService {
     private closedByUs = false;
 
     private readonly events$ = new Subject<WsEnvelope>();
+    private readonly reconnected$ = new Subject<void>();
+    private readonly sessionEnded$ = new Subject<void>();
+
+    /**
+     * Highest durable `stream_id` seen this session. Memory only, and dropped by `disconnect()`
+     * (logout, password reset, account deletion) so one account's position is never offered to
+     * another's stream.
+     */
+    private cursor: string | null = null;
+    private hasConnected = false;
 
     readonly isConnected = signal(false);
 
@@ -65,6 +101,30 @@ export class WebSocketService {
 
     get messages() {
         return this.events$.asObservable();
+    }
+
+    /** Emits each time the socket re-opens after having been open before. */
+    get reconnected() {
+        return this.reconnected$.asObservable();
+    }
+
+    /**
+     * The server closed the socket with 4401: our credentials are no longer valid. No reconnect is
+     * scheduled; the session layer decides between a token refresh and ending the session.
+     */
+    get sessionEnded() {
+        return this.sessionEnded$.asObservable();
+    }
+
+    /** The cursor that would be sent on the next reconnect. */
+    get currentCursor(): string | null {
+        return this.cursor;
+    }
+
+    /** Forget the stream position without touching the socket. */
+    forgetCursor(): void {
+        this.cursor = null;
+        this.hasConnected = false;
     }
 
     connect(): void {
@@ -80,9 +140,15 @@ export class WebSocketService {
         const configured = this.configService.wsUrl;
         // Resolve a relative path against the page origin so the dev server and the nginx
         // deployment can share one config value.
-        const url = configured.startsWith('ws')
+        const base = configured.startsWith('ws')
             ? configured
             : `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${configured}`;
+        // Replay is requested only on a reconnect: the first connection of a session has no
+        // position to resume from, and no cursor means no replay.
+        const url =
+            this.hasConnected && this.cursor
+                ? `${base}${base.includes('?') ? '&' : '?'}cursor=${encodeURIComponent(this.cursor)}`
+                : base;
 
         const socket = new WebSocket(url);
         this.socket = socket;
@@ -90,19 +156,32 @@ export class WebSocketService {
         socket.onopen = () => {
             this.reconnectAttempt = 0;
             this.isConnected.set(true);
+            if (this.hasConnected) {
+                this.reconnected$.next();
+            }
+            this.hasConnected = true;
         };
 
         socket.onmessage = (event: MessageEvent<string>) => {
+            let envelope: WsEnvelope;
             try {
-                this.events$.next(JSON.parse(event.data) as WsEnvelope);
+                envelope = JSON.parse(event.data) as WsEnvelope;
             } catch {
                 // A frame we cannot parse is not worth tearing the connection down for.
+                return;
             }
+            this.accept(envelope);
         };
 
-        socket.onclose = () => {
+        socket.onclose = (event?: CloseEvent) => {
             this.isConnected.set(false);
             this.socket = null;
+
+            if (event?.code === SESSION_ENDED_CLOSE_CODE && !this.closedByUs) {
+                this.forgetCursor();
+                this.sessionEnded$.next();
+                return;
+            }
 
             if (!this.closedByUs) {
                 this.scheduleReconnect();
@@ -110,6 +189,32 @@ export class WebSocketService {
         };
 
         socket.onerror = () => socket.close();
+    }
+
+    /**
+     * Track the stream position and hand a well-formed event on. A frame that is not an object with
+     * a string `event_type` is dropped before it can move the cursor: skipping past an event we did
+     * not understand would lose it for good.
+     */
+    private accept(envelope: WsEnvelope): void {
+        if (!envelope || typeof envelope !== 'object' || typeof envelope.event_type !== 'string') {
+            return;
+        }
+
+        if (envelope.event_type === 'resync_required') {
+            // The server could not replay from our cursor and says where to resume instead. A
+            // missing or malformed value clears ours: keeping a position the server just
+            // disowned would only provoke the same answer.
+            const next = (envelope.payload as { cursor?: unknown } | undefined)?.cursor;
+            this.cursor = isStreamId(next) ? next : null;
+        } else if (
+            isStreamId(envelope.stream_id) &&
+            (!this.cursor || compareStreamIds(envelope.stream_id, this.cursor) > 0)
+        ) {
+            this.cursor = envelope.stream_id;
+        }
+
+        this.events$.next(envelope);
     }
 
     /**
@@ -153,6 +258,7 @@ export class WebSocketService {
 
     disconnect(): void {
         this.closedByUs = true;
+        this.forgetCursor();
 
         if (this.reconnectTimer) {
             clearTimeout(this.reconnectTimer);

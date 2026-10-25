@@ -100,6 +100,7 @@ export class ChatViewComponent {
     readonly isRekeying = this.store.isRekeying;
     readonly canSend = this.store.canSend;
     readonly memberVerificationError = this.store.memberVerificationError;
+    readonly memberVerificationCode = this.store.memberVerificationCode;
     readonly encryptionUnavailable = this.store.encryptionUnavailable;
     readonly sendBlockedReason = this.store.sendBlockedReason;
     readonly peerDeleted = this.store.peerDeleted;

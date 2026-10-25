@@ -12,6 +12,11 @@ class Settings(BaseSettings):
 
     # Redis
     REDIS_URL: str
+    # Separate Redis for WebSocket events (streams, pub/sub, gap markers): non-persistent and
+    # evicting (`allkeys-lru`), unlike REDIS_URL's noeviction instance that holds the token
+    # denylist. Deliberately has no default and no fallback to REDIS_URL, so events can never
+    # silently end up competing with security state.
+    EVENTS_REDIS_URL: str
 
     # Object store (RustFS, S3-compatible; `MinioClient` in app/infrastructure/minio.py is an S3
     # client, kept under its existing name since the backing service changed, not the API shape).
@@ -66,6 +71,22 @@ class Settings(BaseSettings):
     # How often an open WebSocket re-validates its session (denylist, force_logout, is_active,
     # token expiry), in seconds. Revocation events close it immediately; this is the backstop.
     WS_SESSION_RECHECK_SECONDS: int = 60
+
+    # Per-user event stream (`stream:user:{id}`) in the events Redis, the replay source for a
+    # reconnecting socket. MAXLEN is approximate (`~`). The TTL is refreshed on every write.
+    # The events Redis evicts (allkeys-lru) and has no persistence, so a stream can also vanish
+    # early (memory pressure, restart); the client then gets `resync_required`.
+    EVENT_STREAM_MAXLEN: int = 200
+    EVENT_STREAM_TTL_SECONDS: int = 7 * 24 * 3600
+    # An event larger than this is published live only and leaves a gap marker (a reconnecting
+    # client is then told to resync) instead of occupying stream memory.
+    EVENT_STREAM_MAX_ENTRY_BYTES: int = 32 * 1024
+    # Most events one reconnect will replay. A longer gap is answered with `resync_required`
+    # rather than a partial replay: the client reloads over HTTP, which is cheaper than a flood.
+    WS_REPLAY_MAX_EVENTS: int = 500
+    # Connects that carry a cursor (each costs a replay read), per user per window.
+    WS_REPLAY_CONNECT_LIMIT: int = 30
+    WS_REPLAY_CONNECT_WINDOW: int = 60
 
     # Swagger/ReDoc/openapi.json are off unless explicitly enabled (dev only).
     EXPOSE_API_DOCS: bool = False

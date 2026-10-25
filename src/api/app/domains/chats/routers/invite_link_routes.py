@@ -26,6 +26,10 @@ from app.domains.users.models import User
 from app.infrastructure.mongo import get_mongo_db
 from app.infrastructure.postgres import get_db
 from app.infrastructure.redis import get_redis
+from app.infrastructure.services.event_publisher import (
+    EventPublisher,
+    get_event_publisher,
+)
 from app.infrastructure.services import redis_service
 
 # Chat-scoped: create/list, gated to admins/owners of that specific chat — same
@@ -238,6 +242,7 @@ async def join_invite_link(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
+    publisher: EventPublisher = Depends(get_event_publisher),
     mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
 ):
     """Join the chat an invite link points at.
@@ -269,13 +274,13 @@ async def join_invite_link(
     )
 
     if not already_member:
-        await _announce_epoch(db, redis, chat_id, epoch)
+        await _announce_epoch(db, publisher, chat_id, epoch)
 
         participant_ids = list(
             await chat_services.get_chat_participants_ids(db, chat_id)
         )
         await redis_service.send_participants_added(
-            redis,
+            publisher,
             chat_id=chat_id,
             added_ids=[user.id],
             recipient_ids=participant_ids,

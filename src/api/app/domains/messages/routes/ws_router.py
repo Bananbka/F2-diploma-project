@@ -2,16 +2,18 @@ import asyncio
 import json
 import time
 
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from loguru import logger
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import ValidationError
 from redis.asyncio import Redis
+from redis.exceptions import ResponseError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.exceptions import AppException
+from app.core.rate_limit import enforce_rate_limit
 from app.domains.chats.models import ChatParticipant
 from app.domains.chats.services.chat_services import update_participant_last_read
 from app.domains.messages.schemas.ws_schemas import WSEventType, WSMessageEnvelope
@@ -24,7 +26,17 @@ from app.domains.users.dependencies import (
 from app.domains.users.models import User
 from app.infrastructure.mongo import get_mongo_db
 from app.infrastructure.postgres import get_db
-from app.infrastructure.redis import get_redis
+from app.infrastructure.redis import get_events_redis, get_redis
+from app.infrastructure.services.event_publisher import (
+    EventPublisher,
+    channel_name as user_channel,
+    extract_stream_id,
+    gap_key,
+    get_event_publisher,
+    parse_stream_id,
+    stream_key,
+    with_stream_id,
+)
 
 ws_router = APIRouter()
 
@@ -40,11 +52,136 @@ async def _close_revoked(websocket: WebSocket) -> None:
         logger.debug(f"socket already closed while revoking: {exc}")
 
 
-async def listen_to_redis(pubsub, websocket: WebSocket, redis: Redis, token: str):
+async def _send_resync(
+    websocket: WebSocket, reason: str, cursor: str | None
+) -> None:
+    """Tell the client its cursor cannot be replayed from, and hand it a fresh one.
+
+    `payload.cursor` is the newest stream id as of now (null if the stream is empty or gone). The
+    client reloads over HTTP and adopts it, so it does not present the same dead cursor again on
+    its next reconnect. Everything up to it is already persisted, hence covered by that reload.
+    """
+    await websocket.send_text(
+        WSMessageEnvelope(
+            event_type=WSEventType.RESYNC_REQUIRED,
+            payload={"reason": reason, "cursor": cursor},
+        ).model_dump_json()
+    )
+
+
+async def open_subscription(redis: Redis, channel: str, timeout: float = 5.0):
+    """Subscribe and wait until Redis has confirmed it.
+
+    `subscribe()` only writes the command. Until the confirmation is read, the server may not yet
+    have registered the subscription, and an event published in that window would be neither in
+    the stream read that follows (if that read came first) nor buffered on the subscription. The
+    replay must start only after this returns.
+    """
+    pubsub = redis.pubsub()
+    await pubsub.subscribe(channel)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    try:
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError(f"no subscribe confirmation for {channel}")
+            message = await pubsub.get_message(
+                ignore_subscribe_messages=False, timeout=min(remaining, 1.0)
+            )
+            if message is not None and message["type"] == "subscribe":
+                return pubsub
+    except BaseException:
+        await pubsub.aclose()
+        raise
+
+
+async def replay_from_cursor(
+    websocket: WebSocket, redis: Redis, user_id, cursor: str
+) -> tuple[int, int] | None:
+    """Send the events this user missed after `cursor`; return the newest stream id covered.
+
+    Must run after the live subscription is confirmed (see `open_subscription`): anything
+    published from then on is both in the stream and buffered on the subscription, and the live
+    listener drops the copies at or below the returned id.
+
+    The reads run in one MULTI so a concurrent trim cannot slip between the bounds check and the
+    range read and leave a silent gap.
+    """
+    key = stream_key(user_id)
+    parsed = parse_stream_id(cursor)
+
+    results = None
+    if parsed is not None:
+        try:
+            async with redis.pipeline(transaction=True) as pipe:
+                pipe.xrange(key, "-", "+", count=1)
+                pipe.xrevrange(key, "+", "-", count=1)
+                pipe.get(gap_key(user_id))
+                pipe.xrange(
+                    key, f"({cursor}", "+", count=settings.WS_REPLAY_MAX_EVENTS + 1
+                )
+                results = await pipe.execute()
+        except ResponseError as exc:
+            # A syntactically valid id Redis still refuses (e.g. the exclusive range after the
+            # largest possible id). Same outcome as a malformed one: reload over HTTP.
+            logger.info(f"replay refused cursor {cursor!r}: {exc}")
+
+    if results is None:
+        await _send_resync(websocket, "invalid_cursor", None)
+        return None
+
+    first, last, gap_ms, entries = results
+    last_id = last[0][0] if last else None
+    last_parsed = parse_stream_id(last_id) if last_id else None
+
+    reason = None
+    adopt = last_id
+    if gap_ms is not None and parsed[0] <= int(gap_ms):
+        # An event after this cursor could not be stored. The client's next cursor must come from
+        # an event stored after the gap, so none is offered here; it simply has no cursor until
+        # the next live event, which is the pre-stream behaviour.
+        reason = "stream_gap"
+        adopt = None
+    elif not first:
+        reason = "stream_missing"  # never written, or expired after the TTL
+    elif parsed < parse_stream_id(first[0][0]):
+        reason = "cursor_too_old"  # entries after the cursor may have been trimmed
+    elif parsed > last_parsed:
+        reason = "cursor_ahead"  # not an id this stream ever issued
+    elif len(entries) > settings.WS_REPLAY_MAX_EVENTS:
+        reason = "too_many_events"
+
+    if reason is not None:
+        await _send_resync(websocket, reason, adopt)
+        return last_parsed
+
+    newest = parsed
+    for entry_id, fields in entries:
+        await websocket.send_text(with_stream_id(fields["e"], entry_id))
+        newest = parse_stream_id(entry_id)
+    return newest
+
+
+async def listen_to_redis(
+    pubsub,
+    websocket: WebSocket,
+    redis: Redis,
+    token: str,
+    replayed_through: tuple[int, int] | None = None,
+):
     try:
         async for message in pubsub.listen():
             if message["type"] == "message":
                 text_data = message["data"]
+
+                # Already delivered by the replay: the subscription was opened before the replay
+                # read, so events from that window arrive on both paths. Stream ids are
+                # monotonic per user, so "at or below the last replayed id" means a duplicate.
+                if replayed_through is not None:
+                    live_id = extract_stream_id(text_data)
+                    if live_id is not None and live_id <= replayed_through:
+                        continue
 
                 # A revocation is never relayed. Each socket re-validates its own token, so a
                 # logout that revoked only one token closes only the sockets using it.
@@ -128,7 +265,7 @@ MAX_FRAME_BYTES = 64 * 1024
 
 
 async def _broadcast_presence(
-    db: AsyncSession, redis: Redis, user_id, online: bool
+    db: AsyncSession, publisher: EventPublisher, user_id, online: bool
 ) -> None:
     """Tell this user's conversation partners that they came online or went offline.
 
@@ -160,10 +297,10 @@ async def _broadcast_presence(
         event_type=WSEventType.USER_ONLINE if online else WSEventType.USER_OFFLINE,
         user_id=user_id,
         payload={"user_id": str(user_id), "online": online},
-    ).model_dump_json()
+    )
 
-    for peer_id in peer_ids:
-        await redis.publish(f"user:{peer_id}", envelope)
+    # Ephemeral: presence is a fact about now, and a replayed "online" would be a lie.
+    await publisher.publish_ephemeral(envelope, peer_ids)
 
 
 async def _may_act_on(db: AsyncSession, user_id, chat_id, websocket: WebSocket) -> bool:
@@ -199,7 +336,14 @@ async def websocket_endpoint(
     user: User = Depends(get_ws_current_user),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
+    publisher: EventPublisher = Depends(get_event_publisher),
+    events_redis: Redis = Depends(get_events_redis),
     mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
+    cursor: str | None = Query(
+        default=None,
+        max_length=64,
+        description="Last stream_id the client saw; missed events are replayed after it.",
+    ),
 ):
     await websocket.accept()
 
@@ -213,7 +357,7 @@ async def websocket_endpoint(
     connection_count = 0
     pubsub = None
     redis_task = None
-    channel_name = f"user:{user.id}"
+    channel_name = user_channel(user.id)
     token = websocket.cookies.get("access_token")
     watcher_task = None
     relay_bucket = TokenBucket(RELAY_BUCKET_CAPACITY, RELAY_BUCKET_REFILL_PER_SECOND)
@@ -225,12 +369,36 @@ async def websocket_endpoint(
         await redis.set(f"status:{user.id}", "1", ex=PRESENCE_TTL_SECONDS)
 
         if connection_count == 1:
-            await _broadcast_presence(db, redis, user.id, online=True)
+            await _broadcast_presence(db, publisher, user.id, online=True)
 
-        pubsub = redis.pubsub()
-        await pubsub.subscribe(channel_name)
+        pubsub = await open_subscription(events_redis, channel_name)
 
-        redis_task = asyncio.create_task(listen_to_redis(pubsub, websocket, redis, token))
+        # Subscribe first, replay second, listen third. A durable event is appended and published
+        # in one atomic step, so an event is either already in the stream when the replay reads it,
+        # or published after the subscribe and therefore buffered here. Events in the overlap are
+        # seen twice and the listener drops the second copy by stream id; nothing falls between.
+        replayed_through = None
+        if cursor is not None:
+            try:
+                await enforce_rate_limit(
+                    redis,
+                    scope="ws-replay",
+                    identifier=str(user.id),
+                    limit=settings.WS_REPLAY_CONNECT_LIMIT,
+                    window_seconds=settings.WS_REPLAY_CONNECT_WINDOW,
+                )
+            except AppException:
+                # Replay is a read amplifier, so reconnect storms are bounded. The fallback is
+                # the pre-stream behaviour: reload over HTTP, then live.
+                await _send_resync(websocket, "rate_limited", None)
+            else:
+                replayed_through = await replay_from_cursor(
+                    websocket, events_redis, user.id, cursor
+                )
+
+        redis_task = asyncio.create_task(
+            listen_to_redis(pubsub, websocket, redis, token, replayed_through)
+        )
         watcher_task = asyncio.create_task(watch_session(websocket, redis, token))
 
         while True:
@@ -254,6 +422,7 @@ async def websocket_endpoint(
             try:
                 ws_event = WSMessageEnvelope.model_validate_json(text)
                 ws_event.user_id = user.id
+                ws_event.stream_id = None  # never client-controlled
 
                 allowed_keys = ALLOWED_INBOUND_PAYLOAD_KEYS.get(ws_event.event_type)
                 if allowed_keys is not None:
@@ -292,11 +461,9 @@ async def websocket_endpoint(
                     res = await db.execute(stmt)
                     participant_ids = res.scalars().all()
 
-                    event_json = ws_event.model_dump_json()
-
-                    for p_id in participant_ids:
-                        if p_id != user.id:
-                            await redis.publish(f"user:{p_id}", event_json)
+                    await publisher.publish_ephemeral(
+                        ws_event, [p_id for p_id in participant_ids if p_id != user.id]
+                    )
 
                 elif ws_event.event_type == WSEventType.MESSAGE_READ:
                     last_read_id = ws_event.payload.get("last_read_message_id")
@@ -341,10 +508,9 @@ async def websocket_endpoint(
                         res = await db.execute(stmt)
                         participant_ids = res.scalars().all()
 
-                        event_json = ws_event.model_dump_json()
-
-                        for p_id in participant_ids:
-                            await redis.publish(f"user:{p_id}", event_json)
+                        # Ephemeral: the read position is recovered over HTTP, so a missed
+                        # receipt is not worth a stream entry.
+                        await publisher.publish_ephemeral(ws_event, participant_ids)
 
                 elif ws_event.event_type in (
                     WSEventType.NEW_MESSAGE,
@@ -406,4 +572,4 @@ async def websocket_endpoint(
                 # user online, and then have its count thrown away. A key sitting at 0 costs
                 # nothing, expires on its own, and increments back to 1 correctly.
                 await redis.set(f"status:{user.id}", "0")
-                await _broadcast_presence(db, redis, user.id, online=False)
+                await _broadcast_presence(db, publisher, user.id, online=False)

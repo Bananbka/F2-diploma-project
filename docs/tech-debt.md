@@ -26,23 +26,45 @@ An afternoon once a certificate exists.
 
 ---
 
-## 2. No offline delivery queue
+## 2. Offline delivery — replaced by a minimal event stream
 
 The proposal names a "координатор черг асинхронної доставки для тимчасово відключених пристроїв".
-There isn't one. Redis pub/sub is fire-and-forget: anything published while a user is disconnected
-is simply lost.
+This is now met in a deliberately minimal form, not as a full queue.
 
-**What exists instead.** The client reconciles on reconnect by re-fetching over HTTP, and it
-deduplicates by message id and inserts by ObjectId, so what the user *sees* is complete and
-correctly ordered. That is reconciliation at the edge, not a guarantee from the transport.
+**What exists.** Every durable event (messages, edits, deletions, chat, membership and epoch events)
+is written to a per-user Redis Stream, kept for 7 days and bounded in length, and still published
+live. Each durable event carries a `stream_id`. The client remembers the highest one in memory and
+reconnects with `/ws?cursor=<id>`; the server replays what came after it. If the cursor is too old
+or unknown, the server sends `resync_required` (with the cursor to resume from, or none) and the
+client reloads the chat list and open conversation over HTTP. A plain reconnect still reloads over
+HTTP as well, as a safety net, because replay is bounded. Typing, presence and read receipts are not
+stored.
 
-**Why the distinction matters.** "гарантія дедуплікації та збереження порядку доставки" is only
-half true, and should be described that way rather than claimed. There is no ack, no server-side
-dedup, and no redelivery.
+**What is still not guaranteed.** There is no acknowledgement, no consumer group, no server-side
+dedup and no redelivery guarantee. The cursor lives in memory, so a page reload starts without one
+and falls back to HTTP. Replay recovers missed events within the retention window and length limit;
+it is not confirmed delivery. The client deduplicates by message id and orders by ObjectId, so what
+the user sees is correct and ordered, but that remains reconciliation at the edge. The wording
+"гарантія дедуплікації та збереження порядку доставки" should stay measured accordingly.
 
-**To close it.** Per-user inbox streams (Redis Streams fit: consumer groups give acks and
-redelivery for free) with a client cursor, replacing the fire-and-forget publish. A substantial
-feature, not a fix.
+**Обмеження потоку та зберігання (серверна частина).** Події живуть в окремому Redis
+(`redis-events`: `allkeys-lru`, 256 МБ, без RDB/AOF, не публікується на хост), а не в основному,
+де лежать відкликані токени. TTL 7 днів і до ~200 подій на користувача (не 30 днів, як у backlog),
+див. `docs/event-queue-plan.md`. Події лише в пам'яті: витіснення або перезапуск стирає потоки, і
+клієнт отримує `resync_required`. Подія понад 32 КБ або така, що Redis не зміг записати,
+публікується лише наживо, а для користувача ставиться маркер `stream-gap:{id}`; клієнт із
+курсором не новішим за маркер отримує `resync_required` з причиною `stream_gap` (надвелика подія
+свідомо дає перезавантаження). Записи потоку містять ті самі конверти, що й живі події (шифротекст
+і метадані чату, без відкритого тексту). **Зберігання.** Під час видалення облікового запису потік
+і маркер самого користувача видаляються, але записи про нього в потоках інших учасників
+вибірково видалити не можна, і видалення повідомлення не виконує `XDEL` для вже поставлених у
+чергу копій: вони зникають за TTL, витісненням або перезапуском, не довше 7 днів, і ніколи не
+потрапляють на диск. **Часткова відмова:** розсилання пакетами по 500 без транзакції, тож збій
+посередині лишає частину отримувачів без події без окремого сигналу (лише журнал); вони
+наздоганяють HTTP-перезавантаженням. **Неоднорідність:** збій розсилання після збереження
+журналюється й не змінює відповідь лише для маршрутів повідомлень (TB-20); маршрути чатів,
+учасників, криптографії та профілю на збій публікації, як і раніше, повертають 5xx після вже
+виконаної зміни.
 
 ---
 
@@ -138,9 +160,27 @@ across `tests/crypto`+`tests/stickers`, all green with limits genuinely on. See 
 - **The `presence:{user_id}` refcount can drift** if a process is killed between `incr` and the
   `finally` that decrements. It self-heals after the 24h TTL. A heartbeat, or deriving presence
   from live pubsub subscriptions rather than a counter, would remove the failure mode.
-- **`ReceiverChain.skipped` is memory-only.** A reload loses the retained keys, so a genuinely
-  late message that arrives after a refresh reports `failed` rather than opening. Persisting chain
-  state in IndexedDB under a key wrapped by the KEK is the documented intent.
+- **`ReceiverChain.skipped` is now persisted, with limits.** Retained skipped keys are mirrored to
+  IndexedDB wrapped under the KEK (AAD-bound, capped, expiring after 30 days, wiped on lock). This
+  bounds and preserves the retained set across a reload, but it does not make consumption durable:
+  receiver chains are still rebuilt from the grant at index 0 so already-read history can be
+  reopened, which means a key consumed before a reload is re-derived after it. Durable consumption
+  would need a persisted chain position, and that would make history unreadable after a reload
+  unless plaintext were also stored. Not done, and not claimed.
+
+  **The honest cost.** Because chains restart at the grant after a reload, walking forward
+  re-retains keys for messages already read (up to 2000 per chain), and their save time is
+  refreshed each time. With the 30-day row limit and 30-day grant pruning a key can sit on disk for
+  roughly 60 days after its epoch closes. Exploiting it needs the browser profile **and** the
+  password. Accepted, and documented in `crypto-spec-v1.md` section 3.1; the simplest way to remove
+  it is to stop persisting.
+
+  **Accepted, not fixed:** the save time is not in the AAD (it can only shorten or lengthen a row's
+  life); the storage cap is checked every 64 writes, so it can briefly be exceeded; rows belonging
+  to chains the user never reopens are removed only by the age limit or the cap (orphans).
+  A WebSocket handshake that is refused outright (HTTP 401 before upgrade) is indistinguishable
+  from a network failure in the browser and keeps retrying with backoff; only an application close
+  code 4401 ends the session.
 - **Two `Cache-Control` headers on static assets** — nginx emits one from `expires 1y` and one from
   `add_header`. Harmless (browsers take the first) but untidy.
 - **Account deletion is a tombstone, not an erasure.** `DELETE /profile` anonymises the `users` row

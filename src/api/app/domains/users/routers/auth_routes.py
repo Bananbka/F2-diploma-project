@@ -50,6 +50,10 @@ from app.domains.users.tasks import EmailTasks, send_email
 from app.infrastructure.mongo import get_mongo_db
 from app.infrastructure.postgres import get_db
 from app.infrastructure.redis import get_redis
+from app.infrastructure.services.event_publisher import (
+    EventPublisher,
+    get_event_publisher,
+)
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -266,6 +270,7 @@ async def logout(
     request: Request,
     response: Response,
     redis: Redis = Depends(get_redis),
+    publisher: EventPublisher = Depends(get_event_publisher),
     mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
 ):
     # Both cookies are revoked. Blacklisting only the access token left the refresh token live,
@@ -302,7 +307,7 @@ async def logout(
 
     if subject:
         try:
-            await publish_session_revoked(redis, uuid.UUID(subject), "token")
+            await publish_session_revoked(publisher, uuid.UUID(subject), "token")
             await audit.record(
                 mongo_db,
                 AuditEvent.LOGOUT,
@@ -426,6 +431,7 @@ async def reset_password(
     request: Request,
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
+    publisher: EventPublisher = Depends(get_event_publisher),
     mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
 ):
     await enforce_rate_limit(
@@ -473,7 +479,7 @@ async def reset_password(
     # Every device is revoked, and no replacement session is issued here — the user must log in
     # again with the new password.
     await redis.setex(f"force_logout:{user.id}", 604800, revocation_cutoff())
-    await publish_session_revoked(redis, user.id, "all")
+    await publish_session_revoked(publisher, user.id, "all")
 
     # The most consequential event in the system: the identity is destroyed and every device
     # revoked, so all history becomes unreadable. If it was not the account holder who did this,
@@ -499,6 +505,7 @@ async def change_password(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
+    publisher: EventPublisher = Depends(get_event_publisher),
     mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
 ):
     await enforce_rate_limit(
@@ -547,7 +554,7 @@ async def change_password(
     # every token issued before it, down to the fraction of a second, does not.
     cutoff = revocation_cutoff()
     await redis.setex(f"force_logout:{current_user.id}", 604800, cutoff)
-    await publish_session_revoked(redis, current_user.id, "all")
+    await publish_session_revoked(publisher, current_user.id, "all")
 
     new_access_token = create_access_token(data={"sub": str(current_user.id)})
     new_refresh_token = create_refresh_token(data={"sub": str(current_user.id)})

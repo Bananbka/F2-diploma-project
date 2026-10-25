@@ -89,16 +89,35 @@ export class ReceiverChain {
     private chainKey: Uint8Array;
     public index: number;
     public readonly skipped = new Map<number, MessageKey>();
+    /** Observer for the retained set, so it can be mirrored to storage without the ratchet knowing
+     *  anything about storage. Callbacks are synchronous and must not throw into the ratchet. */
+    public skippedObserver?: SkippedObserver;
 
     constructor(chainKey: Uint8Array, index = 0) {
         this.chainKey = chainKey;
         this.index = index;
     }
 
+    /**
+     * Seed keys retained by an earlier session. Never overwrites a key already held, and ignores
+     * anything beyond the retention budget � oldest first, same rule as live eviction.
+     */
+    restoreSkipped(entries: ReadonlyMap<number, MessageKey>): void {
+        [...entries.keys()]
+            .sort((a, b) => a - b)
+            .forEach((index) => {
+                if (!this.skipped.has(index)) {
+                    this.skipped.set(index, entries.get(index) as MessageKey);
+                }
+            });
+        this.evictOldestSkipped();
+    }
+
     messageKeyFor(targetIndex: number): MessageKey {
         const cached = this.skipped.get(targetIndex);
         if (cached) {
             this.skipped.delete(targetIndex);
+            this.skippedObserver?.consumed(targetIndex);
             return cached;
         }
 
@@ -112,7 +131,11 @@ export class ReceiverChain {
 
         // Walk forward, retaining the keys we step over so those messages can still arrive later.
         while (this.index < targetIndex) {
-            this.skipped.set(this.index, deriveMessageKey(this.chainKey));
+            if (!this.skipped.has(this.index)) {
+                const retained = deriveMessageKey(this.chainKey);
+                this.skipped.set(this.index, retained);
+                this.skippedObserver?.retained(this.index, retained);
+            }
             this.chainKey = advanceChain(this.chainKey);
             this.index += 1;
 
@@ -135,6 +158,14 @@ export class ReceiverChain {
                 return;
             }
             this.skipped.delete(oldest.value);
+            this.skippedObserver?.consumed(oldest.value);
         }
     }
+}
+
+export interface SkippedObserver {
+    /** A key was newly retained for a skipped index. */
+    retained(index: number, key: MessageKey): void;
+    /** A retained key left the set: opened a late message, or evicted by the cap. */
+    consumed(index: number): void;
 }

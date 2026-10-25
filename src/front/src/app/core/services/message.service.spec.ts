@@ -6,10 +6,11 @@ import { of, throwError } from 'rxjs';
 import { signChannelPost } from '../crypto/channel';
 import { openMessage, sealMessage } from '../crypto/envelope';
 import { b64uEncode, utf8 } from '../crypto/primitives';
-import { SenderChain } from '../crypto/ratchet';
+import { ReceiverChain, SenderChain } from '../crypto/ratchet';
 import { MessageAttachment, MessageResponse, PublicKey } from '../models/crypto.model';
 import { ChatApiService } from './chat-api.service';
 import { CryptoApiService } from './crypto-api.service';
+import { RetryLimitExceededError } from './crypto-errors';
 import { KeyStoreService } from './key-store.service';
 import { MessageService } from './message.service';
 
@@ -83,10 +84,20 @@ describe('MessageService', () => {
     beforeEach(() => {
         keyStore = jasmine.createSpyObj<KeyStoreService>(
             'KeyStoreService',
-            ['getReceiverChain', 'getChainSigningKey', 'ingestDistributions', 'ensureSenderChain', 'invalidateSenderChain'],
+            [
+                'getReceiverChain',
+                'getChainSigningKey',
+                'ingestDistributions',
+                'ensureSenderChain',
+                'invalidateSenderChain',
+            ],
             ['currentIdentity']
         );
-        chatApi = jasmine.createSpyObj<ChatApiService>('ChatApiService', ['getMessages', 'editMessage', 'sendEnvelope']);
+        chatApi = jasmine.createSpyObj<ChatApiService>('ChatApiService', [
+            'getMessages',
+            'editMessage',
+            'sendEnvelope',
+        ]);
 
         cryptoApi = jasmine.createSpyObj<CryptoApiService>('CryptoApiService', ['getChatKeys', 'getKeysBatch']);
         cryptoApi.getChatKeys.and.returnValue(
@@ -349,6 +360,73 @@ describe('MessageService', () => {
         expect(result.attachments[0].decryptionKey).toEqual(attachmentKey);
     });
 
+    describe('concurrent and out-of-order decrypts', () => {
+        const SKID = 'c0000000-0000-4000-8000-000000000003';
+        let sender: SenderChain;
+        let receiver: ReceiverChain;
+        let signingPrivate: Uint8Array;
+
+        beforeEach(() => {
+            const chainKey = crypto.getRandomValues(new Uint8Array(32));
+            sender = new SenderChain(chainKey.slice());
+            receiver = new ReceiverChain(chainKey.slice());
+            signingPrivate = crypto.getRandomValues(new Uint8Array(32));
+            keyStore.getReceiverChain.and.returnValue(receiver as never);
+            keyStore.getChainSigningKey.and.returnValue(undefined);
+        });
+
+        /** Seal the next message on the sender chain; its index is whatever the chain is at. */
+        async function seal(id: string, text: string): Promise<MessageResponse> {
+            const { key, nonce, index } = sender.nextMessageKey();
+            const raw = envelopeMessage(id, index);
+            raw.envelope = await sealMessage({
+                messageKey: key,
+                nonce,
+                signingPrivate,
+                chatId: CHAT,
+                epoch: 1,
+                senderId: SENDER,
+                senderKeyId: SKID,
+                chainIndex: index,
+                plaintext: utf8(text),
+            });
+            return raw;
+        }
+
+        it('shares one run between concurrent decrypts of the same message', async () => {
+            const raw = await seal('dup', 'hello');
+            const spy = spyOn(receiver, 'messageKeyFor').and.callThrough();
+
+            const [a, b] = await Promise.all([service.decrypt(CHAT, raw), service.decrypt(CHAT, raw)]);
+
+            expect(spy).toHaveBeenCalledTimes(1);
+            expect(a.status).toBe('ok');
+            expect(b).toBe(a);
+        });
+
+        it('does not let a consumed-index failure stand as the verdict for the message', async () => {
+            const raw = await seal('consumed', 'hello');
+            receiver.messageKeyFor(raw.envelope!.idx); // consumed behind our back
+
+            const first = await service.decrypt(CHAT, raw);
+            expect(first.status).toBe('failed');
+
+            // Not remembered as the message's verdict: a second look is a fresh attempt.
+            const again = await service.decrypt(CHAT, raw);
+            expect(again).not.toBe(first);
+        });
+
+        it('never replaces a cached plaintext with one from a lower envelope index', async () => {
+            const old = await seal('edit', 'v-old'); // idx 0
+            const newer = await seal('edit', 'v-new'); // idx 1, same message id
+
+            const results = await Promise.all([service.decrypt(CHAT, newer), service.decrypt(CHAT, old)]);
+
+            expect(results[0].text).toBe('v-new');
+            expect((await service.decrypt(CHAT, old)).text).toBe('v-new');
+        });
+    });
+
     /** Real message history sealed before this feature existed is raw UTF-8, not JSON. */
     it('falls back to legacy plaintext when the decrypted bytes are not the JSON shape', async () => {
         const messageKey = crypto.getRandomValues(new Uint8Array(32));
@@ -463,7 +541,10 @@ describe('MessageService', () => {
         });
 
         it('reuses the same id when EPOCH_STALE forces a re-encrypt and retry', async () => {
-            chatApi.sendEnvelope.and.returnValues(throwError(() => staleError()), of(envelopeMessage('m1', 0)));
+            chatApi.sendEnvelope.and.returnValues(
+                throwError(() => staleError()),
+                of(envelopeMessage('m1', 0))
+            );
 
             await service.sendText(CHAT, 'hello');
 
@@ -473,6 +554,62 @@ describe('MessageService', () => {
             expect(second[5]).toBe(first[5]);
             // The retry is a genuine re-seal, not the old ciphertext resent.
             expect(second[1]).not.toEqual(first[1]);
+        });
+
+        it('re-seals for details.current_epoch, not the epoch it first tried', async () => {
+            chatApi.sendEnvelope.and.returnValues(
+                throwError(() => staleError()),
+                of(envelopeMessage('m1', 0))
+            );
+
+            await service.sendText(CHAT, 'hello');
+
+            expect(keyStore.ensureSenderChain.calls.argsFor(0)).toEqual([CHAT, 1]);
+            expect(keyStore.ensureSenderChain.calls.argsFor(1)).toEqual([CHAT, 2]);
+            expect(keyStore.invalidateSenderChain).toHaveBeenCalledWith(CHAT, 1);
+            // Same server-side epoch as the one it told us about, carried inside the envelope.
+            expect(chatApi.sendEnvelope.calls.argsFor(1)[1].epoch).toBe(2);
+        });
+
+        it('retries exactly once: a second EPOCH_STALE is surfaced, with the same id both times', async () => {
+            chatApi.sendEnvelope.and.returnValue(throwError(() => staleError()));
+
+            await expectAsync(service.sendText(CHAT, 'hello')).toBeRejected();
+
+            expect(chatApi.sendEnvelope).toHaveBeenCalledTimes(2);
+            expect(chatApi.sendEnvelope.calls.argsFor(1)[5]).toBe(chatApi.sendEnvelope.calls.argsFor(0)[5]);
+        });
+
+        it('does not retry on other failures', async () => {
+            chatApi.sendEnvelope.and.returnValue(throwError(() => new HttpErrorResponse({ status: 500 })));
+
+            await expectAsync(service.sendText(CHAT, 'hello')).toBeRejected();
+
+            expect(chatApi.sendEnvelope).toHaveBeenCalledTimes(1);
+        });
+
+        it('treats an exhausted EPOCH_CLOSED publish as stale and re-seals once for the fresh epoch', async () => {
+            const closed = new RetryLimitExceededError(
+                3,
+                new HttpErrorResponse({ status: 409, error: { error_code: 'EPOCH_CLOSED' } })
+            );
+            let calls = 0;
+            keyStore.ensureSenderChain.and.callFake(() => {
+                calls += 1;
+                return calls === 1
+                    ? Promise.reject(closed)
+                    : Promise.resolve({
+                          senderKeyId: 'c0000000-0000-4000-8000-000000000003',
+                          chain: new SenderChain(crypto.getRandomValues(new Uint8Array(32))),
+                          chainSigningPrivate: crypto.getRandomValues(new Uint8Array(32)),
+                      } as never);
+            });
+            chatApi.sendEnvelope.and.returnValue(of(envelopeMessage('m1', 0)));
+
+            await service.sendText(CHAT, 'hello');
+
+            expect(keyStore.ensureSenderChain).toHaveBeenCalledTimes(2);
+            expect(chatApi.sendEnvelope).toHaveBeenCalledTimes(1);
         });
 
         it('uses a caller-supplied id, for a manual retry', async () => {

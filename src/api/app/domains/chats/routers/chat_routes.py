@@ -33,13 +33,17 @@ from app.domains.users.services import user_service
 from app.infrastructure.mongo import get_mongo_db
 from app.infrastructure.postgres import get_db
 from app.infrastructure.redis import get_redis
+from app.infrastructure.services.event_publisher import (
+    EventPublisher,
+    get_event_publisher,
+)
 from app.infrastructure.services import redis_service
 
 router = APIRouter(prefix="/chats", tags=["Chats"])
 
 
 async def _announce_epoch(
-    db: AsyncSession, redis: Redis, chat_id: uuid.UUID, epoch
+    db: AsyncSession, publisher: EventPublisher, chat_id: uuid.UUID, epoch
 ) -> None:
     """Notify remaining members that a new key epoch opened. No-op for unencrypted chats."""
     if epoch is None:
@@ -48,7 +52,7 @@ async def _announce_epoch(
     participant_ids = await chat_services.get_chat_participants_ids(db, chat_id)
 
     await redis_service.send_key_epoch_started(
-        redis,
+        publisher,
         chat_id=chat_id,
         epoch=epoch.epoch,
         member_set_hash=epoch.member_set_hash,
@@ -76,12 +80,12 @@ async def create_group_chat(
     data: GroupChatCreateRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-    redis: Redis = Depends(get_redis),
+    publisher: EventPublisher = Depends(get_event_publisher),
 ):
     chat = await chat_services.create_group_chat(db, user.id, data)
 
     await redis_service.send_chat_created_message(
-        redis, chat, user.id, data.participant_ids
+        publisher, chat, user.id, data.participant_ids
     )
 
     return SuccessResponse(data=chat)
@@ -92,7 +96,7 @@ async def create_channel(
     data: ChannelCreateRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-    redis: Redis = Depends(get_redis),
+    publisher: EventPublisher = Depends(get_event_publisher),
 ):
     """Create a broadcast channel.
 
@@ -102,7 +106,7 @@ async def create_channel(
     chat = await chat_services.create_channel(db, user.id, data)
 
     await redis_service.send_chat_created_message(
-        redis, chat, user.id, data.subscriber_ids
+        publisher, chat, user.id, data.subscriber_ids
     )
 
     return SuccessResponse(data=chat)
@@ -268,7 +272,7 @@ async def delete_participants(
     user: User = Depends(get_current_user),
     chat_id: uuid.UUID = Path(..., description="Chat ID"),
     db: AsyncSession = Depends(get_db),
-    redis: Redis = Depends(get_redis),
+    publisher: EventPublisher = Depends(get_event_publisher),
     mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
 ):
     chat_p = await messages_service.is_user_in_chat(db, user.id, chat_id)
@@ -317,7 +321,7 @@ async def delete_participants(
     _, epoch = await chat_services.delete_chat_participants(
         db, chat_id, data.user_ids, mongo_db=mongo_db
     )
-    await _announce_epoch(db, redis, chat_id, epoch)
+    await _announce_epoch(db, publisher, chat_id, epoch)
 
     # The removed members have to be told separately, and this has to happen *after* the delete
     # while their ids are still in hand. `_announce_epoch` resolves recipients from the current
@@ -326,13 +330,13 @@ async def delete_participants(
     remaining_ids = list(await chat_services.get_chat_participants_ids(db, chat_id))
 
     await redis_service.send_participants_removed(
-        redis,
+        publisher,
         chat_id=chat_id,
         removed_ids=removed_ids,
         recipient_ids=remaining_ids,
     )
     await redis_service.send_chat_deleted(
-        redis, chat_id=chat_id, recipient_ids=removed_ids
+        publisher, chat_id=chat_id, recipient_ids=removed_ids
     )
 
     # Membership decides who can read what, so it belongs in the audit log alongside key changes.
@@ -354,7 +358,7 @@ async def leave_chat(
     user: User = Depends(get_current_user),
     chat_id: uuid.UUID = Path(..., description="Chat ID"),
     db: AsyncSession = Depends(get_db),
-    redis: Redis = Depends(get_redis),
+    publisher: EventPublisher = Depends(get_event_publisher),
     mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
 ):
     """Remove yourself from a group or channel.
@@ -383,10 +387,10 @@ async def leave_chat(
         )
 
     epoch = await chat_services.leave_chat(db, chat_id, user.id, mongo_db=mongo_db)
-    await _announce_epoch(db, redis, chat_id, epoch)
+    await _announce_epoch(db, publisher, chat_id, epoch)
 
     await redis_service.send_participants_removed(
-        redis,
+        publisher,
         chat_id=chat_id,
         removed_ids=[user.id],
         recipient_ids=list(await chat_services.get_chat_participants_ids(db, chat_id)),
@@ -403,7 +407,7 @@ async def add_participants(
     user: User = Depends(get_current_user),
     chat_id: uuid.UUID = Path(..., description="Chat ID"),
     db: AsyncSession = Depends(get_db),
-    redis: Redis = Depends(get_redis),
+    publisher: EventPublisher = Depends(get_event_publisher),
     mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
 ):
     chat_p = await messages_service.is_user_in_chat(db, user.id, chat_id)
@@ -441,11 +445,11 @@ async def add_participants(
     _, epoch = await chat_services.add_chat_participants(
         db, chat_id, data.user_ids, mongo_db=mongo_db
     )
-    await _announce_epoch(db, redis, chat_id, epoch)
+    await _announce_epoch(db, publisher, chat_id, epoch)
 
     participant_ids = list(await chat_services.get_chat_participants_ids(db, chat_id))
     await redis_service.send_participants_added(
-        redis,
+        publisher,
         chat_id=chat_id,
         added_ids=list(set(data.user_ids)),
         recipient_ids=participant_ids,
@@ -473,7 +477,7 @@ async def transfer_ownership(
     user: User = Depends(get_current_user),
     chat_id: uuid.UUID = Path(..., description="Chat ID"),
     db: AsyncSession = Depends(get_db),
-    redis: Redis = Depends(get_redis),
+    publisher: EventPublisher = Depends(get_event_publisher),
     mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
 ):
     """Hand ownership of a group or channel to another member.
@@ -508,7 +512,7 @@ async def transfer_ownership(
     )
 
     await redis_service.send_chat_updated(
-        redis,
+        publisher,
         chat_id=chat_id,
         recipient_ids=list(await chat_services.get_chat_participants_ids(db, chat_id)),
         payload={"owner_id": str(data.user_id)},
@@ -530,7 +534,7 @@ async def delete_chat(
     user: User = Depends(get_current_user),
     chat_id: uuid.UUID = Path(..., description="Chat ID"),
     db: AsyncSession = Depends(get_db),
-    redis: Redis = Depends(get_redis),
+    publisher: EventPublisher = Depends(get_event_publisher),
     mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
 ):
     """Delete a group or channel, and every message in it. Owner only, and irreversible.
@@ -563,7 +567,7 @@ async def delete_chat(
     participant_ids = await chat_services.delete_chat(db, mongo_db, chat_id)
 
     await redis_service.send_chat_deleted(
-        redis, chat_id=chat_id, recipient_ids=participant_ids
+        publisher, chat_id=chat_id, recipient_ids=participant_ids
     )
 
     await audit.record(

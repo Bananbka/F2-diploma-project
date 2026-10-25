@@ -1,14 +1,25 @@
-import { TestBed } from '@angular/core/testing';
-import { of } from 'rxjs';
+import { HttpErrorResponse } from '@angular/common/http';
+import { Injector } from '@angular/core';
+import { fakeAsync, TestBed, tick } from '@angular/core/testing';
+import { of, throwError } from 'rxjs';
 import { v4 as uuidv4 } from 'uuid';
 
-import { signDistribution, wrapChainKey } from '../crypto/grants';
+import { computeMemberSetHash, signDistribution, wrapChainKey } from '../crypto/grants';
 import { generateIdentity, IdentityBundle, wrapPrivateBundle } from '../crypto/identity';
 import { b64uDecode, b64uEncode } from '../crypto/primitives';
 import { generateChainKey } from '../crypto/ratchet';
-import { Distribution, OwnIdentity, PrekeyRotateRequest, PublicKey } from '../models/crypto.model';
+import {
+    ChatRoster,
+    Distribution,
+    OwnIdentity,
+    PrekeyRotateRequest,
+    PublicKey,
+    RosterEntry,
+} from '../models/crypto.model';
 import { CryptoApiService } from './crypto-api.service';
-import { KeyStoreService } from './key-store.service';
+import { MemberSetMismatchError, RetryLimitExceededError, RosterVerificationError } from './crypto-errors';
+import { KeyStoreService, SENDER_KEY_PUBLISH_POLICY } from './key-store.service';
+import { SKIPPED_KEY_DB_NAME, SKIPPED_KEY_IDB, SkippedKeyStore } from './skipped-key-store.service';
 
 const USER = 'a0000000-0000-4000-8000-000000000001';
 const DEVICE = 'b0000000-0000-4000-8000-000000000002';
@@ -82,9 +93,31 @@ async function buildDistribution(params: {
     };
 }
 
+/** Wait for a fire-and-forget write (or delete) to land. */
+async function until(condition: () => Promise<boolean>, timeoutMs = 3000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (!(await condition())) {
+        if (Date.now() > deadline) {
+            throw new Error('condition not reached in time');
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+}
+
 describe('KeyStoreService', () => {
+    // Each unlock runs a real 64 MiB Argon2id derivation; a few per test outgrow the 5 s default.
+    const defaultTimeout = jasmine.DEFAULT_TIMEOUT_INTERVAL;
+    beforeAll(() => (jasmine.DEFAULT_TIMEOUT_INTERVAL = 60000));
+    afterAll(() => (jasmine.DEFAULT_TIMEOUT_INTERVAL = defaultTimeout));
+
     let service: KeyStoreService;
     let cryptoApi: jasmine.SpyObj<CryptoApiService>;
+    let sleep: jasmine.Spy<(ms: number) => Promise<void>>;
+    let dbName: string;
+    const sealedBundles = new Map<
+        boolean,
+        { bundle: IdentityBundle; wrapped?: Awaited<ReturnType<typeof wrapPrivateBundle>> }
+    >();
 
     beforeEach(() => {
         localStorage.clear();
@@ -98,8 +131,16 @@ describe('KeyStoreService', () => {
             'publishSenderKey',
         ]);
 
+        sleep = jasmine.createSpy('sleep').and.resolveTo();
+        dbName = `test-skipped-${uuidv4()}`;
+
         TestBed.configureTestingModule({
-            providers: [KeyStoreService, { provide: CryptoApiService, useValue: cryptoApi }],
+            providers: [
+                KeyStoreService,
+                { provide: CryptoApiService, useValue: cryptoApi },
+                { provide: SKIPPED_KEY_DB_NAME, useValue: dbName },
+                { provide: SENDER_KEY_PUBLISH_POLICY, useValue: { maxAttempts: 3, baseDelayMs: 250, sleep } },
+            ],
         });
         service = TestBed.inject(KeyStoreService);
     });
@@ -110,8 +151,14 @@ describe('KeyStoreService', () => {
     async function unlockWithBundle(withPrekey: boolean): Promise<IdentityBundle> {
         localStorage.setItem('ns.device_id', DEVICE);
 
-        const bundle = generateIdentity(USER, DEVICE, withPrekey);
-        const wrapped = await wrapPrivateBundle(bundle, PASSWORD);
+        // Sealing costs a full Argon2id run; the bundle is immutable, so seal each shape once.
+        const cached = sealedBundles.get(withPrekey) ?? {
+            bundle: generateIdentity(USER, DEVICE, withPrekey),
+            wrapped: undefined as Awaited<ReturnType<typeof wrapPrivateBundle>> | undefined,
+        };
+        cached.wrapped ??= await wrapPrivateBundle(cached.bundle, PASSWORD);
+        sealedBundles.set(withPrekey, cached);
+        const { bundle, wrapped } = cached as { bundle: IdentityBundle; wrapped: NonNullable<typeof cached.wrapped> };
 
         const own: OwnIdentity = {
             ...publicKeyFor(USER, DEVICE, bundle),
@@ -343,6 +390,354 @@ describe('KeyStoreService', () => {
             expect(service.getReceiverChain(CHAT, dist.epoch, dist.sender_key_id)).toBeUndefined();
         });
     });
+
+    describe('ensureSenderChain publish policy (TB-30)', () => {
+        function rosterFor(bundle: IdentityBundle, overrides: Partial<ChatRoster> = {}): ChatRoster {
+            const member: RosterEntry = {
+                user_id: USER,
+                device_id: DEVICE,
+                identity_key_id: uuidv4(),
+                identity_public_key: b64uEncode(bundle.identityPublic),
+                signing_public_key: b64uEncode(bundle.signingPublic),
+                identity_key_signature: b64uEncode(bundle.identityKeySignature),
+                signed_prekey_public: bundle.prekeyPublic ? b64uEncode(bundle.prekeyPublic) : null,
+                signed_prekey_signature: bundle.signedPrekeySignature ? b64uEncode(bundle.signedPrekeySignature) : null,
+            };
+            return {
+                chat_id: CHAT,
+                current_epoch: 1,
+                member_set_hash: computeMemberSetHash([member]),
+                members: [member],
+                ...overrides,
+            };
+        }
+
+        const http = (status: number, code?: string) =>
+            new HttpErrorResponse({ status, error: code ? { error_code: code } : null });
+
+        it('publishes on the first try without sleeping', async () => {
+            const bundle = await unlockWithBundle(true);
+            cryptoApi.getRoster.and.returnValue(of(rosterFor(bundle)));
+            cryptoApi.publishSenderKey.and.returnValue(of({}));
+
+            await service.ensureSenderChain(CHAT, 1);
+
+            expect(cryptoApi.publishSenderKey).toHaveBeenCalledTimes(1);
+            expect(sleep).not.toHaveBeenCalled();
+        });
+
+        for (const failure of [
+            ['a network error', () => http(0)],
+            ['a 503', () => http(503)],
+            ['EPOCH_CLOSED', () => http(409, 'EPOCH_CLOSED')],
+            ['GRANT_SET_MISMATCH', () => http(400, 'GRANT_SET_MISMATCH')],
+        ] as const) {
+            it(`retries after ${failure[0]}, re-reading the roster and minting a fresh chain`, async () => {
+                const bundle = await unlockWithBundle(true);
+                cryptoApi.getRoster.and.callFake(() => of(rosterFor(bundle)));
+                cryptoApi.publishSenderKey.and.returnValues(throwError(failure[1]), of({}));
+
+                await service.ensureSenderChain(CHAT, 1);
+
+                expect(cryptoApi.getRoster).toHaveBeenCalledTimes(2);
+                expect(cryptoApi.publishSenderKey).toHaveBeenCalledTimes(2);
+                const ids = cryptoApi.publishSenderKey.calls.allArgs().map((args) => args[2].sender_key_id);
+                expect(ids[0]).not.toBe(ids[1]);
+                expect(sleep.calls.allArgs()).toEqual([[250]]);
+            });
+        }
+
+        it('backs off 250 ms then 500 ms and gives up after three attempts with RETRY_LIMIT_EXCEEDED', async () => {
+            const bundle = await unlockWithBundle(true);
+            cryptoApi.getRoster.and.callFake(() => of(rosterFor(bundle)));
+            cryptoApi.publishSenderKey.and.callFake(() => throwError(() => http(503)));
+
+            const failure = await service.ensureSenderChain(CHAT, 1).then(
+                () => null,
+                (error: unknown) => error
+            );
+
+            expect(failure).toBeInstanceOf(RetryLimitExceededError);
+            expect((failure as RetryLimitExceededError).code).toBe('RETRY_LIMIT_EXCEEDED');
+            expect((failure as RetryLimitExceededError).attempts).toBe(3);
+            expect(cryptoApi.publishSenderKey).toHaveBeenCalledTimes(3);
+            // No wait after the final failure: nothing is left to wait for.
+            expect(sleep.calls.allArgs()).toEqual([[250], [500]]);
+        });
+
+        it('does not retry a 4xx that will not change', async () => {
+            const bundle = await unlockWithBundle(true);
+            cryptoApi.getRoster.and.returnValue(of(rosterFor(bundle)));
+            cryptoApi.publishSenderKey.and.callFake(() => throwError(() => http(403, 'ACCESS_DENIED')));
+
+            await expectAsync(service.ensureSenderChain(CHAT, 1)).toBeRejected();
+
+            expect(cryptoApi.publishSenderKey).toHaveBeenCalledTimes(1);
+            expect(sleep).not.toHaveBeenCalled();
+        });
+
+        it('never retries a member-set mismatch, and sends nothing', async () => {
+            const bundle = await unlockWithBundle(true);
+            cryptoApi.getRoster.and.returnValue(of(rosterFor(bundle, { member_set_hash: 'f'.repeat(64) })));
+
+            const failure = await service.ensureSenderChain(CHAT, 1).then(
+                () => null,
+                (error: unknown) => error
+            );
+
+            expect(failure).toBeInstanceOf(MemberSetMismatchError);
+            expect((failure as MemberSetMismatchError).code).toBe('MEMBER_SET_MISMATCH');
+            expect(cryptoApi.getRoster).toHaveBeenCalledTimes(1);
+            expect(cryptoApi.publishSenderKey).not.toHaveBeenCalled();
+            expect(sleep).not.toHaveBeenCalled();
+        });
+
+        it('never retries a bad binding signature', async () => {
+            const bundle = await unlockWithBundle(true);
+            const roster = rosterFor(bundle);
+            const other = generateIdentity(USER, DEVICE);
+            roster.members[0].identity_public_key = b64uEncode(other.identityPublic);
+            roster.member_set_hash = computeMemberSetHash(roster.members);
+            cryptoApi.getRoster.and.returnValue(of(roster));
+
+            const failure = await service.ensureSenderChain(CHAT, 1).then(
+                () => null,
+                (error: unknown) => error
+            );
+
+            expect(failure).toBeInstanceOf(RosterVerificationError);
+            expect(failure).not.toBeInstanceOf(MemberSetMismatchError);
+            expect((failure as RosterVerificationError).code).toBe('ROSTER_VERIFICATION_FAILED');
+            expect(cryptoApi.publishSenderKey).not.toHaveBeenCalled();
+            expect(sleep).not.toHaveBeenCalled();
+        });
+
+        it('stops retrying if the store is locked while waiting', async () => {
+            const bundle = await unlockWithBundle(true);
+            cryptoApi.getRoster.and.callFake(() => of(rosterFor(bundle)));
+            cryptoApi.publishSenderKey.and.callFake(() => throwError(() => http(503)));
+            sleep.and.callFake(() => {
+                service.lock();
+                return Promise.resolve();
+            });
+
+            await expectAsync(service.ensureSenderChain(CHAT, 1)).toBeRejectedWithError('key store is locked');
+            expect(cryptoApi.publishSenderKey).toHaveBeenCalledTimes(1);
+        });
+    });
+
+    describe('persisted skipped keys (TB-32)', () => {
+        let store: SkippedKeyStore;
+        let dist: Distribution;
+
+        /** A "page reload": new service and new store instance (empty memory), same IndexedDB. */
+        function reload(): { keyStore: KeyStoreService; store: SkippedKeyStore } {
+            const injector = Injector.create({
+                parent: TestBed.inject(Injector),
+                providers: [KeyStoreService, SkippedKeyStore],
+            });
+            return { keyStore: injector.get(KeyStoreService), store: injector.get(SkippedKeyStore) };
+        }
+
+        const chainId = () => `${USER}|${CHAT}|${dist.epoch}|${dist.sender_key_id}`;
+
+        beforeEach(async () => {
+            const bundle = await unlockWithBundle(true);
+            store = TestBed.inject(SkippedKeyStore);
+            const senderIdentity = generateIdentity(SENDER_USER, SENDER_DEVICE);
+            cryptoApi.getKeysBatch.and.returnValue(of([publicKeyFor(SENDER_USER, SENDER_DEVICE, senderIdentity)]));
+            dist = await buildDistribution({
+                epoch: 1,
+                senderIdentity,
+                recipientPublic: bundle.prekeyPublic!,
+                recipientDeviceId: DEVICE,
+            });
+            await service.ingestDistributions(CHAT, [dist]);
+        });
+
+        /** Message 5 arrives first: 0-4 are skipped and must reach storage, wrapped. */
+        async function skipFirstFive(): Promise<void> {
+            service.getReceiverChain(CHAT, dist.epoch, dist.sender_key_id)!.messageKeyFor(5);
+            await until(async () => (await store.forChain(chainId())).length === 5);
+        }
+
+        async function reloadAndIngest() {
+            const after = reload();
+            expect(await after.keyStore.unlock(USER, PASSWORD)).toBeTrue();
+            await after.keyStore.ingestDistributions(CHAT, [dist]);
+            return {
+                ...after,
+                chain: after.keyStore.getReceiverChain(CHAT, dist.epoch, dist.sender_key_id)!,
+            };
+        }
+
+        it('writes only wrapped entries: no key bytes appear in storage', async () => {
+            await skipFirstFive();
+            const chain = service.getReceiverChain(CHAT, dist.epoch, dist.sender_key_id)!;
+            const plain = b64uEncode(chain.skipped.get(2)!.key);
+
+            const rows = await store.forChain(chainId());
+            expect(JSON.stringify(rows)).not.toContain(plain);
+            expect(new Set(rows.map((r) => r.iv)).size)
+                .withContext('fresh IV per entry')
+                .toBe(5);
+        });
+
+        it('opens a late message after a simulated reload', async () => {
+            const before = service.getReceiverChain(CHAT, dist.epoch, dist.sender_key_id)!;
+            before.messageKeyFor(5);
+            const expected = before.skipped.get(2)!;
+            await until(async () => (await store.forChain(chainId())).length === 5);
+
+            const { chain } = await reloadAndIngest();
+
+            // Seeded from storage before any message has been processed.
+            expect(chain.skipped.size).toBe(5);
+            const key = chain.messageKeyFor(2);
+            expect(key.key).toEqual(expected.key);
+            expect(key.nonce).toEqual(expected.nonce);
+        });
+
+        it('deletes an entry once it is consumed, and never yields it twice', async () => {
+            await skipFirstFive();
+            const chain = service.getReceiverChain(CHAT, dist.epoch, dist.sender_key_id)!;
+
+            chain.messageKeyFor(2);
+            await until(async () => (await store.forChain(chainId())).length === 4);
+
+            expect((await store.forChain(chainId())).map((r) => r.index)).not.toContain(2);
+            expect(() => chain.messageKeyFor(2)).toThrowError(/already consumed/);
+        });
+
+        it('rejects and deletes an entry whose ciphertext was tampered with', async () => {
+            await skipFirstFive();
+            const row = (await store.forChain(chainId())).find((r) => r.index === 2)!;
+            const bytes = b64uDecode(row.ct);
+            bytes[0] ^= 1;
+            await store.put({ ...row, ct: b64uEncode(bytes) });
+
+            const { chain, store: after } = await reloadAndIngest();
+
+            expect(chain.skipped.size).toBe(4);
+            expect(chain.skipped.has(2)).toBeFalse();
+            await until(async () => (await after.forChain(chainId())).every((r) => r.index !== 2));
+        });
+
+        it('rejects an entry swapped to another index', async () => {
+            await skipFirstFive();
+            const rows = await store.forChain(chainId());
+            const one = rows.find((r) => r.index === 1)!;
+            const three = rows.find((r) => r.index === 3)!;
+            // Index 3's slot now holds index 1's valid-looking ciphertext.
+            await store.put({ ...three, iv: one.iv, ct: one.ct });
+
+            const { chain } = await reloadAndIngest();
+
+            expect(chain.skipped.has(3)).toBeFalse();
+            expect(chain.skipped.has(1)).toBeTrue();
+        });
+
+        it('rejects an entry whose record id no longer matches its location', async () => {
+            await skipFirstFive();
+            const row = (await store.forChain(chainId())).find((r) => r.index === 1)!;
+            // Filed under index 4's id while its own index field still says 1: id and index disagree.
+            await store.put({ ...row, id: `${chainId()}|4` });
+
+            const { chain } = await reloadAndIngest();
+
+            // The genuine index-4 row was overwritten by the forgery, which cannot open at index 4.
+            expect(chain.skipped.has(4)).toBeFalse();
+            expect(chain.skipped.size).toBe(4);
+        });
+
+        it('erases rows wrapped under the old KEK after a password change, and writes the new KEK from then on', async () => {
+            await skipFirstFive();
+            const identity = service.currentIdentity!;
+            const newKek = crypto.getRandomValues(new Uint8Array(32));
+
+            await service.completePasswordChange({
+                encryptedPrivateBundle: 'x',
+                kdfParams: identity.kdfParams,
+                kek: newKek,
+            } as never);
+
+            expect(await store.count()).toBe(0);
+            expect(service.currentIdentity!.kek).toEqual(newKek);
+
+            // A later retention is written under the new KEK, so a reload with it restores the row.
+            const chain = service.getReceiverChain(CHAT, dist.epoch, dist.sender_key_id)!;
+            chain.messageKeyFor(8);
+            await until(async () => (await store.forChain(chainId())).length > 0);
+            const row = (await store.forChain(chainId()))[0];
+            const { unwrapSkippedKey } = await import('../crypto/skipped-wrap');
+            await expectAsync(
+                unwrapSkippedKey(
+                    newKek,
+                    {
+                        userId: USER,
+                        chatId: CHAT,
+                        epoch: dist.epoch,
+                        senderKeyId: dist.sender_key_id,
+                        index: row.index,
+                    },
+                    row
+                )
+            ).toBeResolved();
+        });
+
+        it('resolves lock() only after storage is cleared, and logs a failed wipe', async () => {
+            await skipFirstFive();
+            await service.lock();
+            expect(await store.count()).toBe(0);
+
+            const logged = spyOn(console, 'error');
+            spyOn(store, 'clear').and.resolveTo(false);
+            await service.lock();
+            expect(logged).toHaveBeenCalled();
+        });
+
+        it('wipes storage and memory on lock', async () => {
+            await skipFirstFive();
+
+            service.lock();
+
+            await until(async () => (await store.count()) === 0);
+            expect(service.getReceiverChain(CHAT, dist.epoch, dist.sender_key_id)).toBeUndefined();
+        });
+
+        it('keeps working, in memory, when IndexedDB is unavailable', async () => {
+            const memoryOnly = Injector.create({
+                parent: TestBed.inject(Injector),
+                providers: [{ provide: SKIPPED_KEY_IDB, useValue: null }, KeyStoreService, SkippedKeyStore],
+            });
+            const keyStore = memoryOnly.get(KeyStoreService);
+            const fallback = memoryOnly.get(SkippedKeyStore);
+            expect(await keyStore.unlock(USER, PASSWORD)).toBeTrue();
+            await keyStore.ingestDistributions(CHAT, [dist]);
+            const chain = keyStore.getReceiverChain(CHAT, dist.epoch, dist.sender_key_id)!;
+
+            chain.messageKeyFor(3);
+            await until(async () => (await fallback.forChain(chainId())).length === 3);
+
+            expect(fallback.isMemoryOnly).toBeTrue();
+            expect(chain.messageKeyFor(1)).toBeDefined();
+        });
+    });
+});
+
+describe('SENDER_KEY_PUBLISH_POLICY defaults', () => {
+    it('is 3 attempts with a 250 ms base, and sleeps on a real (here fake) timer', fakeAsync(() => {
+        const policy = TestBed.inject(SENDER_KEY_PUBLISH_POLICY);
+        expect(policy.maxAttempts).toBe(3);
+        expect(policy.baseDelayMs).toBe(250);
+
+        let woke = false;
+        void policy.sleep(policy.baseDelayMs * 2 ** 1).then(() => (woke = true));
+        tick(499);
+        expect(woke).toBeFalse();
+        tick(1);
+        expect(woke).toBeTrue();
+    }));
 });
 
 /** A minimal `PUT /crypto/identity/prekey` response; `rotatePrekey` only reads `device_id` off the

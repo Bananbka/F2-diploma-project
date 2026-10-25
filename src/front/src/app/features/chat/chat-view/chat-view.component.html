@@ -83,12 +83,22 @@
         >
             <lucide-icon [img]="shieldAlertIcon" />
             <div class="alarm-body">
-                <p class="alarm-title">Member verification failed — the server may be lying to you</p>
-                <p class="alarm-note">
-                    The member list for this chat does not match the commitment recorded for its current key epoch. A
-                    device may have been added that would be able to read your future messages. Keys will not be
-                    distributed and sending is blocked. Verify the members out of band before continuing.
-                </p>
+                @if (memberVerificationCode() === 'ROSTER_VERIFICATION_FAILED') {
+                    <p class="alarm-title">A member's key is not vouched for — the server may be lying to you</p>
+                    <p class="alarm-note">
+                        A device in this chat presents a key that its own signing key does not vouch for. Nobody holding
+                        that device's private key endorsed it, so it may have been substituted. Keys will not be
+                        distributed and sending is blocked. Verify the members' safety numbers out of band before
+                        continuing.
+                    </p>
+                } @else {
+                    <p class="alarm-title">Member verification failed — the server may be lying to you</p>
+                    <p class="alarm-note">
+                        The member list for this chat does not match the commitment recorded for its current key epoch.
+                        A device may have been added that would be able to read your future messages. Keys will not be
+                        distributed and sending is blocked. Verify the members out of band before continuing.
+                    </p>
+                }
             </div>
             <div class="alarm-actions">
                 <button
@@ -254,6 +264,8 @@
                                 <span>
                                     @if (item.pending.rekeyFailure) {
                                         Send failed — the chat re-keyed again mid-send.
+                                    } @else if (item.pending.keyPublishFailure) {
+                                        Not sent — your key could not be shared with this chat after several tries.
                                     } @else {
                                         Send failed.
                                     }

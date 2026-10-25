@@ -1,4 +1,4 @@
-import { inject, Injectable, signal } from '@angular/core';
+import { inject, Injectable, InjectionToken, signal } from '@angular/core';
 import { firstValueFrom } from 'rxjs';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -25,12 +25,39 @@ import {
     wrapPrivateBundle,
 } from '../crypto/identity';
 import { b64uDecode, b64uEncode } from '../crypto/primitives';
-import { generateChainKey, ReceiverChain, SenderChain } from '../crypto/ratchet';
+import { generateChainKey, MessageKey, ReceiverChain, SenderChain } from '../crypto/ratchet';
+import { unwrapSkippedKey, wrapSkippedKey } from '../crypto/skipped-wrap';
 import { ChatRoster, Distribution, GrantUpload, OwnIdentity, PublicKey } from '../models/crypto.model';
 import { CryptoApiService } from './crypto-api.service';
-import { RosterVerificationError } from './crypto-errors';
+import {
+    isRetryablePublishError,
+    MemberSetMismatchError,
+    RetryLimitExceededError,
+    RosterVerificationError,
+} from './crypto-errors';
+import { MAX_SKIPPED_AGE_MS, SkippedKeyStore } from './skipped-key-store.service';
 
 const DEVICE_ID_KEY = 'ns.device_id';
+
+/**
+ * Retry policy for publishing a sender key (TB-30): at most `maxAttempts` tries, waiting
+ * `2^n * baseDelayMs` after failed attempt `n` (n from 0), so 250 ms then 500 ms by default. An
+ * injection token so specs can drive time instead of sleeping.
+ */
+export interface PublishRetryPolicy {
+    maxAttempts: number;
+    baseDelayMs: number;
+    sleep: (ms: number) => Promise<void>;
+}
+
+export const SENDER_KEY_PUBLISH_POLICY = new InjectionToken<PublishRetryPolicy>('SENDER_KEY_PUBLISH_POLICY', {
+    providedIn: 'root',
+    factory: () => ({
+        maxAttempts: 3,
+        baseDelayMs: 250,
+        sleep: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+    }),
+});
 
 interface UnlockedIdentity {
     userId: string;
@@ -92,8 +119,16 @@ interface OwnChain {
 @Injectable({ providedIn: 'root' })
 export class KeyStoreService {
     private readonly cryptoApi = inject(CryptoApiService);
+    private readonly skippedStore = inject(SkippedKeyStore);
+    private readonly publishPolicy = inject(SENDER_KEY_PUBLISH_POLICY);
 
     private identity: UnlockedIdentity | null = null;
+
+    /**
+     * Identifies one unlocked session. Replaced on unlock, cleared on lock. Async work compares it
+     * rather than the identity object, which `rotatePrekey` legitimately replaces mid-flight.
+     */
+    private sessionToken: object | null = null;
 
     /** (chatId, epoch) -> our sending chain */
     private readonly ownChains = new Map<string, OwnChain>();
@@ -161,7 +196,9 @@ export class KeyStoreService {
             kek: wrapped.kek,
             kdfParams: wrapped.kdfParams,
         };
+        this.sessionToken = {};
         this.isUnlocked.set(true);
+        void this.skippedStore.pruneOlderThan(Date.now() - MAX_SKIPPED_AGE_MS);
     }
 
     /**
@@ -199,7 +236,9 @@ export class KeyStoreService {
                 kek: opened.kek,
                 kdfParams: mine.kdf_params as unknown as KdfParams,
             };
+            this.sessionToken = {};
             this.isUnlocked.set(true);
+            void this.skippedStore.pruneOlderThan(Date.now() - MAX_SKIPPED_AGE_MS);
 
             return true;
         } catch {
@@ -349,12 +388,44 @@ export class KeyStoreService {
         return safetyNumber(userFingerprintMaterial(mine), userFingerprintMaterial(theirs));
     }
 
-    lock(): void {
+    /**
+     * Drop every key and wipe persisted skipped keys. The in-memory teardown is synchronous; the
+     * returned promise settles once storage has been cleared, so callers that can wait should.
+     * A failed wipe is logged rather than swallowed: rows left behind are wrapped under a KEK that
+     * is now gone, but the user should not be told they were erased when they were not.
+     */
+    lock(): Promise<void> {
         this.identity = null;
+        this.sessionToken = null;
         this.ownChains.clear();
         this.peerChains.clear();
         this.chainSigningKeys.clear();
         this.isUnlocked.set(false);
+        // Persisted skipped keys go with the KEK that wraps them: lock, logout, password reset and
+        // account deletion all land here.
+        return this.wipeSkipped();
+    }
+
+    private async wipeSkipped(): Promise<void> {
+        try {
+            if (!(await this.skippedStore.clear())) {
+                console.error('Could not erase stored skipped keys; they remain wrapped under a discarded key.');
+            }
+        } catch (error) {
+            console.error('Could not erase stored skipped keys.', error);
+        }
+    }
+
+    /**
+     * Call after the server accepted a password change. This device's bundle is now sealed under a
+     * new KEK, so adopt it in memory and erase everything wrapped under the old one: leaving the old
+     * rows would keep keys readable with the old password, which is exactly what changing it is for.
+     * Rows written from here on use the new KEK (observers read the current one at write time).
+     */
+    async completePasswordChange(rewrapped: WrappedBundle): Promise<void> {
+        const identity = this.requireIdentity();
+        this.identity = { ...identity, kek: rewrapped.kek, kdfParams: rewrapped.kdfParams };
+        await this.wipeSkipped();
     }
 
     private requireIdentity(): UnlockedIdentity {
@@ -427,7 +498,7 @@ export class KeyStoreService {
 
         const recomputed = computeMemberSetHash(roster.members);
         if (recomputed !== roster.member_set_hash) {
-            throw new RosterVerificationError(
+            throw new MemberSetMismatchError(
                 "Member set verification failed: the server's roster does not match the epoch commitment. " +
                     'Refusing to distribute keys.'
             );
@@ -448,6 +519,41 @@ export class KeyStoreService {
         }
 
         const identity = this.requireIdentity();
+        const token = this.sessionToken;
+        const { maxAttempts, baseDelayMs, sleep } = this.publishPolicy;
+
+        let lastError: unknown;
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            try {
+                // A whole fresh attempt every time: the roster is re-read and re-verified (the
+                // member set may be exactly why the last upload was refused), and the chain is
+                // new, because a lost response may still have stored the previous sender_key_id
+                // and the server would refuse a duplicate.
+                return await this.publishSenderChain(identity, chatId, epoch, cacheKey);
+            } catch (error) {
+                // Roster refusals and every non-transient 4xx fall through here untouched.
+                if (!isRetryablePublishError(error)) {
+                    throw error;
+                }
+                lastError = error;
+                if (attempt + 1 < maxAttempts) {
+                    await sleep(baseDelayMs * 2 ** attempt);
+                    if (this.sessionToken !== token) {
+                        throw new Error('key store is locked');
+                    }
+                }
+            }
+        }
+
+        throw new RetryLimitExceededError(maxAttempts, lastError);
+    }
+
+    private async publishSenderChain(
+        identity: UnlockedIdentity,
+        chatId: string,
+        epoch: number,
+        cacheKey: string
+    ): Promise<OwnChain> {
         const roster = await firstValueFrom(this.cryptoApi.getRoster(chatId));
 
         this.verifyRoster(roster);
@@ -529,6 +635,7 @@ export class KeyStoreService {
     /** Unwrap every grant addressed to us and build the matching receiver chains. */
     async ingestDistributions(chatId: string, distributions: Distribution[]): Promise<void> {
         const identity = this.requireIdentity();
+        const token = this.sessionToken;
 
         for (const dist of distributions) {
             const cacheKey = `${chatId}:${dist.epoch}:${dist.sender_key_id}`;
@@ -575,7 +682,14 @@ export class KeyStoreService {
                     senderDeviceId: dist.sender_device_id,
                 });
 
-                this.peerChains.set(cacheKey, new ReceiverChain(chainKey, chainStartIndex));
+                const chain = new ReceiverChain(chainKey, chainStartIndex);
+                await this.attachSkippedPersistence(identity, token, chatId, dist.epoch, dist.sender_key_id, chain);
+                if (this.sessionToken !== token) {
+                    // Locked while we were reading storage: register nothing.
+                    return;
+                }
+
+                this.peerChains.set(cacheKey, chain);
                 this.chainSigningKeys.set(dist.sender_key_id, b64uDecode(dist.signing_public_key));
             } catch {
                 // Neither private half opened it: a grant wrapped to a prekey we have since
@@ -586,6 +700,85 @@ export class KeyStoreService {
                 continue;
             }
         }
+    }
+
+    /**
+     * Seed `chain.skipped` from storage and mirror later changes back to it (TB-32).
+     *
+     * Every failure here is swallowed on purpose: the retained set is an optimisation over what the
+     * ratchet re-derives from the grant, never a precondition for opening a message. An entry that
+     * fails to open - wrong KEK after a password change, tampering, or a record moved to another
+     * chain/index (the AAD binds user, chat, epoch, sender key and index) - is deleted, not trusted.
+     */
+    private async attachSkippedPersistence(
+        identity: UnlockedIdentity,
+        token: object | null,
+        chatId: string,
+        epoch: number,
+        senderKeyId: string,
+        chain: ReceiverChain
+    ): Promise<void> {
+        const chainId = `${identity.userId}|${chatId}|${epoch}|${senderKeyId}`;
+        const where = (index: number) => ({ userId: identity.userId, chatId, epoch, senderKeyId, index });
+
+        const kekAtStart = this.identity?.kek;
+        try {
+            const cutoff = Date.now() - MAX_SKIPPED_AGE_MS;
+            const restored = new Map<number, MessageKey>();
+            for (const row of await this.skippedStore.forChain(chainId)) {
+                if (row.savedAt < cutoff) {
+                    void this.skippedStore.delete(row.id);
+                    continue;
+                }
+                try {
+                    if (row.id !== `${chainId}|${row.index}`) {
+                        throw new Error('record id does not match its location');
+                    }
+                    restored.set(row.index, await unwrapSkippedKey(kekAtStart as Uint8Array, where(row.index), row));
+                } catch {
+                    void this.skippedStore.delete(row.id);
+                }
+            }
+            if (this.sessionToken !== token || this.identity?.kek !== kekAtStart) {
+                return;
+            }
+            chain.restoreSkipped(restored);
+        } catch {
+            // Fall through to live mirroring with whatever we have.
+        }
+
+        if (this.sessionToken !== token) {
+            return;
+        }
+
+        chain.skippedObserver = {
+            retained: (index, key) => {
+                // The KEK current at write time, so a password change is picked up; a row wrapped
+                // under a KEK that was replaced while we waited is dropped, never written.
+                const kek = this.identity?.kek;
+                if (!kek || this.sessionToken !== token) {
+                    return;
+                }
+                wrapSkippedKey(kek, where(index), key)
+                    .then((wrapped) => {
+                        // The key may have been consumed, or the store locked, while wrapping.
+                        if (this.sessionToken !== token || this.identity?.kek !== kek || !chain.skipped.has(index)) {
+                            return;
+                        }
+                        return this.skippedStore.put({
+                            id: `${chainId}|${index}`,
+                            chain: chainId,
+                            index,
+                            savedAt: Date.now(),
+                            ...wrapped,
+                        });
+                    })
+                    .catch(() => undefined);
+            },
+            consumed: (index) => {
+                void this.skippedStore.delete(`${chainId}|${index}`);
+            },
+        };
     }
 
     /**

@@ -76,6 +76,7 @@ function fakeStore() {
         isRekeying: signal(false),
         canSend: signal(true),
         memberVerificationError: signal<string | null>(null),
+        memberVerificationCode: signal<'MEMBER_SET_MISMATCH' | 'ROSTER_VERIFICATION_FAILED' | null>(null),
         encryptionUnavailable: signal<string | null>(null),
         sendBlockedReason: signal<string | null>(null),
         peerDeleted: signal(false),
@@ -199,6 +200,17 @@ describe('ChatViewComponent', () => {
             expect(alarm?.textContent).toContain('Member verification failed');
             const composer = host.querySelector('app-composer');
             expect(composer).not.toBeNull();
+        });
+
+        it('words the alarm for a bad binding signature differently from a hash mismatch', () => {
+            store.memberVerificationError.set('Roster verification failed');
+            store.memberVerificationCode.set('ROSTER_VERIFICATION_FAILED');
+            store.canSend.set(false);
+            const host = create();
+
+            const alarm = host.querySelector('.alarm');
+            expect(alarm?.textContent).toContain('not vouched for');
+            expect(alarm?.textContent).not.toContain('does not match the commitment');
         });
 
         /**

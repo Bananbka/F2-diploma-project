@@ -1,4 +1,5 @@
 import { inject, Injectable, signal } from '@angular/core';
+import { Router } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
 
 import { UserProfile } from '../models/chat.model';
@@ -49,6 +50,10 @@ export class SessionService {
     private readonly messages = inject(MessageService);
     private readonly ws = inject(WebSocketService);
     private readonly profileApi = inject(ProfileApiService);
+    private readonly router = inject(Router);
+
+    private socketEndBound = false;
+    private lastSocketRefresh = 0;
 
     readonly user = signal<UserProfile | null>(null);
     /** False until the initial `me()` probe settles, so guards do not redirect on a cold reload. */
@@ -121,6 +126,7 @@ export class SessionService {
         if (identities.length === 0) {
             await onStage?.('deriving');
             await this.keyStore.createAndPublishIdentity(user.id, password);
+            this.bindSocketEnd();
             this.ws.connect();
             return 'provisioned';
         }
@@ -130,8 +136,43 @@ export class SessionService {
             return 'wrong-password';
         }
 
+        this.bindSocketEnd();
         this.ws.connect();
         return 'unlocked';
+    }
+
+    /** React to the server ending the socket's session (close code 4401). Bound once. */
+    private bindSocketEnd(): void {
+        if (this.socketEndBound) {
+            return;
+        }
+        this.socketEndBound = true;
+        this.ws.sessionEnded.subscribe(() => void this.onSocketSessionEnded());
+    }
+
+    /**
+     * The same outcomes as an HTTP 401: try one token refresh and reconnect; if that fails, or the
+     * socket is refused again straight after a refresh, the session is over. Never reconnect
+     * blindly, which would loop forever against a revoked session.
+     */
+    private async onSocketSessionEnded(): Promise<void> {
+        const now = Date.now();
+        if (now - this.lastSocketRefresh > 10_000) {
+            this.lastSocketRefresh = now;
+            try {
+                await firstValueFrom(this.authApi.refresh());
+                this.ws.connect();
+                return;
+            } catch {
+                // fall through to ending the session
+            }
+        }
+
+        this.ws.disconnect();
+        await this.keyStore.lock();
+        this.messages.forgetOpened();
+        this.user.set(null);
+        void this.router.navigate(['/login']);
     }
 
     /** Request a reset OTP. The account is matched on username **and** email together. */
@@ -162,7 +203,7 @@ export class SessionService {
         );
 
         this.ws.disconnect();
-        this.keyStore.lock();
+        await this.keyStore.lock();
         this.messages.forgetOpened();
         this.user.set(null);
     }
@@ -185,9 +226,13 @@ export class SessionService {
 
         const identities = await firstValueFrom(this.cryptoApi.getOwnIdentities());
         const rewrapped: RewrappedIdentity[] = [];
+        let thisDevice: Awaited<ReturnType<KeyStoreService['rewrapBundleFor']>> | null = null;
 
         for (const published of identities) {
             const bundle = await this.keyStore.rewrapBundleFor(published, oldPassword, newPassword);
+            if (published.device_id === identity.deviceId) {
+                thisDevice = bundle;
+            }
             rewrapped.push({
                 device_id: published.device_id,
                 encrypted_private_bundle: bundle.encryptedPrivateBundle,
@@ -202,6 +247,11 @@ export class SessionService {
                 rewrapped_identities: rewrapped,
             })
         );
+
+        // Only after the server accepted it: until then the old KEK is still the right one.
+        if (thisDevice) {
+            await this.keyStore.completePasswordChange(thisDevice);
+        }
     }
 
     /**
@@ -221,7 +271,7 @@ export class SessionService {
         await firstValueFrom(this.profileApi.deleteAccount(password));
 
         this.ws.disconnect();
-        this.keyStore.lock();
+        await this.keyStore.lock();
         this.keyStore.forgetDeviceId();
         this.messages.forgetOpened();
         this.user.set(null);
@@ -235,7 +285,7 @@ export class SessionService {
             // in memory after the user asked to leave is the worse outcome. Retained plaintext goes
             // too — it would otherwise outlive the keys that produced it.
             this.ws.disconnect();
-            this.keyStore.lock();
+            await this.keyStore.lock();
             this.messages.forgetOpened();
             this.user.set(null);
         }

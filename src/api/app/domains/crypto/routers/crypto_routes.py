@@ -35,6 +35,10 @@ from app.domains.users.models import User
 from app.infrastructure.mongo import get_mongo_db
 from app.infrastructure.postgres import get_db
 from app.infrastructure.redis import get_redis
+from app.infrastructure.services.event_publisher import (
+    EventPublisher,
+    get_event_publisher,
+)
 from app.infrastructure.services import redis_service
 
 router = APIRouter(prefix="/crypto", tags=["Crypto"])
@@ -64,6 +68,7 @@ async def publish_identity(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
+    publisher: EventPublisher = Depends(get_event_publisher),
     mongo_db=Depends(get_mongo_db),
 ):
     """Publish or rotate this device's identity keys.
@@ -97,7 +102,7 @@ async def publish_identity(
     for chat_id, epoch in epochs:
         participant_ids = await chat_services.get_chat_participants_ids(db, chat_id)
         await redis_service.send_key_epoch_started(
-            redis,
+            publisher,
             chat_id=chat_id,
             epoch=epoch.epoch,
             member_set_hash=epoch.member_set_hash,
@@ -187,7 +192,7 @@ async def revoke_device(
     device_id: uuid.UUID = Path(..., description="Device to revoke"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-    redis: Redis = Depends(get_redis),
+    publisher: EventPublisher = Depends(get_event_publisher),
     mongo_db=Depends(get_mongo_db),
 ):
     """Revoke one of your own devices — a lost phone, a borrowed laptop.
@@ -214,7 +219,7 @@ async def revoke_device(
     for chat_id, epoch in epochs:
         participant_ids = await chat_services.get_chat_participants_ids(db, chat_id)
         await redis_service.send_key_epoch_started(
-            redis,
+            publisher,
             chat_id=chat_id,
             epoch=epoch.epoch,
             member_set_hash=epoch.member_set_hash,
@@ -253,7 +258,7 @@ async def enable_chat_encryption(
     chat_id: uuid.UUID = Path(..., description="Chat ID"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-    redis: Redis = Depends(get_redis),
+    publisher: EventPublisher = Depends(get_event_publisher),
 ):
     """Enable end-to-end encryption and open the chat's first epoch.
 
@@ -292,7 +297,7 @@ async def enable_chat_encryption(
     # than as "this conversation is now encrypted".
     participant_ids = await chat_services.get_chat_participants_ids(db, chat_id)
     await redis_service.send_key_epoch_started(
-        redis,
+        publisher,
         chat_id=chat_id,
         epoch=epoch.epoch,
         member_set_hash=epoch.member_set_hash,

@@ -36,6 +36,8 @@ NS-v1-msgkey       HKDF info: chain key -> message key
 NS-v1-chain        HKDF info: chain key -> next chain key
 NS-v1-grant        sender key grant AAD
 NS-v1-skdm         sender key distribution signature
+NS-v1-skipped      AAD prefix: retained skipped key at rest (3.1)
+NS-v1-skipped-key  HKDF info: KEK -> at-rest wrap key (3.1)
 NS-v1-fingerprint  safety number
 ```
 
@@ -244,8 +246,68 @@ Rules:
   **2000**; beyond that it MUST reject rather than derive unboundedly (denial-of-service vector).
 - A receiver MUST NOT accept a chain index it has already consumed.
 - Retained skipped keys SHOULD be expired; keeping them forever negates forward secrecy.
+- A client that rebuilds receiver chains from the grant after a reload (section 3.1) re-derives, and
+  so re-retains, keys for messages it has already read. See the trade-off stated there.
 
 The chain is one-way, so handing a peer `CK_i` grants messages `i` onward and nothing earlier.
+
+### 3.1 Retained skipped keys at rest (client-local)
+
+Local storage format only. Nothing here crosses the wire, the server never sees it, and there is no
+Python reference or interop vector. A client MAY mirror a receiver chain's retained skipped keys
+(section 3) to durable storage so a late message still opens after a page reload. If it does:
+
+```
+wrap_key = HKDF-SHA256(ikm=KEK, salt="", info="NS-v1-skipped-key", L=32)
+aad      = "NS-v1-skipped" || uuid(user) || uuid(chat) || u32be(epoch)
+           || uuid(sender_key_id) || u32be(index)
+record   = { iv: 12 random bytes, ct: AES-256-GCM(wrap_key, iv, MK_i || N_i, aad) }   (44-byte plaintext)
+```
+
+- `KEK` is the Argon2id-derived key that seals the private bundle (section 2.2). It is held in memory
+  only, so entries cannot be opened without the password.
+- The IV MUST be fresh random per write. The AAD binds user, chat, epoch, sender key and index: a
+  record moved to another slot fails the tag check instead of yielding a wrong key.
+- A record that fails to open (wrong KEK after a password change, tampering, relocation) MUST be
+  discarded, never trusted. A record whose storage id disagrees with its own location MUST be
+  discarded.
+- An entry MUST be deleted when its key is consumed or evicted by the section 3 budget, SHOULD
+  expire after 30 days, and total storage MUST be capped (client: 10,000 entries).
+- Everything MUST be erased on lock, logout, password change, password reset and account deletion.
+  If durable storage is unavailable the client falls back to memory only; opening a message never
+  depends on it. A wipe that cannot be confirmed MUST be reported, not assumed.
+- After a password change the KEK changes. Rows wrapped under the old one are erased at once and
+  new rows use the new KEK.
+- Storage ids (user, chat, epoch, sender key id, index) and the save time are not secret and are
+  stored in the clear as lookup keys; only the message key and nonce are wrapped. The save time is
+  not in the AAD, so someone with write access to storage can age or de-age a row. That only
+  changes how long a row lives, never what it opens to.
+
+**What this does and does not buy (read before relying on it).** This client does not persist the
+chain position. After a reload the receiver chain restarts at the grant's start index, so that
+already-read history can be opened again from the server's ciphertext. Walking forward from there
+re-derives, and re-retains, the keys of messages the user has already read, up to the 2000-key
+retention budget per chain. So the stored set is not "only what was skipped": it is up to the most
+recent 2000 indices below the highest index seen, on every chain the user has opened. A row's save
+time is set when it is (re)written, so a chain that is reopened keeps being refreshed.
+
+The consequences, stated plainly:
+
+- Forward secrecy for those messages is weakened on this device for as long as such rows exist.
+  A row is bounded by the 30-day age limit from its last write, and the grant it is rebuilt from is
+  itself pruned 30 days after its epoch closes (section 5.4). Together, a key can remain on disk for
+  roughly 60 days after the epoch closed.
+- The exposure requires **both** a copy of the browser profile (the IndexedDB rows) **and** the
+  user's password (to derive the KEK). Device compromise alone yields only wrapped rows. A
+  server-side attacker never sees them.
+- It does not make consumption durable: a key consumed before a reload is re-derived after it, so a
+  reload cannot be used to prove a message was not read.
+
+The alternative, persisting only indices that were genuinely skipped relative to the previous
+session's chain position, needs that position stored, and a position past a message makes that
+message unreadable after a reload unless its plaintext is stored as well. That trades a bounded key
+exposure for either lost history or stored plaintext, which is worse, so it is not done. An
+implementation that cannot accept the trade-off SHOULD NOT persist skipped keys at all.
 
 ---
 

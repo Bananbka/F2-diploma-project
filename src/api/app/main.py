@@ -32,7 +32,7 @@ from app.domains.messages.routes.ws_router import ws_router
 
 from app.infrastructure.minio import minio_manager
 from app.infrastructure.mongo import connect_to_mongo, close_mongo_connection
-from app.infrastructure.redis import init_redis
+from app.infrastructure.redis import init_events_redis, init_redis
 
 setup_logging(is_production=False)
 
@@ -42,6 +42,7 @@ async def lifespan(app: FastAPI):
     logger.info("Starting Mess&Gags API...")
     await connect_to_mongo()
     await init_redis()
+    await init_events_redis()
     await minio_manager.ensure_bucket_exists()
     yield
     logger.info("Stopping Mess&Gags API...")

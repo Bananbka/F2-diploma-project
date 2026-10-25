@@ -24,7 +24,13 @@ from app.domains.users.routers.auth_routes import (
 from app.domains.users.services import account_deletion_service
 from app.domains.users.services.profile_service import is_username_taken
 from app.infrastructure.mongo import get_mongo_db
-from app.infrastructure.redis import get_redis
+from app.infrastructure.redis import get_events_redis, get_redis
+from app.infrastructure.services.event_publisher import (
+    EventPublisher,
+    gap_key,
+    get_event_publisher,
+    stream_key,
+)
 from app.infrastructure.services import redis_service
 from app.infrastructure.minio import minio_manager
 from app.infrastructure.postgres import get_db
@@ -108,6 +114,8 @@ async def delete_me(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
+    publisher: EventPublisher = Depends(get_event_publisher),
+    events_redis: Redis = Depends(get_events_redis),
     mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
 ):
     """Delete the calling account. Irreversible.
@@ -186,8 +194,14 @@ async def delete_me(
             )
 
     await safely("force_logout", redis.setex(f"force_logout:{user_id}", 604800, revocation_cutoff()))
-    await safely("session_revoked", redis_service.publish_session_revoked(redis, user_id, "all"))
-    await safely("notify", _notify_chats(redis, outcome))
+    await safely("session_revoked", redis_service.publish_session_revoked(publisher, user_id, "all"))
+    await safely("notify", _notify_chats(publisher, outcome))
+    # The deleted user's own queue (and its gap marker) goes with the account. Entries about them
+    # in other members' streams cannot be selectively removed and expire with those streams.
+    async def purge_event_stream() -> None:
+        await events_redis.delete(stream_key(user_id), gap_key(user_id))
+
+    await safely("event stream", purge_event_stream())
     await safely(
         "purge",
         account_deletion_service.purge_outside_postgres(
@@ -198,33 +212,33 @@ async def delete_me(
     return SuccessResponse(data={"message": "Account deleted."})
 
 
-async def _notify_chats(redis: Redis, outcome) -> None:
+async def _notify_chats(publisher: EventPublisher, outcome) -> None:
     """Tell the other members what changed. Delivery is best-effort, like every other fan-out."""
     for effect in outcome.effects:
         try:
             if effect.kind == "deleted":
                 await redis_service.send_chat_deleted(
-                    redis, effect.chat_id, effect.recipient_ids
+                    publisher, effect.chat_id, effect.recipient_ids
                 )
                 continue
 
             if effect.kind == "left":
                 await redis_service.send_participants_removed(
-                    redis,
+                    publisher,
                     chat_id=effect.chat_id,
                     removed_ids=[outcome.user_id],
                     recipient_ids=effect.recipient_ids,
                 )
                 if effect.new_owner_id is not None:
                     await redis_service.send_chat_updated(
-                        redis,
+                        publisher,
                         chat_id=effect.chat_id,
                         recipient_ids=effect.recipient_ids,
                         payload={"owner_id": str(effect.new_owner_id)},
                     )
             else:
                 await redis_service.send_chat_updated(
-                    redis,
+                    publisher,
                     chat_id=effect.chat_id,
                     recipient_ids=effect.recipient_ids,
                     payload={"peer_deleted": True, "user_id": str(outcome.user_id)},
@@ -232,7 +246,7 @@ async def _notify_chats(redis: Redis, outcome) -> None:
 
             if effect.epoch is not None:
                 await redis_service.send_key_epoch_started(
-                    redis,
+                    publisher,
                     chat_id=effect.chat_id,
                     epoch=effect.epoch.epoch,
                     member_set_hash=effect.epoch.member_set_hash,

@@ -5,6 +5,7 @@ import { catchError, Observable, of, shareReplay, switchMap, throwError } from '
 
 import { AuthApiService } from '../services/auth-api.service';
 import { KeyStoreService } from '../services/key-store.service';
+import { WebSocketService } from '../services/websocket.service';
 
 /**
  * Endpoints where a 401 is the answer, not a stale token.
@@ -26,6 +27,7 @@ let refreshInFlight: Observable<unknown> | null = null;
 export const refreshInterceptor: HttpInterceptorFn = (req: HttpRequest<unknown>, next: HttpHandlerFn) => {
     const authApi = inject(AuthApiService);
     const keyStore = inject(KeyStoreService);
+    const ws = inject(WebSocketService);
     const router = inject(Router);
 
     if (NO_RETRY.some((path) => req.url.includes(path))) {
@@ -59,7 +61,8 @@ export const refreshInterceptor: HttpInterceptorFn = (req: HttpRequest<unknown>,
                     if (refreshed === null) {
                         // The session is genuinely over. Drop the unlocked keys rather than leaving
                         // them in memory for a page the user can no longer use.
-                        keyStore.lock();
+                        void keyStore.lock();
+                        ws.forgetCursor();
                         void router.navigate(['/login']);
                         return throwError(() => error);
                     }
