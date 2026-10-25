@@ -12,11 +12,11 @@
 
 1. **Транзакційна зв’язність криптографічного домену з доменом чатів.** Видалення учасника і створення нової епохи повинні фіксуватися однією транзакцією PostgreSQL ([SRS-FUN-11](srs.md#srs-fun-11)). У моноліті це локальна транзакція `AsyncSession`. У мікросервісній архітектурі ті самі дані належали б двом сервісам, і атомарність довелося б забезпечувати сагою з компенсаціями. Проміжок між кроками саги – це саме те вікно, у якому видалений учасник читає нові повідомлення.
 2. **Масштаб навантаження.** Цільові показники – p95 ≤ 200 мс для `POST /messages` при 300 RPS ([SRS-NFR-PERF-01](srs.md#srs-nfr-perf-01)) і ≥ 5 000 WebSocket-з’єднань на екземпляр ([SRS-NFR-SCAL-01](srs.md#srs-nfr-scal-01)). Сервер не виконує криптографічних обчислень над вмістом (шифрування на клієнті, [ADR-001](adr/0001-choice-of-technology.md)), тому критичний шлях запиту складається з перевірки підпису Ed25519 (десяті частки мілісекунди), одного запиту до PostgreSQL за індексом, однієї вставки в MongoDB і однієї публікації в Redis. Мережевий виклик між сервісами додав би до цього бюджету ще один RTT і точку відмови без вигоди для пропускної здатності.
-3. **Розгортання на одному вузлі** з 9 контейнерами Docker Compose. Незалежне розгортання і масштабування сервісів, заради яких існують мікросервіси, на одному вузлі не дає ефекту, а операційна вартість (трасування, версіонування контрактів між сервісами, мережева безпека) зростає лінійно з їх кількістю.
+3. **Розгортання на одному вузлі** з 10 контейнерами Docker Compose. Незалежне розгортання і масштабування сервісів, заради яких існують мікросервіси, на одному вузлі не дає ефекту, а операційна вартість (трасування, версіонування контрактів між сервісами, мережева безпека) зростає лінійно з їх кількістю.
 
 **Горизонтальне масштабування** закладено без зміни стилю: екземпляр API не зберігає стану сесії ([SRS-NFR-SCAL-02](srs.md#srs-nfr-scal-02)). JWT перевіряється без звернення до сховища сесій, denylist токенів, лічильники rate limiting і присутність зберігаються в Redis, а розсилання подій виконується через канали `user:{id}`. Тому N екземплярів API за Nginx отримують ту саму подію незалежно від того, до якого з них підключено WebSocket клієнта. Обмеження поточного розгортання: у Docker Compose працює один екземпляр API з одним процесом uvicorn, тож він є єдиною точкою відмови. Доступність ≥ 99,5 % ([SRS-NFR-REL-02](srs.md#srs-nfr-rel-02)) забезпечується автоматичним перезапуском контейнера (`restart: always`, ≤ 30 с), а не резервуванням.
 
-**Подієвий контур** застосовано лише там, де він усуває блокування: доставка повідомлення онлайн-отримувачам (Redis pub/sub, у To-Be – персональні черги Redis Streams з підтвердженням, [SRS-FUN-19](srs.md#srs-fun-19)) і фонові задачі Celery. Збереження повідомлення відбувається синхронно до відповіді клієнту, тому клієнт отримує 201 лише після фіксації конверта в MongoDB. Повна подієва децентралізація (Event Sourcing, брокер Kafka) не застосовується: порядок повідомлень у чаті визначає монотонний ObjectId, і журнал подій як джерело істини не дає переваг над колекцією `messages`.
+**Подієвий контур** застосовано лише там, де він усуває блокування: доставка повідомлення онлайн-отримувачам (Redis pub/sub і персональний потік Redis Streams, з якого клієнт після обриву дочитує пропущені події за курсором; підтвердження доставки (ack) і групи споживачів не реалізовано, [SRS-FUN-19](srs.md#srs-fun-19)) і фонові задачі Celery. Збереження повідомлення відбувається синхронно до відповіді клієнту, тому клієнт отримує 201 лише після фіксації конверта в MongoDB. Повна подієва децентралізація (Event Sourcing, брокер Kafka) не застосовується: порядок повідомлень у чаті визначає монотонний ObjectId, і журнал подій як джерело істини не дає переваг над колекцією `messages`.
 
 **Клієнт є активним учасником протоколу (smart client).** Генерацію ключів, шифрування, перевірку `member_set_hash` і safety number виконує Web Client ([SRS-FUN-06](srs.md#srs-fun-06), [SRS-FUN-14](srs.md#srs-fun-14), [SRS-FUN-15](srs.md#srs-fun-15)). Сервер розглядається як недовірений: він зберігає шифротексти, порядок і склад груп, але не може прочитати вміст і не може непомітно додати отримувача.
 
@@ -28,7 +28,7 @@
 | Dependency Injection | `Depends` FastAPI для `AsyncSession`, клієнта Motor, Redis, поточного користувача | Обробник не створює підключень сам: у тестах сесія і Redis підміняються фікстурами, а 329 інтеграційних тестів виконуються на ізольованих базах |
 | Repository (To-Be: порти Message Repository і Crypto Repository) | Доступ до `messages` і криптографічних таблиць | Сервіси не залежать від Motor і SQLAlchemy: заміна MongoDB на інше сховище конвертів обмежується одним адаптером. Зараз сервіси звертаються до `AsyncSession` і колекцій Motor напряму, перехід описано в 2.3 |
 | Unit of Work | `AsyncSession` як межа транзакції; сервіси (`allocate_epoch`, `touch_chat`) не викликають `commit`, його виконує ініціатор | Зміна складу групи, нова епоха і перенесення меж історії фіксуються або відкочуються разом |
-| Publisher / Subscriber | Канали Redis `user:{id}`; у To-Be порт Event Publisher | Сервіс надсилання не знає, які екземпляри API тримають WebSocket отримувачів |
+| Publisher / Subscriber | Канали Redis `user:{id}` і порт `EventPublisher` (реалізація `RedisEventPublisher`, підключається через `Depends`) | Маршрутизатори не знають, які екземпляри API тримають WebSocket отримувачів, і не залежать від Redis напряму |
 | Policy (Specification) | `get_chat_or_403`, `role_rank`, `_validate_envelope` | Перевірки доступу та інваріантів конверта зібрано в окремих функціях замість повторення в кожному маршрутизаторі |
 | Strategy | Вибір обробки вмісту за `content_format` (`sender_keys_v1`, `channel_signed_v1`, `legacy_*`) | Новий формат конверта додається новою гілкою стратегії без зміни шляху збереження |
 
@@ -36,18 +36,18 @@
 
 - **CQRS з окремими моделями читання і запису.** Профіль навантаження – співмірні запис і читання історії тієї самої колекції за тим самим індексом `(chat_id, _id)`. Окрема модель читання потребувала б синхронізації та додавала б eventual consistency у стрічку повідомлень без виграшу в Latency.
 - **Saga.** Атомарність ротації епохи забезпечує одна локальна транзакція PostgreSQL. Під час надсилання повідомлення конверт записується в MongoDB до фіксації транзакції PostgreSQL (`chats.updated_at`), а повтор запиту ідемпотентний за `client_message_id`, тому компенсувальні кроки не потрібні.
-- **Circuit Breaker для внутрішніх сховищ.** Redis, PostgreSQL і MongoDB розміщені на тому самому вузлі, і без них запит не може бути виконаний коректно. Тому політика – fail-closed з відповіддю 503 і явними тайм-аутами підключення, а не обхід залежності. Ізоляцію відмов застосовано до єдиної зовнішньої залежності, SMTP-сервера: лист надсилає задача Celery, тому недоступність SMTP не блокує запит реєстрації. Повтор до 3 разів з експоненційною затримкою ([SRS-NFR-REL-04](srs.md#srs-nfr-rel-04)) – To-Be: зараз задача повторів не виконує, і користувач запитує новий код вручну.
+- **Circuit Breaker для внутрішніх сховищ.** Redis, PostgreSQL і MongoDB розміщені на тому самому вузлі, і без них запит не може бути виконаний коректно. Тому політика – fail-closed з відповіддю 503 і явними тайм-аутами підключення, а не обхід залежності. Ізоляцію відмов застосовано до єдиної зовнішньої залежності, SMTP-сервера: лист надсилає задача Celery, тому недоступність SMTP не блокує запит реєстрації. Задача `send_email` виконує до 3 повторних спроб з експоненційною затримкою (`autoretry_for=(SMTPException, OSError)`, `retry_backoff`, [SRS-NFR-REL-04](srs.md#srs-nfr-rel-04)).
 
 ### 2.1.3 Архітектурні ризики та засоби їх контролю
 
 | Ризик | Наслідок | Засіб контролю |
 |---|---|---|
 | Один екземпляр API (SPOF) | Недоступність усього сервісу до перезапуску контейнера | `restart: always`; stateless API дозволяє запустити N екземплярів за Nginx без зміни коду |
-| Втрата події pub/sub для офлайн-клієнта | Повідомлення збережене, але не доставлене в реальному часі | Клієнт дочитує історію за курсором після перепідключення; To-Be – Redis Streams з підтвердженням ([SRS-FUN-19](srs.md#srs-fun-19)) |
+| Втрата події pub/sub для офлайн-клієнта | Повідомлення збережене, але не доставлене в реальному часі | Кожна довготривала подія додатково записується в персональний потік Redis Streams (≈ 200 подій, 7 днів); клієнт після перепідключення передає курсор і отримує пропущене, а за застарілого курсора перезавантажує дані через HTTP (`resync_required`). Ack і повторної доставки немає, дедуплікацію за ідентифікатором повідомлення виконує клієнт ([SRS-FUN-19](srs.md#srs-fun-19)) |
 | Дві СУБД без розподіленої транзакції | Розбіжність між PostgreSQL і MongoDB при збої між записами | Порядок «спочатку вставка в MongoDB, потім фіксація PostgreSQL»: збій MongoDB не змінює стану PostgreSQL, а збій після вставки залишає лише застарілий `chats.updated_at`; повтор клієнта ідемпотентний (`client_message_id`) |
 | Каскадна відмова через синхронні виклики | Зростання Latency при деградації сховища | Тайм-аути драйверів, fail-closed з кодом 503, відсутність синхронних мережевих викликів між сервісами |
 | Квадратичне зростання грантів S × (N − 1) | Зростання обсягу PostgreSQL і часу ротації | Ліміт 256 учасників ([SRS-FUN-22](srs.md#srs-fun-22)), лінива публікація ключів, очищення грантів закритих епох через 30 днів |
-| Витрати на інфраструктуру (FinOps) | – | Хмарних керованих сервісів немає; усі 9 контейнерів працюють на одному вузлі з відкритим програмним забезпеченням |
+| Витрати на інфраструктуру (FinOps) | – | Хмарних керованих сервісів немає; усі 10 контейнерів працюють на одному вузлі з відкритим програмним забезпеченням |
 
 ### 2.1.4 Реєстр архітектурних рішень (ADR)
 
@@ -56,6 +56,7 @@
 | ADR | Рішення | Статус |
 |---|---|---|
 | [ADR-001](adr/0001-choice-of-technology.md) | Вибір схеми групового наскрізного шифрування: sender-key ratchet з явною моделлю епох замість попарних сесій Double Ratchet, класичних Sender Keys і MLS | Approved |
+| [ADR-002](adr/0002-account-deletion-as-tombstone.md) | Видалення облікового запису як знеособлення з надгробком: рядок `users` лишається, щоб інші учасники могли відкрити й перевірити історію | Approved |
 
 ## 2.2 Контекстне та контейнерне моделювання системи (C4 Model)
 
@@ -116,7 +117,8 @@ flowchart TB
     worker["<b>Celery Worker</b><br/><i>[Container: Python, Celery]</i><br/>Листи, ротація епох,<br/>очищення грантів і об'єктів"]
     pg[("<b>PostgreSQL 17</b><br/><i>[Реляційна СУБД]</i><br/>Користувачі, пристрої, чати,<br/>епохи, гранти")]
     mongo[("<b>MongoDB 8</b><br/><i>[Документна СУБД]</i><br/>Зашифровані конверти,<br/>журнал аудиту")]
-    redis[("<b>Redis 8</b><br/><i>[In-memory, AOF]</i><br/>Pub/sub, присутність, ліміти,<br/>denylist, брокер Celery")]
+    redis[("<b>Redis 8</b><br/><i>[In-memory, AOF]</i><br/>Присутність, ліміти, OTP,<br/>denylist, брокер Celery")]
+    redisev[("<b>Redis 8 (events)</b><br/><i>[In-memory, без збереження]</i><br/>Pub/sub, персональні<br/>потоки подій")]
     s3[("<b>RustFS</b><br/><i>[S3-сумісне сховище]</i><br/>Зашифровані вкладення,<br/>аватари, стікери")]
   end
   user -- "Працює з інтерфейсом<br/>[UI у браузері]" --> spa
@@ -126,7 +128,8 @@ flowchart TB
   gw -- "/objects<br/>[HTTP, S3 API]" --> s3
   api -- "Транзакції<br/>[SQL / TCP :5432]" --> pg
   api -- "Конверти<br/>[MongoDB Wire :27017]" --> mongo
-  api -- "PUBLISH, ліміти, задачі<br/>[RESP :6379]" --> redis
+  api -- "Ліміти, denylist, задачі<br/>[RESP :6379]" --> redis
+  api -- "XADD + PUBLISH, XRANGE<br/>[RESP :6379]" --> redisev
   api -- "Шифротексти<br/>[S3 API :9000]" --> s3
   beat -- "Задачі за розкладом<br/>[RESP :6379]" --> redis
   redis -- "Задачі<br/>[RESP :6379]" --> worker
@@ -140,7 +143,7 @@ flowchart TB
   classDef ext fill:#8a8a8a,stroke:#5e5e5e,color:#ffffff
   class user person
   class spa,gw,static,api,beat,worker cont
-  class pg,mongo,redis,s3 db
+  class pg,mongo,redis,redisev,s3 db
   class smtp ext
   style ns fill:none,stroke:#888888,stroke-dasharray:6 4
 ```
@@ -159,7 +162,8 @@ flowchart TB
 | Celery Beat | Python, Celery | Планувальник щодобових задач | [SRS-FUN-12](srs.md#srs-fun-12) |
 | PostgreSQL 17 | Реляційна СУБД | Користувачі, пристрої, чати, учасники, епохи, розподіли ключів, гранти (ACID-транзакції для атомарної ротації) | [SRS-FUN-11](srs.md#srs-fun-11) |
 | MongoDB 8 | Документна СУБД | Незмінні зашифровані конверти повідомлень, журнал аудиту безпеки `security_audit` | [SRS-FUN-18](srs.md#srs-fun-18) |
-| Redis 8 | In-memory, AOF | Pub/sub подій, присутність, лічильники rate limiting, denylist токенів, брокер Celery; персональні черги Redis Streams (To-Be) | [SRS-FUN-04](srs.md#srs-fun-04), [SRS-FUN-19](srs.md#srs-fun-19), [SRS-NFR-SEC-03](srs.md#srs-nfr-sec-03) |
+| Redis 8 | In-memory, AOF, `noeviction` | Присутність, лічильники rate limiting, OTP, denylist токенів, брокер Celery | [SRS-FUN-04](srs.md#srs-fun-04), [SRS-NFR-SEC-03](srs.md#srs-nfr-sec-03) |
+| Redis 8 (events) | In-memory, `allkeys-lru`, 256 МБ, без RDB і AOF | Pub/sub подій реального часу та персональні потоки Redis Streams для відновлення за курсором; окремий екземпляр, щоб потоки не конкурували з ключами denylist | [SRS-FUN-18](srs.md#srs-fun-18), [SRS-FUN-19](srs.md#srs-fun-19) |
 | RustFS | S3-сумісне сховище | Шифротексти вкладень, аватари, стікери | [SRS-FUN-27](srs.md#srs-fun-27) |
 
 | Зв’язок | Протокол | Призначення |
@@ -170,7 +174,8 @@ flowchart TB
 | Gateway → RustFS | HTTP, S3 API | Публічні об’єкти (`/objects`) |
 | API → PostgreSQL | SQL / TCP 5432 (asyncpg) | Транзакції епох, чатів, ключів |
 | API → MongoDB | MongoDB Wire Protocol / TCP 27017 (Motor) | Запис і читання конвертів |
-| API → Redis | RESP / TCP 6379 | `PUBLISH` подій, лічильники, denylist, постановка задач Celery |
+| API → Redis | RESP / TCP 6379 | Лічильники, присутність, OTP, denylist, постановка задач Celery |
+| API → Redis (events) | RESP / TCP 6379 | `XADD` + `PUBLISH` подій (один Lua-скрипт), читання потоку для повтору після перепідключення |
 | API → RustFS | S3 API / HTTP 9000 (aiobotocore) | Збереження шифротекстів вкладень |
 | Celery Beat → Redis | RESP / TCP 6379 | Публікація задач за розкладом |
 | Celery Worker → Redis | RESP / TCP 6379 | Отримання задач |
@@ -210,13 +215,14 @@ flowchart TB
     subgraph data ["Шар даних (адаптери)"]
       mrepo["<b>Message Repository</b><br/><i>[Motor]</i>"]
       erepo["<b>Crypto Repository</b><br/><i>[SQLAlchemy AsyncSession]</i>"]
-      redispub["<b>Redis Event Publisher</b><br/><i>[redis.asyncio]</i><br/>PUBLISH, Streams (To-Be)"]
+      redispub["<b>Redis Event Publisher</b><br/><i>[redis.asyncio]</i><br/>XADD + PUBLISH (потік і канал)"]
       sec["<b>Security Store</b><br/><i>[redis.asyncio]</i><br/>Лічильники лімітів, denylist"]
     end
   end
   pg[("<b>PostgreSQL 17</b>")]
   mongo[("<b>MongoDB 8</b>")]
   redis[("<b>Redis 8</b>")]
+  redisev[("<b>Redis 8 (events)</b>")]
   gw -- "[HTTP/1.1]" --> mw
   gw -- "[WebSocket]" --> wsend
   mw -- "ASGI" --> router
@@ -229,7 +235,7 @@ flowchart TB
   msvc -- "виклик" --> policy
   msvc -- "виклик" --> envv
   envv -- "виклик" --> esvc
-  msvc -- "порт" --> pub
+  router -- "порт (Depends)" --> pub
   msvc -- "інтерфейс" --> mrepo
   esvc -- "інтерфейс" --> erepo
   pub -. "реалізація (DI)" .-> redispub
@@ -237,15 +243,15 @@ flowchart TB
   rl -- "INCR, EXPIRE" --> sec
   mrepo -- "[MongoDB Wire / TCP]" --> mongo
   erepo -- "[SQL / TCP]" --> pg
-  redispub -- "PUBLISH [RESP]" --> redis
+  redispub -- "XADD + PUBLISH [RESP]" --> redisev
   sec -- "[RESP / TCP]" --> redis
-  wsend -. "SUBSCRIBE [RESP]" .-> redis
+  wsend -. "SUBSCRIBE, XRANGE [RESP]" .-> redisev
   classDef comp fill:#85bbf0,stroke:#5d82a8,color:#0b1f33
   classDef cont fill:#438dd5,stroke:#2e6295,color:#ffffff
   classDef db fill:#2f6fb0,stroke:#1f4f80,color:#ffffff
   class mw,router,wsend,dto,auth,rl,err,msvc,policy,envv,esvc,pub,mrepo,erepo,redispub,sec comp
   class gw cont
-  class pg,mongo,redis db
+  class pg,mongo,redis,redisev db
   style apiB fill:none,stroke:#888888,stroke-dasharray:6 4
   style inb fill:none,stroke:#aaaaaa
   style guard fill:none,stroke:#aaaaaa
@@ -268,10 +274,10 @@ flowchart TB
 | Бізнес-логіка | Chat Access Policy | Участь у чаті, ранги ролей OWNER/ADMIN/MEMBER | Виклик функції | [SRS-FUN-23](srs.md#srs-fun-23), [SRS-FUN-24](srs.md#srs-fun-24) |
 | Бізнес-логіка | Envelope Validator | Строга рівність епохи, наявність sender key, підпис Ed25519 | Виклик функції | [SRS-FUN-16](srs.md#srs-fun-16), [SRS-FUN-17](srs.md#srs-fun-17), [ADR-001](adr/0001-choice-of-technology.md) |
 | Бізнес-логіка | Epoch Service | Поточна епоха, розподіли ключів, ротація | Через Crypto Repository | [SRS-FUN-11](srs.md#srs-fun-11), [ADR-001](adr/0001-choice-of-technology.md) |
-| Бізнес-логіка | Event Publisher (порт) | Абстракція розсилання подій, від якої залежить Message Service | Protocol, реалізація через DI | [SRS-FUN-18](srs.md#srs-fun-18), [SRS-FUN-19](srs.md#srs-fun-19) |
+| Бізнес-логіка | Event Publisher (порт) | Абстракція розсилання подій (`publish_durable`, `publish_ephemeral`), від якої залежать маршрутизатори; Message Service подій не розсилає | Protocol, реалізація через DI | [SRS-FUN-18](srs.md#srs-fun-18), [SRS-FUN-19](srs.md#srs-fun-19) |
 | Дані | Message Repository | Збереження та читання конвертів | Motor → MongoDB | [SRS-FUN-18](srs.md#srs-fun-18) |
 | Дані | Crypto Repository | Епохи, розподіли, гранти | SQLAlchemy AsyncSession → PostgreSQL | [SRS-FUN-11](srs.md#srs-fun-11) |
-| Дані | Redis Event Publisher | Реалізація порту: `PUBLISH user:{id}`, у To-Be – `XADD` у Redis Streams | redis.asyncio → Redis | [SRS-FUN-19](srs.md#srs-fun-19) |
+| Дані | Redis Event Publisher | Реалізація порту: для довготривалої події один Lua-скрипт виконує `XADD stream:user:{id}` і `PUBLISH user:{id}`; розсилання пакетами по 500 одержувачів через pipeline; ефемерні події (typing, presence) лише `PUBLISH` | redis.asyncio → Redis (events) | [SRS-FUN-19](srs.md#srs-fun-19) |
 | Дані | Security Store | Лічильники rate limiting і denylist токенів | redis.asyncio → Redis | [SRS-FUN-04](srs.md#srs-fun-04), [SRS-NFR-SEC-03](srs.md#srs-nfr-sec-03) |
 
 ### 2.3.2 Опис серверного ядра
@@ -282,7 +288,7 @@ flowchart TB
 
 - **Request Logging Middleware** записує метод, шлях, статус і час обробки. Токен запрошення в шляху `/invite-links/{token}` замінюється на `<redacted>`, а штатний журнал доступу uvicorn вимкнено (`--no-access-log`), щоб токени не потрапляли в журнали ([SRS-NFR-COMP-02](srs.md#srs-nfr-comp-02)).
 - **Маршрутизатор** оголошує залежності через `Depends`. До виклику обробника FastAPI виконує валідацію DTO (Pydantic v2), Auth Guard і Rate Limiter. Обробник отримує вже типізований об’єкт і ідентифікатор користувача з JWT і не читає сирого тіла запиту.
-- **WebSocket Endpoint** автентифікує з’єднання тим самим cookie `access_token` до `accept()`, відхиляє кадри понад 64 КБ і підписується лише на канал `user:{id}` власного користувача.
+- **WebSocket Endpoint** до `accept()` перевіряє заголовок `Origin` за списком `ALLOWED_ORIGINS` (відсутній або сторонній – закриття з кодом 1008) і автентифікує з’єднання тим самим cookie `access_token`. Він відхиляє кадри понад 64 КБ, підписується лише на канал `user:{id}` власного користувача, за параметром `cursor` повторює пропущені події, а з відкликанням сесії закриває з’єднання кодом 4401.
 
 **Рівень бізнес-логіки (Core Layer).** Рівень складається з Message Service, Epoch Service, Chat Access Policy і Envelope Validator.
 
@@ -305,7 +311,7 @@ flowchart TB
 | Зміна складу групи і нова епоха фіксуються разом | Unit of Work (`AsyncSession`) |
 | Перевищення лімітів не доходить до бізнес-логіки | Rate Limiter (fail-closed) |
 
-Цільова структура портів і адаптерів (Message Repository, Crypto Repository, Event Publisher) показана на [рисунку 2.3](#diagram-level3). У поточному коді сервіси звертаються до `AsyncSession` і колекцій Motor безпосередньо, а розсилання подій виконує функція в модулі маршрутизатора. Перенесення розсилання в Event Publisher виконується разом із реалізацією черги Redis Streams ([SRS-FUN-19](srs.md#srs-fun-19)).
+Цільова структура портів і адаптерів (Message Repository, Crypto Repository, Event Publisher) показана на [рисунку 2.3](#diagram-level3). Порт Event Publisher реалізовано: маршрутизатори отримують його через `Depends(get_event_publisher)`, а збій розсилання після збереження повідомлення журналюється й не змінює відповіді. Порти Message Repository і Crypto Repository ще не винесено: сервіси звертаються до `AsyncSession` і колекцій Motor безпосередньо.
 
 ## 2.4 Контур безпеки програмного рішення (Application Security)
 
@@ -319,8 +325,9 @@ flowchart TB
 | Захист приватних ключів | Argon2id на клієнті, пакет ключів AES-256-GCM | m ≥ 64 МіБ, t ≥ 3, p = 4; сервер відхиляє пакет з m < 19 МіБ або t < 2 ([SRS-FUN-08](srs.md#srs-fun-08)) |
 | Токени доступу | JWT HS256, claims `sub`, `iat`, `exp`, `type` | access 1 800 с, refresh 604 800 с; секрет підпису – змінна середовища `SECRET_KEY` |
 | Транспорт токена | Cookie `HttpOnly; Secure; SameSite=Lax` | Токен недоступний JavaScript (захист від викрадення через XSS); SameSite=Lax не надсилає cookie у міжсайтових POST і WebSocket-рукостисканнях (захист від CSRF і CSWSH) |
-| Відкликання | Denylist у Redis з TTL до завершення строку дії токена; мітка `force_logout:{user_id}` | Вихід і зміна пароля роблять недійсними всі токени, видані раніше; перевірка `iat` з точністю до часток секунди |
-| Одноразові коди (OTP) | 6 цифр із `secrets.randbelow` (CSPRNG), TTL 900 с | Не більше 5 спроб; порівняння `hmac.compare_digest` (без витоку через час виконання) |
+| Відкликання | Denylist у Redis з TTL до завершення строку дії токена; мітка `force_logout:{user_id}` | Вихід і зміна пароля роблять недійсними всі токени, видані раніше; перевірка `iat` з точністю до часток секунди. У Redis зберігається SHA-256 токена (`blacklist:{sha256(token)}`), а не сам токен. Відкритий WebSocket закривається кодом 4401 за подією `session_revoked` і періодичною повторною перевіркою сесії (щонайбільше 60 с) |
+| Одноразові коди (OTP) | 6 цифр із `secrets.randbelow` (CSPRNG), TTL 900 с | У Redis зберігається HMAC-SHA256 коду з похідним від `SECRET_KEY` ключем і прив’язкою до призначення та суб’єкта, а не сам код; не більше 5 спроб; порівняння `hmac.compare_digest` (без витоку через час виконання) |
+| Перевірка Origin | Список `ALLOWED_ORIGINS` | WebSocket-рукостискання без дозволеного `Origin` відхиляється до `accept()` (код 1008). Запити POST, PUT, PATCH і DELETE з чужим `Origin` отримують 403 `ORIGIN_NOT_ALLOWED`; запит без `Origin` (не браузерний клієнт) пропускається |
 | Перевірка email | Залежність `get_current_user` повертає 403 `NOT_VERIFIED` | Непідтверджений обліковий запис не має доступу до чатів і ключів |
 
 ### 2.4.2 Захист від вразливостей OWASP Top 10 (2021)
@@ -331,8 +338,8 @@ flowchart TB
 | A01 (підробка авторства) | Передача чужого `sender_id` у тілі запиту | `sender_id` береться з JWT, не з тіла; підпис Ed25519 конверта перевіряється ключем відправника |
 | A02 Cryptographic Failures | Читання вмісту при витоку бази даних | Сервер зберігає лише шифротексти AES-256-GCM; приватні ключі пристрою зашифровано ключем, виведеним Argon2id на клієнті |
 | A03 Injection (SQLi, NoSQLi) | Оператори MongoDB або SQL у параметрах | Параметризовані запити SQLAlchemy; типізовані фільтри Motor; валідація DTO Pydantic відкидає значення неправильного типу кодом 422 |
-| A04 Insecure Design (Mass Assignment) | Додаткові поля в тілі (`role`, `is_verified`, `sender_id`) | DTO оголошують лише дозволені поля, решта ігнорується; To-Be: `extra="forbid"` для запитів, що змінюють стан, щоб невідомі поля повертали 422 |
-| A05 Security Misconfiguration | Небезпечні заголовки, публічні СУБД, відкрита документація API | Security headers на шлюзі (CSP `default-src 'self'`, `frame-ancestors 'none'`, X-Frame-Options DENY, nosniff, Referrer-Policy no-referrer, COOP/CORP same-origin); порти СУБД і API прив’язано до 127.0.0.1; To-Be: вимкнення `/docs` і `/openapi.json` у виробничому середовищі |
+| A04 Insecure Design (Mass Assignment) | Додаткові поля в тілі (`role`, `is_verified`, `sender_id`) | DTO запитів, що змінюють стан, оголошують `extra="forbid"`: невідоме поле (`role`, `is_verified`) повертає 422. Вкладені об’єкти (конверт, вкладення, публікація каналу) зайві поля мовчки ігнорують |
+| A05 Security Misconfiguration | Небезпечні заголовки, публічні СУБД, відкрита документація API | Security headers на шлюзі (CSP `default-src 'self'`, `frame-ancestors 'none'`, X-Frame-Options DENY, nosniff, Referrer-Policy no-referrer, COOP/CORP same-origin); порти СУБД і API прив’язано до 127.0.0.1; `/docs`, `/redoc` і `/openapi.json` вимкнено, якщо `EXPOSE_API_DOCS` не ввімкнено (за замовчуванням вимкнено) |
 | A07 Identification and Authentication Failures | Перебір паролів і OTP | Rate limiting на двох рівнях: шлюз (1 r/s, burst 5 для автентифікації) і застосунок (20 спроб входу за 300 с з адреси, 8 – на обліковий запис; 5 спроб OTP) |
 | A08 Software and Data Integrity Failures | Ін’єкція вкладення під виглядом стікера | Перехресна перевірка `kind` і бакета URL вкладення; URL обмежено одним ключем об’єкта в дозволеному бакеті |
 | A09 Logging and Monitoring Failures | Відсутність сліду при зміні ключа чи складу групи | Журнал аудиту `security_audit` (19 типів подій, лише метадані, 365 днів); маскування токенів у журналах |
@@ -352,21 +359,21 @@ flowchart TB
 
 ### 2.4.4 Захист середовища і ланцюга постачання
 
-- **Секрети.** `SECRET_KEY`, паролі СУБД і SMTP передаються через змінні середовища з файлу `.env`, який не потрапляє в репозиторій (`.gitignore`). To-Be: секрети Docker Compose (`secrets:`) замість змінних середовища і сканування історії Git засобом gitleaks у CI.
+- **Секрети.** `SECRET_KEY`, паролі СУБД і SMTP передаються через змінні середовища з файлу `.env`, який не потрапляє в репозиторій (`.gitignore`). To-Be: секрети Docker Compose (`secrets:`) замість змінних середовища і сканування історії Git засобом gitleaks у CI (не реалізовано).
 - **Мережева ізоляція.** Назовні опубліковано лише Gateway; PostgreSQL, MongoDB, RustFS і API прив’язано до 127.0.0.1 для локальних інструментів розробки.
-- **Залежності й образи.** Вимога – 0 вразливостей рівня Critical або High без задокументованого винятку ([SRS-NFR-SEC-06](srs.md#srs-nfr-sec-06)). To-Be: сканування Trivy для образів і `pip-audit` / `npm audit` для залежностей у GitHub Actions, Bandit для коду Python ([SRS-NFR-MAINT-01](srs.md#srs-nfr-maint-01)).
+- **Залежності й образи.** Вимога – 0 вразливостей рівня Critical або High без задокументованого винятку ([SRS-NFR-SEC-06](srs.md#srs-nfr-sec-06)). У GitHub Actions виконуються `pip-audit` і `npm audit --audit-level=high`, але лише інформаційно: знахідки не блокують злиття. Конвеєр також запускає Ruff (мінімальний набір правил E9, F63, F7, F82), ESLint, Pytest, Karma і `npm run interop` ([SRS-NFR-MAINT-01](srs.md#srs-nfr-maint-01)). To-Be: Trivy для образів, Bandit для коду Python, поріг покриття ≥ 80 %.
 - **Транспорт.** To-Be: TLS 1.3 і HSTS `max-age=31536000` на шлюзі ([SRS-NFR-SEC-02](srs.md#srs-nfr-sec-02)).
 
 ### 2.4.5 Відомі обмеження і план посилення
 
+Раніше заплановані заходи реалізовано й вилучено з переліку: зберігання OTP як HMAC-SHA256, ключ denylist як SHA-256 токена, перевірка `Origin` у WebSocket-рукостисканні, вимкнення Swagger UI і `/openapi.json` у виробничому середовищі, `extra="forbid"` для DTO запитів.
+
 | № | Обмеження | План |
 |---|---|---|
-| 1 | OTP зберігається в Redis у відкритому вигляді | Зберігати HMAC-SHA256 коду з серверним секретом |
-| 2 | Denylist використовує сам токен як ключ Redis | Зберігати SHA-256 токена (див. 2.7.3) |
-| 3 | Немає перевірки заголовка Origin у WebSocket-рукостисканні | Додати allowlist Origin як другий рівень захисту поряд із SameSite=Lax |
-| 4 | Swagger UI і `/openapi.json` доступні через шлюз | Вимикати в конфігурації виробничого середовища |
-| 5 | DTO запитів ігнорують, а не відхиляють невідомі поля | `extra="forbid"` для DTO запитів, що змінюють стан |
-| 6 | Немає автоматичного сканування залежностей і секретів | Trivy, pip-audit, npm audit, gitleaks у CI |
+| 1 | Немає автоматичного сканування образів і секретів, а сканування залежностей лише інформаційне | Trivy, gitleaks і Bandit у CI, перехід `pip-audit` і `npm audit` у блокувальний режим |
+| 2 | Відкликані токени у старому форматі (відкритий JWT як ключ) ще читаються: це зайвий запит `GET` на кожну перевірку | Прибрати читання старого формату через 7 днів після розгортання (позначено `TODO` у `core/security.py`) |
+| 3 | Запис без заголовка `Origin` дозволено (потрібно для не браузерних клієнтів) | Прийнято: браузер не може надіслати міжсайтовий запит без `Origin` |
+| 4 | Немає TLS і HSTS на шлюзі | Завершення TLS 1.3 у Nginx, `COOKIE_SECURE=true`, увімкнення HSTS ([SRS-NFR-SEC-02](srs.md#srs-nfr-sec-02)) |
 
 ## 2.5 Специфікація міжсервісних контрактів та топологія API-маршрутів
 
@@ -427,7 +434,7 @@ components:
       name: access_token
 ```
 
-Елементи цільової моделі, яких ще немає в коді (`client_message_id`, статус 201, `edited_at`, заголовок `Retry-After`), позначено в контракті розширенням `x-implementation-status: planned`.
+Контракт відповідає поточному коду: `client_message_id`, статус 201, `edited_at`, заголовок `Retry-After` і код 409 `IDEMPOTENCY_KEY_REUSED` реалізовано. Позначку `planned` лишено лише для коду помилки `SENDER_KEY_EXISTS`, якого в коді ще немає.
 
 ### 2.5.2 Карта інтерфейсних маршрутів системи
 
@@ -439,35 +446,35 @@ components:
 | API-REQ-02 | GET | `/crypto/chats/{chat_id}/roster` | path `chat_id` uuid | Склад пристроїв і `member_set_hash` поточної епохи | API, домен `crypto` (Epoch Service) |
 | API-REQ-03 | POST | `/crypto/chats/{chat_id}/epochs/{epoch}/sender-keys` | path `chat_id` uuid, `epoch` int32 ≥ 1; body JSON `SenderKeyUpload` з `grants[1..256]` | Публікація ланцюжка відправника з грантами | API, домен `crypto` (Epoch Service) → PostgreSQL |
 | API-REQ-04 | GET | `/crypto/chats/{chat_id}/keys` | path `chat_id` uuid; query `since_epoch` int32 ≥ 0 | Епохи і гранти для пристроїв користувача | API, домен `crypto` → PostgreSQL |
-| API-REQ-05 | POST | `/messages` | body JSON `MessageCreateRequest`: `chat_id` uuid, рівно одне з `envelope` / `channel_post` / `encrypted_content`, `attachments[0..10]`, `client_message_id` uuid (planned) | Надсилання конверта | API, домен `messages` (Message Service) → MongoDB, Redis |
+| API-REQ-05 | POST | `/messages` | body JSON `MessageCreateRequest`: `chat_id` uuid, рівно одне з `envelope` / `channel_post` / `encrypted_content`, `attachments[0..10]`, `client_message_id` uuid | Надсилання конверта | API, домен `messages` (Message Service) → MongoDB, Redis |
 | API-REQ-06 | GET | `/chats/{chat_id}/messages` | path `chat_id` uuid; query `limit` int 1–100 (типово 50), `before_id` ObjectId | Історія чату з курсорною пагінацією | API, домен `chats` → MongoDB |
 | API-REQ-07 | POST | `/files/upload` | body `multipart/form-data`: `file` binary ≤ 50 МБ (вкладення) або ≤ 5 МБ (аватар, стікер), `category` enum | Завантаження шифротексту вкладення | Gateway (`client_max_body_size 55m`) → API, домен `files` → RustFS |
 | API-REQ-08 | GET | `/files/attachments/{chat_id}/{object_key}` | path `chat_id` uuid, `object_key` `^[A-Za-z0-9._-]{1,128}$` | Отримання шифротексту вкладення | API, домен `files` → MongoDB (перевірка посилання), RustFS |
 | API-WS-01 | GET (Upgrade) | `/ws` | cookie `access_token`; кадри JSON ≤ 64 КБ | Події реального часу (`new_message`, `key_epoch_started`, typing, presence) | Gateway (`proxy_http_version 1.1`, Upgrade) → API WebSocket Endpoint ↔ Redis pub/sub |
 
-Карта решти маршрутів за доменами (усього 74 маршрути REST і 1 WebSocket). Контракт OpenAPI деталізує 8 маршрутів критичного сценарію, решта описується автоматичною схемою FastAPI (`/openapi.json`) і переноситься в контракт у Розділі 3.
+Карта решти маршрутів за доменами (усього 76 маршрутів REST і 1 WebSocket). Контракт OpenAPI деталізує 8 маршрутів критичного сценарію, решта описується автоматичною схемою FastAPI (`/openapi.json`, лише якщо ввімкнено `EXPOSE_API_DOCS`) і ще не перенесена в контракт.
 
 | Домен | Префікс | Маршрутів | Призначення |
 |---|---|---|---|
-| `users` | `/auth`, `/profile`, `/users`, `/contact` | 18 | Реєстрація, OTP, вхід, вихід, оновлення токенів, профіль, пошук, контакти |
+| `users` | `/auth`, `/profile`, `/users`, `/contact` | 19 | Реєстрація, OTP, вхід, вихід, оновлення токенів, профіль, видалення облікового запису, пошук, контакти |
 | `chats` | `/chats`, `/chat-folder`, `/invite-links` | 25 | Чати, учасники, ролі, закріплення, стан прочитання, теки, запрошення |
 | `crypto` | `/crypto` | 10 | Ключі ідентичності, prekey, відкликання пристроїв, епохи, гранти, safety number |
 | `messages` | `/messages`, `/ws` | 7 + 1 | Надсилання, редагування, видалення, реакції, закріплення, WebSocket |
 | `files` | `/files` | 3 | Завантаження, отримання вкладення, пакетне отримання (≤ 50 ключів) |
-| `stickers` | `/stickers` | 11 | Набори стікерів і підписки |
+| `stickers` | `/stickers` | 12 | Набори стікерів, підписки, пошук набору за URL стікера |
 
-Маршрути з дієсловом у шляху (`POST /chats/{chat_id}/delete-participants`, `POST /auth/get-verification-email`) не відповідають REST-іменуванню ресурсів. У Розділі 3 їх замінюють на `DELETE /chats/{chat_id}/participants/{user_id}` і `POST /auth/verification-codes`; поточні шляхи зберігаються як застарілі до оновлення клієнта.
+Маршрути з дієсловом у шляху (`POST /chats/{chat_id}/delete-participants`, `POST /auth/get-verification-email`) не відповідають REST-іменуванню ресурсів. Заміну на `DELETE /chats/{chat_id}/participants/{user_id}` і `POST /auth/verification-codes` не виконано: поточні шляхи лишаються єдиними.
 
 ### 2.5.3 Потоки даних (Data Flows)
 
 **DF-01. Надсилання зашифрованого повідомлення.**
 
 1. Web Client шифрує текст AES-256-GCM ключем з ланцюжка відправника, підписує конверт Ed25519 і надсилає `POST /api/messages` через HTTPS (тіло JSON ≤ 64 КБ; cookie `access_token` додає браузер).
-2. Gateway (Nginx) перевіряє `limit_req` (30 r/s на IP, перевищення – 429), обмеження тіла 55 МБ, знімає префікс `/api`, встановлює `X-Forwarded-For` у значення `$remote_addr` (підроблений клієнтом заголовок відкидається) і проксіює запит до `api:8000` по HTTP/1.1 у внутрішній мережі Docker.
+2. Gateway (Nginx) перевіряє `limit_req` (30 r/s на IP, перевищення – 429 з JSON-тілом `RATE_LIMITED` і заголовком `Retry-After`), обмеження тіла 55 МБ, знімає префікс `/api`, встановлює `X-Forwarded-For` у значення `$remote_addr` (підроблений клієнтом заголовок відкидається) і проксіює запит до `api:8000` по HTTP/1.1 у внутрішній мережі Docker.
 3. API: Auth Guard декодує JWT і перевіряє denylist у Redis (401); Rate Limiter виконує `INCR ratelimit:message-send:{user}:{window}` (429 понад 300/хв, 503 при недоступності Redis); Pydantic валідує DTO (422).
 4. Message Service перевіряє участь у чаті (`SELECT` за `uq_chat_user`, 403), читає `chat_crypto_settings`, порівнює `envelope.epoch` з `current_epoch` (409 `EPOCH_STALE`), знаходить розподіл за `uq_skd_chat_sender_key_id` і перевіряє підпис Ed25519 (400).
-5. Конверт записується в MongoDB (`insert_one`), `chats.updated_at` оновлюється в PostgreSQL, транзакція фіксується.
-6. Подія `new_message` публікується в канали `user:{id}` усіх учасників; кожен екземпляр API, що тримає WebSocket учасника, пересилає кадр клієнту (API-WS-01). Клієнт отримувача знаходить грант за `skid` і розшифровує повідомлення локально.
+5. Якщо передано `client_message_id`, сервер шукає наявне повідомлення цього відправника в чаті: збіг із відбитком запиту повертає його без вставки (200), розбіжність – 409 `IDEMPOTENCY_KEY_REUSED`. Інакше конверт записується в MongoDB (`insert_one`), `chats.updated_at` оновлюється в PostgreSQL, транзакція фіксується; відповідь 201.
+6. Подія `new_message` записується в персональні потоки `stream:user:{id}` і публікується в канали `user:{id}` усіх учасників (також під час повтору за `client_message_id`); кожен екземпляр API, що тримає WebSocket учасника, пересилає кадр клієнту (API-WS-01). Клієнт отримувача знаходить грант за `skid` і розшифровує повідомлення локально.
 
 **DF-02. Завантаження зашифрованого вкладення.**
 
@@ -554,7 +561,7 @@ components:
 | 7 | – | API виконує `insert_one` у колекцію `messages` (`content_format = sender_keys_v1`), оновлює `chats.updated_at`, фіксує транзакцію і повертає 201 з `_id` повідомлення |
 | 8 | Користувач бачить повідомлення в стрічці зі статусом «надіслано» | API публікує `new_message` у канали `user:{id}` учасників; екземпляри API пересилають кадр WebSocket підключеним отримувачам, клієнти отримувачів розшифровують його локально |
 
-Коди відповідей наведено за контрактом 2.5.1. Поточна реалізація повертає 200 замість 201, а ключ ідемпотентності `client_message_id` ([SRS-FUN-20](srs.md#srs-fun-20)), на який спираються EF-01B і EF-01C, – To-Be.
+Коди відповідей наведено за контрактом 2.5.1. Ключ ідемпотентності `client_message_id` ([SRS-FUN-20](srs.md#srs-fun-20)), на який спираються EF-01B і EF-01C, реалізовано.
 
 **Постумови (Postconditions).**
 
@@ -631,7 +638,7 @@ components:
 | Крок | Дії для UI / користувача | Технічні дії сервера та БД |
 |---|---|---|
 | 1 | Повідомлення позначається «не надіслано» | API повертає 503; транзакція PostgreSQL (`chats.updated_at`) не фіксується, подія `new_message` не публікується |
-| 2 | Клієнт автоматично повторює запит до 3 разів з експоненційною затримкою | Повтор з тим самим `client_message_id`: якщо документ усе ж було записано до тайм-ауту, частковий унікальний індекс повертає `DuplicateKey`, і API віддає наявне повідомлення з кодом 200 |
+| 2 | Користувач натискає «Повторити» (автоматичного повтору немає) | Повтор з тим самим `client_message_id`: якщо документ усе ж було записано до тайм-ауту, частковий унікальний індекс повертає `DuplicateKey`, і API віддає наявне повідомлення з кодом 200 |
 
 | Поле | EF-01C |
 |---|---|
@@ -641,7 +648,7 @@ components:
 | Крок | Дії для UI / користувача | Технічні дії сервера та БД |
 |---|---|---|
 | 1 | Повідомлення в стані «надсилається» | Клієнт повторює запит з тим самим `client_message_id` після відновлення з’єднання |
-| 2 | Повідомлення з’являється один раз | Сервер знаходить наявний документ за індексом ідемпотентності і повертає 200 без нової вставки і без повторної розсилки |
+| 2 | Повідомлення з’являється один раз | Сервер знаходить наявний документ за `client_message_id` і повертає 200 без нової вставки; подію `new_message` розсилає повторно, бо перший запит міг перерватися до розсилання (клієнти усувають дублікати за ідентифікатором повідомлення) |
 
 | Поле | EF-01D |
 |---|---|
@@ -651,7 +658,7 @@ components:
 | Крок | Дії для UI / користувача | Технічні дії сервера та БД |
 |---|---|---|
 | 1 | Відправник бачить повідомлення як надіслане | API журналює помилку і повертає 201: повідомлення вже збережене, тому відповідь 5xx спричинила б дублікат |
-| 2 | Отримувачі бачать повідомлення після оновлення чату | Клієнти дочитують історію за курсором `before_id`; у To-Be персональна черга Redis Streams доставляє непідтверджену подію після перепідключення |
+| 2 | Отримувачі бачать повідомлення після оновлення чату | Якщо подію записано в потік Redis, клієнт після перепідключення отримує її за курсором; інакше він дочитує історію за `before_id` після перезавантаження через HTTP. Підтвердження доставки немає |
 
 ### 2.6.3 UC-02. Видалити учасника з групи
 
@@ -791,9 +798,9 @@ components:
 7. `D := Distribution(Req.chat_id, S.current_epoch, E.skid)`. Якщо `D = NULL`, то `Code := 409 SENDER_KEY_MISSING`. Якщо `D.sender_user_id ≠ U`, то `Code := 403 SENDER_KEY_NOT_YOURS`.
 8. `Valid := Ed25519.Verify(D.signing_public_key, AAD(Req.chat_id, U) ∥ E, E.sig)`. Якщо `NOT Valid`, то `Code := 400 INVALID_MESSAGE_SIGNATURE`.
 9. `Doc := {chat_id, sender_id := U, envelope := E, content_format := sender_keys_v1, created_at := now()}`; `Res := InsertOne(messages, Doc)`.
-10. Якщо `Res = DuplicateKey(client_message_id)`, то `M := FindOne(chat_id, U, Req.client_message_id)`, `Status := 200` – повтор не створює дубліката. Якщо `Res = Error`, то `Code := 503`.
+10. Якщо `Res = DuplicateKey(client_message_id)` (на практиці наявний документ знаходиться ще перед вставкою, а `DuplicateKey` страхує від гонки), то `M := FindOne(chat_id, U, Req.client_message_id)`. Якщо відбиток тіла запиту (вид вмісту, відповідь, вкладення, пересилання) відрізняється від збереженого, то `Code := 409 IDEMPOTENCY_KEY_REUSED`; інакше `Status := 200` – повтор не створює дубліката. Якщо `Res = Error`, то `Code := 503`.
 11. `M := Doc ∪ {_id := Res.inserted_id}`; `Status := 201`; `chats.updated_at := now()`; COMMIT.
-12. `Members := ParticipantIds(Req.chat_id)`; `N := |Members|`. Для `i := 1, N`: `PubErr := PUBLISH(user:Members[i], Event(new_message, M))`; якщо `PubErr ≠ NULL`, то `Log(PubErr)` без переривання циклу, оскільки повідомлення вже збережене.
+12. `Members := ParticipantIds(Req.chat_id)`; `N := |Members|`. Для `i := 1, N`: `PubErr := XADD(stream:user:Members[i], Event) ∥ PUBLISH(user:Members[i], Event(new_message, M))` (один скрипт Redis, пакети по 500 одержувачів у pipeline; те саме виконується для відповіді 200 на повтор); якщо `PubErr ≠ NULL`, то `Log(PubErr)`, оскільки повідомлення вже збережене.
 13. Вивід `Status, M` або `ErrorResponse(Code, Details)`.
 
 <a id="diagram-alg-send"></a>
@@ -828,14 +835,14 @@ flowchart TD
   d8 -- Так --> e8["Code := 400 INVALID_MESSAGE_SIGNATURE"]
   d8 -- Ні --> ins["Doc := {chat_id, sender_id := U, envelope := E,<br/>content_format := sender_keys_v1, created_at := now()}<br/>Res := InsertOne(messages, Doc)"]
   ins --> d9{"Res = DuplicateKey(client_message_id)"}
-  d9 -- Так --> dup["M := FindOne(chat_id, U, Req.client_message_id)<br/>Status := 200"]
+  d9 -- Так --> dup["M := FindOne(chat_id, U, Req.client_message_id)<br/>відбиток збігається: Status := 200<br/>інакше Code := 409 IDEMPOTENCY_KEY_REUSED"]
   dup --> out
   d9 -- Ні --> d10{"Res = Error"}
   d10 -- Так --> e10["Code := 503 SERVICE_UNAVAILABLE"]
   d10 -- Ні --> p5["M := Doc ∪ {_id := Res.inserted_id}; Status := 201<br/>chats.updated_at := now(); COMMIT"]
   p5 --> p6["Members := ParticipantIds(Req.chat_id)<br/>N := |Members|"]
   p6 --> lp{{"i := 1, N"}}
-  lp -- "i ≤ N" --> pub["PubErr := PUBLISH(user:Members[i], Event(new_message, M))"]
+  lp -- "i ≤ N" --> pub["PubErr := XADD + PUBLISH(user:Members[i], Event(new_message, M))"]
   pub --> dp{"PubErr ≠ NULL"}
   dp -- Так --> lg["Log(PubErr)"]
   lg -- "i := i + 1" --> lp
@@ -857,7 +864,7 @@ flowchart TD
 
 Рисунок 2.5 – Блок-схема алгоритму прийому зашифрованого повідомлення
 
-**Крайові випадки.** Цикл розсилання має фіксовану межу `N ≤ 256` для зашифрованої групи. Недоступність Redis зупиняє запит до запису (fail-closed), недоступність MongoDB – до зміни стану PostgreSQL. Помилка розсилання після збереження не повертає клієнту 500, тому клієнт не повторює запит і не створює дубліката; повторна доставка непідтверджених подій – функція черги Redis Streams ([SRS-FUN-19](srs.md#srs-fun-19)). Повтор запиту після обриву з’єднання захищено ключем `client_message_id`.
+**Крайові випадки.** Цикл розсилання має фіксовану межу `N ≤ 256` для зашифрованої групи. Недоступність Redis зупиняє запит до запису (fail-closed), недоступність MongoDB – до зміни стану PostgreSQL. Помилка розсилання після збереження не повертає клієнту 500, тому клієнт не повторює запит і не створює дубліката; пропущену подію клієнт отримує за курсором потоку Redis Streams або після перезавантаження через HTTP. Підтвердження доставки й повторної доставки немає ([SRS-FUN-19](srs.md#srs-fun-19)). Збій розсилання не змінює відповіді лише для маршрутів повідомлень; маршрути чатів, учасників, криптографії та профілю на збій публікації повертають 5xx після вже виконаної зміни. Повтор запиту після обриву з’єднання захищено ключем `client_message_id`.
 
 #### 2.6.4.2 Алгоритм ротації епохи групових ключів
 
@@ -934,7 +941,7 @@ flowchart TD
 9. `Sig := Ed25519.Sign(IdentitySigPriv, DS_SENDER_KEY ∥ ChatId ∥ Epoch ∥ SKID ∥ SigPub ∥ 0)`.
 10. `(Resp, NetErr) := POST /crypto/chats/ChatId/epochs/Epoch/sender-keys` з `G[1..N]`.
 11. Якщо `NetErr = NULL AND Resp.status ∈ {200, 201}`, то `Chain := (SKID, CK, SigPriv, Index := 0)`, `Cache[ChatId, Epoch] := Chain`, вихід.
-12. Якщо `(NetErr ≠ NULL OR Resp.status ≥ 500 OR Resp.error_code ∈ {EPOCH_CLOSED, GRANT_SET_MISMATCH}) AND Attempt < MaxAttempts`, то `Attempt := Attempt + 1`, `Delay(2^Attempt × 250 мс)` і перехід до кроку 3; інакше `Code := RETRY_LIMIT_EXCEEDED` або `Code := Resp.error_code`.
+12. Якщо `(NetErr ≠ NULL OR Resp.status ≥ 500 OR Resp.error_code ∈ {EPOCH_CLOSED, GRANT_SET_MISMATCH}) AND Attempt < MaxAttempts`, то `Delay(2^(Attempt − 1) × 250 мс)` (250 мс, потім 500 мс), `Attempt := Attempt + 1` і перехід до кроку 3; інакше `Code := RETRY_LIMIT_EXCEEDED` або `Code := Resp.error_code`.
 13. Вивід `Code`; `Blocked := TRUE` – надсилання заблоковано, відкритий текст не передається.
 
 <a id="diagram-alg-sender-key"></a>
@@ -974,7 +981,7 @@ flowchart TD
   d3 -- Ні --> ef["Code := Resp.error_code"]
   d3 -- Так --> dr{"Attempt < MaxAttempts"}
   c_c((C)) --> dr
-  dr -- Так --> inc["Attempt := Attempt + 1<br/>Delay(2^Attempt × 250 мс)"]
+  dr -- Так --> inc["Delay(2^(Attempt − 1) × 250 мс)<br/>Attempt := Attempt + 1"]
   inc --> c_d1((D))
   c_d((D)) --> get
   dr -- Ні --> ex["Code := RETRY_LIMIT_EXCEEDED"]
@@ -1000,7 +1007,7 @@ flowchart TD
 |---|---|---|
 | PostgreSQL 17 | Користувачі, пристрої, ключі ідентичності, чати, учасники, епохи, розподіли ключів відправників, гранти, запрошення, теки, стікери | ACID-транзакції: ротація епохи фіксується в одній транзакції зі зміною складу учасників ([SRS-FUN-11](srs.md#srs-fun-11)); обмеження FK, UNIQUE і часткові індекси гарантують криптографічні інваріанти на рівні СУБД |
 | MongoDB 8 | Зашифровані конверти повідомлень (`messages`), журнал аудиту безпеки (`security_audit`) | Незмінні документи змінної форми (конверт, публікація каналу або застарілий формат), висока інтенсивність вставки, читання сторінками за `chat_id`; журнал аудиту не конкурує за блокування рядків з транзакційними таблицями |
-| Redis 8 | Лічильники rate limiting, denylist токенів, присутність, канали pub/sub, брокер Celery | Короткоживучі ключі з TTL, атомарні `INCR` / `EXPIRE` |
+| Redis 8 (два екземпляри) | Основний: лічильники rate limiting, OTP (HMAC), denylist токенів, присутність, брокер Celery. Events: канали pub/sub і персональні потоки подій | Короткоживучі ключі з TTL, атомарні `INCR` / `EXPIRE`. Потоки подій винесено в окремий екземпляр з витісненням `allkeys-lru` і без збереження на диск, щоб вони не конкурували з ключами denylist, які не можна втрачати |
 
 Схеми описано кодом Mermaid.js (Diagrams-as-Code): реляційна модель – синтаксисом `erDiagram` у нотації Crow’s Foot, документна – синтаксисом `classDiagram` зі стереотипами `<<collection>>` і `<<embedded>>`.
 
@@ -1010,7 +1017,7 @@ flowchart TD
 - **Час** – `timestamptz` у UTC; у MongoDB – тип BSON `Date`.
 - **Перелічувані значення** – типи `ENUM` PostgreSQL, однакові з перелічуваннями Pydantic і схемами `openapi.yaml`.
 - **Двійкові ключі** – base64url без доповнення фіксованої довжини: 43 символи для 32-байтових ключів X25519 і Ed25519, 86 символів для 64-байтових підписів Ed25519.
-- **Видалення** – персональні дані видаляються фізично каскадом `ON DELETE CASCADE` ([SRS-FUN-05](srs.md#srs-fun-05), GDPR ст. 17); soft delete для них свідомо не застосовано. Криптографічні ключі не видаляються, а відкликаються (`is_active := false`, `revoked_at := now()`), щоб зміна ключа залишала слід для розслідування.
+- **Видалення облікового запису** – знеособлення з надгробком, а не фізичне видалення рядка `users` ([SRS-FUN-05](srs.md#srs-fun-05), GDPR ст. 17, [ADR-002](adr/0002-account-deletion-as-tombstone.md)): каскадні зовнішні ключі знищили б ключі ідентичності, розподіли й гранти, потрібні іншим учасникам для розшифрування та перевірки історії. Персональні поля замінюються нейтральними значеннями, `deleted_at` фіксує момент видалення. Криптографічні ключі не видаляються, а відкликаються (`is_active := false`, `revoked_at := now()`), щоб зміна ключа залишала слід для розслідування.
 - **Конкурентний доступ** – замість оптимістичного блокування через стовпець версії: виділення епохи серіалізується транзакційним advisory-блокуванням `pg_advisory_xact_lock` з резервним обмеженням `UNIQUE (chat_id, epoch)`; лічильник використань запрошення змінюється атомарним `UPDATE … WHERE use_count < max_uses`.
 
 ### 2.7.1 Реляційна модель PostgreSQL
@@ -1041,6 +1048,7 @@ erDiagram
     varchar(255) hashed_password "bcrypt"
     boolean is_verified "DEFAULT false"
     boolean is_active "DEFAULT true"
+    timestamptz deleted_at "надгробок, NULL"
     text public_key "legacy RSA, NULL"
     text encrypted_private_key "legacy RSA, NULL"
     text bio
@@ -1234,6 +1242,7 @@ erDiagram
 | `hashed_password` | varchar(255) | NOT NULL | Хеш bcrypt (60 символів) |
 | `is_verified` | boolean | DEFAULT false | Email підтверджено |
 | `is_active` | boolean | DEFAULT true | Обліковий запис не вимкнено |
+| `deleted_at` | timestamptz | NULL | Момент видалення облікового запису: рядок лишається надгробком, персональні поля замінено, вхід неможливий |
 | `public_key`, `encrypted_private_key` | text | NULL (To-Be) | Застаріла схема RSA; вилучаються після міграції всіх чатів на `sender_keys_v1` |
 | `bio`, `avatar_url` | text | NULL | Профіль |
 | `created_at`, `updated_at` | timestamptz | `created_at` DEFAULT now() | Аудит змін рядка |
@@ -1257,7 +1266,7 @@ erDiagram
 | `device_id` | uuid | FK → user_devices, CASCADE | Пристрій |
 | `algorithm` | enum `identity_key_algorithm` | NOT NULL | `x25519_ed25519_v1` |
 | `version` | integer | UNIQUE (device_id, version) | Номер версії ключа пристрою |
-| `identity_public_key` | char(43) | NOT NULL, CHECK довжини (To-Be) | X25519, узгодження ключів |
+| `identity_public_key` | char(43) | NOT NULL, CHECK довжини | X25519, узгодження ключів |
 | `signing_public_key` | char(43) | NOT NULL | Ed25519, підписи |
 | `identity_key_signature` | char(86) | NOT NULL | Ed25519 над `DS_IDENTITY_BIND ∥ user_id ∥ device_id ∥ identity_public_key` |
 | `signed_prekey_public`, `signed_prekey_signature`, `signed_prekey_created_at` | char(43), char(86), timestamptz | NULL | Signed prekey, ротація приблизно щотижня |
@@ -1273,7 +1282,7 @@ erDiagram
 | `chats.id` | uuid | PK | Ідентифікатор чату |
 | `chats.chat_type` | enum `chat_type` | NOT NULL | `private`, `group`, `channel` |
 | `chats.title`, `chats.description`, `chats.avatar_url` | varchar(255), text, varchar(255) | NULL | Атрибути групи або каналу |
-| `chats.updated_at` | timestamptz | Індекс (To-Be) | Час останнього повідомлення, сортування списку чатів |
+| `chats.updated_at` | timestamptz | Індекс `ix_chats_updated_at` | Час останнього повідомлення, сортування списку чатів |
 | `chat_participants.id` | uuid | PK | Ідентифікатор членства |
 | `chat_participants.chat_id`, `user_id` | uuid | FK, CASCADE; UNIQUE (chat_id, user_id) | Членство без дублікатів |
 | `chat_participants.role` | enum `participant_role` | NOT NULL, DEFAULT member | `owner`, `admin`, `member` |
@@ -1305,7 +1314,7 @@ erDiagram
 | `created_by_user_id` | uuid | FK → users, SET NULL | Ініціатор |
 | `member_count` | integer | NOT NULL, CHECK 0..256 | Кількість пристроїв складу |
 | `member_set_hash` | char(64) | NOT NULL, CHECK `^[0-9a-f]{64}$` | SHA-256 відсортованого складу разом з публічними ключами ([SRS-FUN-14](srs.md#srs-fun-14)) |
-| `created_at`, `closed_at` | timestamptz | Частковий UNIQUE (chat_id) WHERE closed_at IS NULL (To-Be) | `closed_at IS NULL` – відкрита епоха; не більше однієї на чат |
+| `created_at`, `closed_at` | timestamptz | Частковий UNIQUE (chat_id) WHERE closed_at IS NULL | `closed_at IS NULL` – відкрита епоха; не більше однієї на чат |
 
 **`sender_key_distributions`** – публічна частина ланцюжка відправника в епосі.
 
@@ -1313,7 +1322,7 @@ erDiagram
 |---|---|---|---|
 | `id` | uuid | PK | Ідентифікатор розподілу |
 | `epoch_id` | uuid | FK → chat_key_epochs, CASCADE | Епоха |
-| `chat_id` | uuid | FK → chats; композитний FK (epoch_id, chat_id) → chat_key_epochs (id, chat_id) (To-Be) | Денормалізовано: усі шляхи читання фільтрують за чатом |
+| `chat_id` | uuid | FK → chats; композитний FK (epoch_id, chat_id) → chat_key_epochs (id, chat_id) | Денормалізовано: усі шляхи читання фільтрують за чатом |
 | `sender_user_id` | uuid | FK → users, CASCADE | Денормалізовано для перевірки власника ланцюжка під час надсилання без з’єднання з `user_devices` |
 | `sender_device_id` | uuid | FK → user_devices, CASCADE | Пристрій відправника |
 | `sender_key_id` | uuid | UNIQUE (chat_id, sender_key_id) | Поле `skid` конверта |
@@ -1331,8 +1340,8 @@ erDiagram
 | `id` | uuid | PK | Ідентифікатор гранту |
 | `distribution_id` | uuid | FK → sender_key_distributions, CASCADE; UNIQUE (distribution_id, recipient_device_id) | Один грант на пристрій |
 | `chat_id` | uuid | FK → chats, CASCADE; індекс (chat_id, recipient_device_id) | Основний запит «гранти для мого пристрою в чаті» |
-| `recipient_device_id` | uuid | FK → user_devices, CASCADE; індекс (To-Be) | Пристрій-адресат |
-| `recipient_identity_key_id` | uuid | FK → user_identity_keys, CASCADE; індекс (To-Be) | Версія ключа, якою обгорнуто грант |
+| `recipient_device_id` | uuid | FK → user_devices, CASCADE; індекс | Пристрій-адресат |
+| `recipient_identity_key_id` | uuid | FK → user_identity_keys, CASCADE; індекс | Версія ключа, якою обгорнуто грант |
 | `granted_by_user_id` | uuid | FK → users, SET NULL | Власник ланцюжка або учасник, що передає історію новому учаснику |
 | `wrap_algorithm` | varchar(64) | NOT NULL | X25519 + HKDF-SHA256 + AES-256-GCM |
 | `ephemeral_public_key` | char(43) | NOT NULL | Ефемерний ключ X25519 |
@@ -1348,9 +1357,9 @@ erDiagram
 | `created_by` | uuid | FK → users, SET NULL | Автор |
 | `token` | varchar(128) | UNIQUE, NOT NULL | 32 байти `secrets.token_urlsafe` |
 | `expires_at`, `revoked_at` | timestamptz | NULL | Строк дії та відкликання |
-| `max_uses`, `use_count` | integer | CHECK use_count ≤ max_uses (To-Be) | NULL у `max_uses` – без обмеження |
+| `max_uses`, `use_count` | integer | CHECK use_count ≤ max_uses | NULL у `max_uses` – без обмеження |
 
-**Допоміжні таблиці** (рисунок 2.9): `contacts` – записна книга, PK (owner_id, contact_id), CHECK owner_id ≠ contact_id (To-Be); `chat_folders` і `folder_items` – теки чатів (M:N між теками і чатами через `folder_items`); `sticker_packs`, `stickers` – набори стікерів, UNIQUE (pack_id, position) (To-Be); `sticker_pack_subscriptions` – M:N між користувачами і публічними наборами з PK (user_id, pack_id).
+**Допоміжні таблиці** (рисунок 2.9): `contacts` – записна книга, PK (owner_id, contact_id), CHECK owner_id ≠ contact_id; `chat_folders` і `folder_items` – теки чатів (M:N між теками і чатами через `folder_items`); `sticker_packs`, `stickers` – набори стікерів, UNIQUE (pack_id, position); `sticker_pack_subscriptions` – M:N між користувачами і публічними наборами з PK (user_id, pack_id).
 
 ### 2.7.2 Документна модель MongoDB
 
@@ -1467,7 +1476,7 @@ classDiagram
 | `_id` | ObjectId | PK | Курсор пагінації (монотонно зростає) |
 | `chat_id` | Binary UUID | NOT NULL | Посилання на `chats.id` |
 | `sender_id` | Binary UUID | NOT NULL | Посилання на `users.id`; береться з JWT |
-| `client_message_id` | Binary UUID | Частковий UNIQUE (chat_id, sender_id, client_message_id) (To-Be) | Ключ ідемпотентності ([SRS-FUN-20](srs.md#srs-fun-20)) |
+| `client_message_id` | Binary UUID | Частковий UNIQUE (chat_id, sender_id, client_message_id) | Ключ ідемпотентності ([SRS-FUN-20](srs.md#srs-fun-20)); разом із ним зберігається відбиток запиту, за яким відрізняється повтор від зловживання ключем |
 | `content_format` | String (enum) | NOT NULL | `legacy_plaintext`, `legacy_rsa`, `sender_keys_v1`, `channel_signed_v1` |
 | `envelope` | MessageEnvelope | Рівно одне з трьох полів вмісту | Зашифрований конверт |
 | `channel_post` | ChannelPost | – | Підписана публікація каналу |
@@ -1477,7 +1486,7 @@ classDiagram
 | `attachments` | Array\<Attachment\> | ≤ 10 | Метадані зашифрованих вкладень |
 | `reactions` | Array\<Reaction\> | – | Одна реакція на emoji від користувача |
 | `is_pinned`, `pinned_at`, `pinned_by` | Boolean, Date, Binary UUID | – | Закріплення |
-| `is_edited`, `edited_at` | Boolean, Date | `edited_at` To-Be | Редагування |
+| `is_edited`, `edited_at` | Boolean, Date | `edited_at` встановлюється під час редагування | Редагування |
 | `created_at` | Date | NOT NULL | Час прийняття сервером |
 
 Поле `is_read` позначено як застаріле: стан прочитання зберігається для кожного учасника в `chat_participants.last_read_message_id`; поле видаляється після оновлення клієнтів.
@@ -1508,11 +1517,13 @@ classDiagram
 | Шаблон ключа | Тип | TTL | Призначення |
 |---|---|---|---|
 | `ratelimit:{scope}:{id}:{window}` | String (лічильник) | Довжина вікна | Fixed window, `INCR` + `EXPIRE` ([SRS-NFR-SEC-03](srs.md#srs-nfr-sec-03)) |
-| `blacklist:{sha256(token)}` | String | Залишок строку дії токена | Denylist відкликаних JWT ([SRS-FUN-04](srs.md#srs-fun-04)); у ключі зберігається хеш токена (To-Be), а не сам токен |
+| `blacklist:{sha256(token)}` | String | Залишок строку дії токена | Denylist відкликаних JWT ([SRS-FUN-04](srs.md#srs-fun-04)); у ключі зберігається хеш токена, а не сам токен; ключі старого формату (з відкритим токеном) читаються до завершення переходу |
 | `force_logout:{user_id}` | String (timestamp) | 7 днів | Відкликання всіх сесій, виданих до моменту зміни пароля |
 | `presence:{user_id}`, `status:{user_id}` | String | Сесія WebSocket | Присутність користувача |
-| `user:{user_id}` | Канал pub/sub | – | Події реального часу ([SRS-FUN-18](srs.md#srs-fun-18)) |
-| `stream:user:{user_id}` | Stream | Обмеження `MAXLEN` (To-Be) | Персональна черга подій до підтвердження ([SRS-FUN-19](srs.md#srs-fun-19)) |
+| `user:{user_id}` | Канал pub/sub (екземпляр events) | – | Події реального часу ([SRS-FUN-18](srs.md#srs-fun-18)) |
+| `stream:user:{user_id}` | Stream (екземпляр events) | `MAXLEN ~ 200`, 7 днів; запис ≤ 32 КБ | Персональний потік довготривалих подій для відновлення за курсором після перепідключення; підтвердження доставки немає ([SRS-FUN-19](srs.md#srs-fun-19)) |
+| `stream-gap:{user_id}` | String (мітка часу, мс) | 7 днів | Позначає, що подію не вдалося записати в потік; клієнт із давнішим курсором отримує `resync_required` |
+| `email-verification:{email}`, `password_reset:{user_id}` | String (HMAC-SHA256) | 900 с | Одноразовий код, збережений як HMAC, а не відкритим текстом ([SRS-FUN-02](srs.md#srs-fun-02)) |
 
 ### 2.7.4 План індексування
 
@@ -1521,32 +1532,30 @@ classDiagram
 | `ix_chat_id_id` `(chat_id, _id DESC)` | MongoDB, messages | B-tree складений | Історія чату з курсором `before_id`, останнє повідомлення для списку чатів | Наявний |
 | `ix_chat_sender_read` (chat_id, sender_id, is_read) | MongoDB, messages | B-tree складений | Застаріле позначення прочитання | Видаляється разом з `is_read` |
 | `ix_attachment_url`, `ix_chat_attachment_url` | MongoDB, messages | B-tree, sparse | Перевірка посилань на об’єкт перед видаленням і перед пересиланням | Наявний |
-| `ux_chat_sender_client_msg` (chat_id, sender_id, client_message_id) | MongoDB, messages | B-tree, unique, partial | Ідемпотентне надсилання | To-Be |
+| `ux_chat_sender_client_msg` (chat_id, sender_id, client_message_id) | MongoDB, messages | B-tree, unique, partial | Ідемпотентне надсилання | Наявний |
 | `ix_audit_user_time`, `ix_audit_event_time` | MongoDB, security_audit | B-tree складений | Розслідування за користувачем і типом події | Наявний |
 | `ttl_audit_created_at` (created_at, expireAfterSeconds = 31 536 000) | MongoDB, security_audit | TTL | Автоматичне видалення записів старших за 365 днів; замінює `ix_audit_time` | To-Be |
 | `uq_chat_user` | PostgreSQL, chat_participants | B-tree unique | Перевірка участі в чаті (кожен запит) | Наявний |
 | `uq_chat_epoch` | PostgreSQL, chat_key_epochs | B-tree unique | Пошук епохи за номером | Наявний |
-| `uq_open_epoch_per_chat` (chat_id) WHERE closed_at IS NULL | PostgreSQL, chat_key_epochs | B-tree unique, частковий | Інваріант «одна відкрита епоха на чат» | To-Be |
+| `uq_open_epoch_per_chat` (chat_id) WHERE closed_at IS NULL | PostgreSQL, chat_key_epochs | B-tree unique, частковий | Інваріант «одна відкрита епоха на чат» | Наявний |
 | `uq_skd_chat_sender_key_id` | PostgreSQL, sender_key_distributions | B-tree unique | Пошук розподілу за `skid` конверта під час надсилання | Наявний |
 | `ix_grant_chat_recipient` (chat_id, recipient_device_id) | PostgreSQL, sender_key_grants | B-tree складений | Гранти для пристрою в чаті | Наявний |
-| `ix_grant_recipient_device`, `ix_grant_recipient_identity_key` | PostgreSQL, sender_key_grants | B-tree | Каскадне видалення під час відкликання пристрою або ключа без повного сканування | To-Be |
+| `ix_grant_recipient_device`, `ix_grant_recipient_identity_key` | PostgreSQL, sender_key_grants | B-tree | Каскадне видалення під час відкликання пристрою або ключа без повного сканування | Наявний |
 | `uq_identity_key_active_per_device` (device_id) WHERE is_active | PostgreSQL, user_identity_keys | B-tree unique, частковий | Активний ключ пристрою | Наявний |
-| `ix_chats_updated_at` (updated_at DESC) | PostgreSQL, chats | B-tree | Сортування списку чатів | To-Be |
+| `ix_chats_updated_at` (updated_at DESC) | PostgreSQL, chats | B-tree | Сортування списку чатів | Наявний |
 | `chat_invite_links.token` | PostgreSQL | B-tree unique | Приєднання за запрошенням | Наявний |
 
 Індекси GIN і векторні індекси (HNSW, IVF) не застосовуються: сервер не має доступу до відкритого тексту, тому повнотекстовий і семантичний пошук за вмістом можливий лише на клієнті.
 
 ### 2.7.5 Відмінності цільової схеми від поточних міграцій
 
-Позначки To-Be у таблицях означають зміни, які вносяться міграціями Alembic і змінами схем Pydantic у Розділі 3:
+Реалізовано міграціями Alembic і змінами схем: CHECK-обмеження довжини та формату для ключів (`char(43)`), підписів (`char(86)`), `member_set_hash` (`char(64)`) і `char(24)` для ObjectId у `chat_participants`; частковий унікальний індекс `uq_open_epoch_per_chat` і композитний FK `(epoch_id, chat_id)`; індекси `ix_grant_recipient_device`, `ix_grant_recipient_identity_key`, `ix_chats_updated_at`; CHECK `use_count ≤ max_uses`, `owner_id ≠ contact_id` і UNIQUE `(pack_id, position)`; поля `client_message_id` (з частковим унікальним індексом) і `edited_at`; хеш SHA-256 токена в denylist; стовпець `users.deleted_at`. Міграції перед застосуванням обмежень перевіряють наявні дані й перериваються з переліком порушників.
 
-1. CHECK-обмеження довжини для ключів (`char(43)`), підписів (`char(86)`) і `member_set_hash` (`char(64)`); тип `char(24)` для ObjectId у `chat_participants`.
-2. Частковий унікальний індекс `uq_open_epoch_per_chat` і композитний FK `(epoch_id, chat_id)` у `sender_key_distributions`.
-3. Індекси на `sender_key_grants.recipient_device_id`, `recipient_identity_key_id` і `chats.updated_at`; вилучення надлишкового стовпця `sender_key_grants.recipient_user_id`, який записується, але не читається (транзитивна залежність через `recipient_device_id`).
-4. CHECK-обмеження `use_count ≤ max_uses`, `owner_id ≠ contact_id`, UNIQUE (pack_id, position).
-5. Поля `client_message_id` і `edited_at` у `messages`, тип ObjectId для `reply_to_message_id` (зараз рядок), частковий унікальний індекс ідемпотентності, TTL-індекс журналу аудиту, перевірка схеми колекції `$jsonSchema`.
-6. Зберігання в denylist хешу SHA-256 токена замість самого токена.
-7. Зміна `users.public_key` і `users.encrypted_private_key` на NULL з подальшим вилученням.
+Лишаються To-Be:
+
+1. Вилучення надлишкового стовпця `sender_key_grants.recipient_user_id`, який записується, але не читається під час роботи з повідомленнями (його використовує лише видалення облікового запису).
+2. Тип ObjectId для `reply_to_message_id` (зараз рядок), TTL-індекс журналу аудиту `security_audit` (очищення виконує задача Celery), перевірка схеми колекції `$jsonSchema`, вилучення застарілого поля `is_read` та індексу `ix_chat_sender_read`.
+3. Зміна `users.public_key` і `users.encrypted_private_key` на NULL з подальшим вилученням разом з кодом `legacy_rsa`.
 
 ## 2.8 Інтеграційний аудит та верифікація цілісності доменів
 
@@ -1557,15 +1566,15 @@ classDiagram
 | Поле контракту | Тип і обмеження в `openapi.yaml` | Тип у сховищі | Результат |
 |---|---|---|---|
 | `chat_id`, `sender_id`, `user_id`, `device_id`, `skid` | `string`, `format: uuid` | `uuid` (PostgreSQL), Binary UUID (MongoDB); `envelope.skid` – String | Узгоджено; текстове `skid` прийнято, оскільки поле не використовується в запитах MongoDB |
-| `_id`, `reply_to_message_id`, `before_id`, `last_read_message_id` | `^[0-9a-f]{24}$` | ObjectId (`_id`); String → ObjectId (`reply_to_message_id`, To-Be); `char(24)` (To-Be, було `varchar` без довжини) | Виправлено |
-| `identity_public_key`, `signing_public_key`, `ephemeral_public_key` | `^[A-Za-z0-9_-]{43}$` | `char(43)` + CHECK (To-Be, було `text`) | Виправлено |
+| `_id`, `reply_to_message_id`, `before_id`, `last_read_message_id` | `^[0-9a-f]{24}$` | ObjectId (`_id`); String → ObjectId (`reply_to_message_id`, To-Be); `char(24)` + CHECK (було `varchar` без довжини) | Виправлено, крім `reply_to_message_id` (To-Be) |
+| `identity_public_key`, `signing_public_key`, `ephemeral_public_key` | `^[A-Za-z0-9_-]{43}$` | `char(43)` + CHECK (було `text`) | Виправлено |
 | `signature`, `identity_key_signature`, `envelope.sig` | `^[A-Za-z0-9_-]{86}$` | `char(86)`; String | Виправлено |
-| `member_set_hash` | `^[0-9a-f]{64}$` | `char(64)` + CHECK (To-Be, було `text`) | Виправлено |
+| `member_set_hash` | `^[0-9a-f]{64}$` | `char(64)` + CHECK (було `text`) | Виправлено |
 | `epoch`, `current_epoch`, `idx`, `chain_start_index` | `integer`, `int32`, `minimum` | `integer` + CHECK; Int32 | Узгоджено |
 | `reason`, `crypto_mode`, `history_visibility`, `content_format`, `kind` | `enum` | ENUM PostgreSQL; String з перевіркою Pydantic | Узгоджено: множини значень збігаються |
 | `created_at`, `closed_at`, `pinned_at` | `string`, `format: date-time` (RFC 3339) | `timestamptz`; Date | Узгоджено |
 | `Attachment.size` | `int64`, `maximum: 52428800` | Int64 | Узгоджено з [SRS-FUN-27](srs.md#srs-fun-27) |
-| `client_message_id`, `edited_at` | planned | поля та індекс To-Be у `messages` | Узгоджено (обидва артефакти позначено To-Be) |
+| `client_message_id`, `edited_at` | `Uuid`, `Timestamp` | поля й частковий унікальний індекс у `messages` | Узгоджено |
 
 ### 2.8.2 Узгодженість алгоритмів зі схемою та контрактом
 
@@ -1585,13 +1594,13 @@ classDiagram
 |---|---|---|---|
 | I-01 | Журнал аудиту на діаграмі контейнерів віднесено до PostgreSQL; фактично – колекція MongoDB `security_audit` | Документація ↔ дані | Виправлено рисунок 2.2 і таблицю контейнерів у 2.2 |
 | I-02 | [SRS-FUN-12](srs.md#srs-fun-12) вимагає ротації чатів з «хоча б одним повідомленням», алгоритм і задача Celery перевіряють наявність розподілу ключа в поточній епосі | Вимога ↔ логіка | Уточнено формулювання SRS-FUN-12: публікація ключа передує кожному повідомленню епохи, а підрахунок у PostgreSQL не потребує звернення до MongoDB |
-| I-03 | [SRS-FUN-20](srs.md#srs-fun-20) (ідемпотентність) не мала поля ні в контракті, ні в колекції | API ↔ дані ↔ логіка | Додано `client_message_id` у контракт, поле й частковий унікальний індекс у `messages`, крок 10 алгоритму 2.6.4.1 |
-| I-04 | Контракт фіксує шлях `/messages`, реалізація реєструє `/messages/` (переадресація 307) | API ↔ код | Канонічним визнано `/messages`; зміна декоратора маршруту – Розділ 3 |
-| I-05 | Відповідь 429 шлюзу Nginx має HTML-тіло замість `ErrorResponse` | API ↔ інфраструктура | Контракт вимагає JSON; `error_page 429` з JSON-тілом і заголовком `Retry-After` – Розділ 3 |
+| I-03 | [SRS-FUN-20](srs.md#srs-fun-20) (ідемпотентність) не мала поля ні в контракті, ні в колекції | API ↔ дані ↔ логіка | Реалізовано: `client_message_id` у контракті, поле й частковий унікальний індекс у `messages`, крок 10 алгоритму 2.6.4.1; повтор з іншим тілом отримує 409 `IDEMPOTENCY_KEY_REUSED` |
+| I-04 | Контракт фіксує шлях `/messages`, реалізація реєструє `/messages/` (переадресація 307) | API ↔ код | Реалізовано: канонічний шлях `/messages` (відповідь 201 без переадресації); шлях зі скісною рискою лишено без запису у схемі |
+| I-05 | Відповідь 429 шлюзу Nginx має HTML-тіло замість `ErrorResponse` | API ↔ інфраструктура | Реалізовано: `error_page 429` шлюзу повертає JSON-тіло `RATE_LIMITED` із заголовком `Retry-After`; застосунок теж додає `Retry-After` |
 | I-06 | `Epoch.member_count` і `Roster.members` рахують пристрої, ліміт 256 у [SRS-FUN-22](srs.md#srs-fun-22) – учасників | API ↔ вимога | Прийнято обмеження 256 для обох величин, оскільки зараз пристрій один на користувача; при підтримці кількох пристроїв ліміт масивів переглядається |
-| I-07 | Масив `attachments` обмежено в контракті (≤ 10), схема Pydantic не має межі | API ↔ код | Обмеження внесено до схеми даних (2.7.2); перевірка `max_length=10` – Розділ 3 |
+| I-07 | Масив `attachments` обмежено в контракті (≤ 10), схема Pydantic не має межі | API ↔ код | Реалізовано: `max_length=10` у схемах створення й редагування повідомлення (11 вкладень – 422) |
 | I-08 | Алгоритм 2.6.4.3 повторює публікацію після `EPOCH_CLOSED`, якого не було у відповідях першої версії контракту | Логіка ↔ API | Код `EPOCH_CLOSED` описано у відповіді 409 операції `publishSenderKey` |
-| I-09 | Типи ключів, підписів, хешу та ObjectId у сховищі (`text`, `varchar`) ширші за шаблони контракту | API ↔ дані | Типи і CHECK-обмеження приведено до розмірності контракту (2.8.1) |
+| I-09 | Типи ключів, підписів, хешу та ObjectId у сховищі (`text`, `varchar`) ширші за шаблони контракту | API ↔ дані | Реалізовано: типи й CHECK-обмеження приведено до розмірності контракту (2.8.1), крім `reply_to_message_id` |
 
 ### 2.8.4 Висновок про готовність до реалізації (Production Readiness Report)
 
@@ -1600,11 +1609,11 @@ classDiagram
 | Кожне поле контракту має відповідник у схемі даних з однаковим типом і розмірністю | Виконано (2.8.1) |
 | Кожна змінна алгоритмів відображається на атрибут сховища і поле контракту | Виконано (2.8.2) |
 | Кожен код помилки алгоритмів описано в контракті | Виконано |
-| Інваріанти E2EE (строга епоха, повнота грантів, один активний ключ, одна відкрита епоха) забезпечено обмеженнями СУБД або перевірками сервера | Виконано; `uq_open_epoch_per_chat` – To-Be |
+| Інваріанти E2EE (строга епоха, повнота грантів, один активний ключ, одна відкрита епоха) забезпечено обмеженнями СУБД або перевірками сервера | Виконано, зокрема `uq_open_epoch_per_chat` |
 | Цикли алгоритмів мають межі, зовнішні залежності – обробку відмов | Виконано (2.6.4) |
-| Розбіжності I-01 – I-09 | Усунено в документації; I-03 – I-05, I-07 і зміни 2.7.5 внесено до плану реалізації Розділу 3 |
+| Розбіжності I-01 – I-09 | Усунено; I-03 – I-05, I-07 і більшість змін 2.7.5 реалізовано в коді, решта (2.7.5, лишається To-Be) відкрита |
 
-**Висновок.** Критичних блокерів (showstoppers) не виявлено. Специфікації даних, API-контракт і алгоритми узгоджені між собою та з [SRS](srs.md) і [ADR-001](adr/0001-choice-of-technology.md) і готові до передачі в реалізацію (Розділ 3). Зміни з позначкою To-Be не змінюють контракт, а лише доводять поточний код до нього.
+**Висновок.** Критичних блокерів (showstoppers) не виявлено. Специфікації даних, API-контракт і алгоритми узгоджені між собою та з [SRS](srs.md) і [ADR-001](adr/0001-choice-of-technology.md) і готові до передачі в реалізацію (Розділ 3). Зміни з позначкою To-Be, що лишилися, не змінюють контракт, а лише доводять поточний код до нього.
 
 ## Висновки до розділу 2
 
@@ -1612,4 +1621,4 @@ classDiagram
 
 Архітектуру описано моделлю C4 на трьох рівнях і доповнено текстовим описом серверного ядра та контуром безпеки за OWASP Top 10: bcrypt (cost 12) для паролів, Argon2id для ключів пристрою, JWT у cookie HttpOnly з SameSite=Lax, перевірки доступу на рівні об’єктів, обмеження частоти і розміру запитів, журнал аудиту безпеки. Поведінку системи формалізовано діаграмою прецедентів у StarUML і специфікаціями UC-01, UC-02 з альтернативними і виключними потоками, а її реалізацію – трьома алгоритмами критичних вузлів, контрактом OpenAPI на 8 операцій з картою маршрутів і потоками даних, моделлю даних на 16 таблиць PostgreSQL і 2 колекції MongoDB.
 
-Інтеграційний аудит підтвердив узгодженість схеми даних, контракту, алгоритмів і сценаріїв; виявлені розбіжності усунено в документації, а зміни коду (позначки To-Be) внесено до плану Розділу 3. Розділ 2 є завершеною специфікацією, достатньою для початку реалізації.
+Інтеграційний аудит підтвердив узгодженість схеми даних, контракту, алгоритмів і сценаріїв; виявлені розбіжності усунено в документації, а більшість змін коду (позначки To-Be) уже внесено; решту описано в 2.7.5. Розділ 2 є завершеною специфікацією, достатньою для початку реалізації.
