@@ -135,7 +135,6 @@ async def ws_session_is_valid(redis, token: str) -> bool:
 
 async def get_ws_current_user(
     websocket: WebSocket,
-    db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
 ) -> User:
     token = websocket.cookies.get("access_token")
@@ -156,8 +155,11 @@ async def get_ws_current_user(
     except jwt.PyJWTError:
         raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION)
 
+    # A short-lived session: a request-scoped one would pin a pooled connection for as long as the
+    # socket stays open. The returned user is detached, which is fine, the socket only reads columns.
     try:
-        user = await get_user_by_id(db, uuid.UUID(user_id))
+        async with AsyncSessionLocal() as session:
+            user = await get_user_by_id(session, uuid.UUID(user_id))
     except ValueError:
         raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION)
 

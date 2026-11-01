@@ -19,11 +19,11 @@ from app.core.security import (
     create_refresh_token,
     delete_token_cookies,
     denylist_key,
-    get_password_hash,
+    get_password_hash_async,
     is_token_revoked,
     revocation_cutoff,
     set_token_cookie,
-    verify_password,
+    verify_password_async,
 )
 from app.domains.crypto.models import EpochReason
 from app.domains.crypto.services import epoch_service, identity_service
@@ -212,7 +212,7 @@ async def login(
 
     # Always pay for one bcrypt comparison, so an unknown username is not distinguishable from a
     # wrong password by response time.
-    password_ok = verify_password(
+    password_ok = await verify_password_async(
         user_in.password, user.hashed_password if user else DUMMY_PASSWORD_HASH
     )
 
@@ -457,7 +457,7 @@ async def reset_password(
     if not is_valid:
         raise AppException(400, "INVALID_OTP", "Invalid or expired code.")
 
-    user.hashed_password = get_password_hash(user_data.new_password)
+    user.hashed_password = await get_password_hash_async(user_data.new_password)
     user.public_key = user_data.new_public_key
     user.encrypted_private_key = user_data.new_encrypted_private_key
 
@@ -517,7 +517,7 @@ async def change_password(
         message="Too many failed attempts. Please wait and try again.",
     )
 
-    if not verify_password(user_data.old_password, current_user.hashed_password):
+    if not await verify_password_async(user_data.old_password, current_user.hashed_password):
         await audit.record(
             mongo_db,
             AuditEvent.PASSWORD_REAUTH_FAILED,
@@ -534,7 +534,7 @@ async def change_password(
         window_seconds=CHANGE_PASSWORD_WINDOW,
     )
 
-    current_user.hashed_password = get_password_hash(user_data.new_password)
+    current_user.hashed_password = await get_password_hash_async(user_data.new_password)
 
     # Keep the identity keypair — only its wrapping changes. Re-wrapping and the password update
     # share one transaction, so we can never end up with a new password and a bundle still

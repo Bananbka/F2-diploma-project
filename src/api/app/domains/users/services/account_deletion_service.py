@@ -44,7 +44,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AppException
-from app.core.security import get_password_hash
+from app.core.security import get_password_hash_async
 from app.domains.chats.models import (
     Chat,
     ChatFolder,
@@ -327,7 +327,7 @@ async def _delete_account_once(
     user.avatar_url = None
     # A valid hash of a secret nobody ever sees, rather than a sentinel string: the login path
     # runs bcrypt against whatever is stored, and a malformed hash would raise instead of failing.
-    user.hashed_password = get_password_hash(secrets.token_urlsafe(32))
+    user.hashed_password = await get_password_hash_async(secrets.token_urlsafe(32))
     # The legacy RSA *private* key is wrapped under the old password and useless to anyone else.
     # `public_key` stays: it is public, and old legacy-format history was sealed to it.
     user.encrypted_private_key = ""

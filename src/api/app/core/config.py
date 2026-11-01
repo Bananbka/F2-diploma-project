@@ -95,6 +95,13 @@ class Settings(BaseSettings):
     # parameters (user data) in them; opt in with SQL_ECHO=true when debugging queries.
     SQL_ECHO: bool = False
 
+    # Postgres connection pool. Sockets no longer pin a connection for their lifetime, so these
+    # bound concurrent queries, not concurrent users. pre_ping drops connections the server closed.
+    DB_POOL_SIZE: int = 10
+    DB_MAX_OVERFLOW: int = 20
+    DB_POOL_TIMEOUT: int = 30
+    DB_POOL_RECYCLE: int = 1800
+
     # EMAIL
     SMTP_HOST: str = "smtp.gmail.com"
     SMTP_PORT: int = 587

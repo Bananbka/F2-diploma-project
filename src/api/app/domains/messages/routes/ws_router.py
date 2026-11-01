@@ -9,7 +9,6 @@ from pydantic import ValidationError
 from redis.asyncio import Redis
 from redis.exceptions import ResponseError
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.exceptions import AppException
@@ -28,7 +27,7 @@ from app.domains.users.dependencies import (
 )
 from app.domains.users.models import User
 from app.infrastructure.mongo import get_mongo_db
-from app.infrastructure.postgres import get_db
+from app.infrastructure.postgres import AsyncSessionLocal
 from app.infrastructure.redis import get_events_redis, get_redis
 from app.infrastructure.services.event_publisher import (
     EventPublisher,
@@ -268,7 +267,7 @@ MAX_FRAME_BYTES = 64 * 1024
 
 
 async def _broadcast_presence(
-    db: AsyncSession, publisher: EventPublisher, user_id, online: bool
+    publisher: EventPublisher, user_id, online: bool
 ) -> None:
     """Tell this user's conversation partners that they came online or went offline.
 
@@ -278,20 +277,23 @@ async def _broadcast_presence(
     """
     my_chats = select(ChatParticipant.chat_id).where(ChatParticipant.user_id == user_id)
 
-    peer_ids = (
-        (
-            await db.execute(
-                select(ChatParticipant.user_id)
-                .where(
-                    ChatParticipant.chat_id.in_(my_chats),
-                    ChatParticipant.user_id != user_id,
+    # Own short session, closed before the publish: a socket must not hold a pooled connection
+    # while it waits on Redis.
+    async with AsyncSessionLocal() as db:
+        peer_ids = (
+            (
+                await db.execute(
+                    select(ChatParticipant.user_id)
+                    .where(
+                        ChatParticipant.chat_id.in_(my_chats),
+                        ChatParticipant.user_id != user_id,
+                    )
+                    .distinct()
                 )
-                .distinct()
             )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    )
 
     if not peer_ids:
         return
@@ -306,7 +308,7 @@ async def _broadcast_presence(
     await publisher.publish_ephemeral(envelope, peer_ids)
 
 
-async def _may_act_on(db: AsyncSession, user_id, chat_id, websocket: WebSocket) -> bool:
+async def _may_act_on(user_id, chat_id, websocket: WebSocket) -> bool:
     """Authorise a socket event against Postgres before it touches anything.
 
     The socket used to take `chat_id` straight from the frame. Nothing checked membership, so any
@@ -317,7 +319,10 @@ async def _may_act_on(db: AsyncSession, user_id, chat_id, websocket: WebSocket) 
     Access control lives in Postgres and content lives in Mongo, so the Postgres check has to come
     first on every path that reaches Mongo. This is the socket's half of `get_chat_or_403`.
     """
-    if await messages_service.is_user_in_chat(db, user_id, chat_id) is not None:
+    async with AsyncSessionLocal() as db:
+        is_member = await messages_service.is_user_in_chat(db, user_id, chat_id) is not None
+
+    if is_member:
         return True
 
     await websocket.send_text(
@@ -337,7 +342,6 @@ async def _may_act_on(db: AsyncSession, user_id, chat_id, websocket: WebSocket) 
 async def websocket_endpoint(
     websocket: WebSocket,
     user: User = Depends(get_ws_current_user),
-    db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
     publisher: EventPublisher = Depends(get_event_publisher),
     events_redis: Redis = Depends(get_events_redis),
@@ -372,7 +376,7 @@ async def websocket_endpoint(
         await redis.set(f"status:{user.id}", "1", ex=PRESENCE_TTL_SECONDS)
 
         if connection_count == 1:
-            await _broadcast_presence(db, publisher, user.id, online=True)
+            await _broadcast_presence(publisher, user.id, online=True)
 
         pubsub = await open_subscription(events_redis, channel_name)
 
@@ -455,14 +459,15 @@ async def websocket_endpoint(
                     if not ws_event.chat_id:
                         continue
 
-                    if not await _may_act_on(db, user.id, ws_event.chat_id, websocket):
+                    if not await _may_act_on(user.id, ws_event.chat_id, websocket):
                         continue
 
                     stmt = select(ChatParticipant.user_id).where(
                         ChatParticipant.chat_id == ws_event.chat_id
                     )
-                    res = await db.execute(stmt)
-                    participant_ids = res.scalars().all()
+                    async with AsyncSessionLocal() as db:
+                        res = await db.execute(stmt)
+                        participant_ids = res.scalars().all()
 
                     await publisher.publish_ephemeral(
                         ws_event, [p_id for p_id in participant_ids if p_id != user.id]
@@ -488,16 +493,41 @@ async def websocket_endpoint(
                     last_read_id = str(messages_service.objectify_id(last_read_id))
                     ws_event.payload["last_read_message_id"] = last_read_id
 
-                    if not await _may_act_on(db, user.id, ws_event.chat_id, websocket):
+                    if not await _may_act_on(user.id, ws_event.chat_id, websocket):
                         continue
 
-                    advanced = await update_participant_last_read(
-                        db, ws_event.chat_id, user.id, last_read_id
-                    )
+                    # All Postgres work for this frame happens in one short session that is closed
+                    # before anything is published.
+                    participant_ids = []
+                    async with AsyncSessionLocal() as db:
+                        advanced = await update_participant_last_read(
+                            db, ws_event.chat_id, user.id, last_read_id
+                        )
+                        cleared_unread = await clear_marked_unread(
+                            db, ws_event.chat_id, user.id
+                        )
+
+                        # Still called for its (deprecated) side effect on the legacy shared
+                        # `is_read` flag — see the note on `mark_messages_as_read`. Its modified
+                        # count must not gate the broadcast below: it is scoped to other members'
+                        # messages, so a reader catching up on only their own sends, or on a range
+                        # another reader already flipped, would otherwise never announce their own
+                        # advancing mark.
+                        await messages_service.mark_messages_as_read(
+                            db, mongo_db, ws_event.chat_id, user.id, last_read_id
+                        )
+
+                        if advanced:
+                            res = await db.execute(
+                                select(ChatParticipant.user_id).where(
+                                    ChatParticipant.chat_id == ws_event.chat_id
+                                )
+                            )
+                            participant_ids = res.scalars().all()
 
                     # Reading resets the manual "mark as unread" flag even when the position did
                     # not move; tell the user's other devices so their lists drop the dot too.
-                    if await clear_marked_unread(db, ws_event.chat_id, user.id):
+                    if cleared_unread:
                         await publisher.publish_durable(
                             WSMessageEnvelope(
                                 event_type=WSEventType.CHAT_UPDATED,
@@ -507,22 +537,7 @@ async def websocket_endpoint(
                             [user.id],
                         )
 
-                    # Still called for its (deprecated) side effect on the legacy shared `is_read`
-                    # flag — see the note on `mark_messages_as_read`. Its modified count must not
-                    # gate the broadcast below: it is scoped to other members' messages, so a
-                    # reader catching up on only their own sends, or on a range another reader
-                    # already flipped, would otherwise never announce their own advancing mark.
-                    await messages_service.mark_messages_as_read(
-                        db, mongo_db, ws_event.chat_id, user.id, last_read_id
-                    )
-
                     if advanced:
-                        stmt = select(ChatParticipant.user_id).where(
-                            ChatParticipant.chat_id == ws_event.chat_id
-                        )
-                        res = await db.execute(stmt)
-                        participant_ids = res.scalars().all()
-
                         # Ephemeral: the read position is recovered over HTTP, so a missed
                         # receipt is not worth a stream entry.
                         await publisher.publish_ephemeral(ws_event, participant_ids)
@@ -587,4 +602,4 @@ async def websocket_endpoint(
                 # user online, and then have its count thrown away. A key sitting at 0 costs
                 # nothing, expires on its own, and increments back to 1 correctly.
                 await redis.set(f"status:{user.id}", "0")
-                await _broadcast_presence(db, publisher, user.id, online=False)
+                await _broadcast_presence(publisher, user.id, online=False)

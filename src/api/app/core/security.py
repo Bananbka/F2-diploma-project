@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import time
 from datetime import datetime, timedelta, timezone
@@ -20,6 +21,16 @@ def get_password_hash(password: str) -> str:
     salt = bcrypt.gensalt()
     hashed_bytes = bcrypt.hashpw(password_bytes, salt)
     return hashed_bytes.decode("utf-8")
+
+
+# bcrypt is CPU-bound (~100ms+); called directly from a handler it stalls every other request on
+# the event loop. Async callers use these, which run it on a worker thread.
+async def verify_password_async(plain_password: str, hashed_password: str) -> bool:
+    return await asyncio.to_thread(verify_password, plain_password, hashed_password)
+
+
+async def get_password_hash_async(password: str) -> str:
+    return await asyncio.to_thread(get_password_hash, password)
 
 
 def denylist_key(token: str) -> str:

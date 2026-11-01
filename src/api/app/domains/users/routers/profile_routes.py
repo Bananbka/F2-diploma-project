@@ -11,7 +11,7 @@ from app.core.config import settings
 from app.core.exceptions import AppException
 from app.core.rate_limit import client_identifier, enforce_rate_limit, reset_rate_limit
 from app.core.responses import SuccessResponse
-from app.core.security import delete_token_cookies, revocation_cutoff, verify_password
+from app.core.security import delete_token_cookies, revocation_cutoff, verify_password_async
 from app.domains.users.dependencies import get_current_user
 from app.domains.users.models import User
 from app.domains.users.schemas.profile_schemas import ProfileRequestSchema
@@ -137,7 +137,7 @@ async def delete_me(
         message="Too many failed attempts. Please wait and try again.",
     )
 
-    if not verify_password(data.password, user.hashed_password):
+    if not await verify_password_async(data.password, user.hashed_password):
         await audit.record(
             mongo_db,
             AuditEvent.PASSWORD_REAUTH_FAILED,
