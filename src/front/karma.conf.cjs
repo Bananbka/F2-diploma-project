@@ -112,6 +112,13 @@ module.exports = function (config) {
                 flags: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
             },
         },
+        // Generous limits for slow shared CI runners: a long synchronous spec (or a busy runner) can
+        // starve the browser's socket ping, and the default 2 s ping timeout reads as a disconnect.
+        browserNoActivityTimeout: 120000,
+        browserDisconnectTimeout: 30000,
+        browserDisconnectTolerance: 3,
+        captureTimeout: 180000,
+        pingTimeout: 60000,
         restartOnFileChange: true,
     });
 };

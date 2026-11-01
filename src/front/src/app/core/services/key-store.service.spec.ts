@@ -1,11 +1,12 @@
 import { HttpErrorResponse } from '@angular/common/http';
 import { Injector } from '@angular/core';
 import { fakeAsync, TestBed, tick } from '@angular/core/testing';
+import { argon2id } from '@noble/hashes/argon2.js';
 import { of, throwError } from 'rxjs';
 import { v4 as uuidv4 } from 'uuid';
 
 import { computeMemberSetHash, signDistribution, wrapChainKey } from '../crypto/grants';
-import { generateIdentity, IdentityBundle, wrapPrivateBundle } from '../crypto/identity';
+import { generateIdentity, IdentityBundle, KdfParams, sealPrivateBundle } from '../crypto/identity';
 import { b64uDecode, b64uEncode } from '../crypto/primitives';
 import { generateChainKey } from '../crypto/ratchet';
 import {
@@ -104,8 +105,27 @@ async function until(condition: () => Promise<boolean>, timeoutMs = 3000): Promi
     }
 }
 
+/** Seals a bundle under {@link PASSWORD} with test-only Argon2id parameters (8 KiB, 1 pass, 1 lane). */
+async function sealCheaply(bundle: IdentityBundle): ReturnType<typeof sealPrivateBundle> {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const kdfParams: KdfParams = {
+        kdf: 'argon2id',
+        m: 8,
+        t: 1,
+        p: 1,
+        salt: b64uEncode(salt),
+        nonce: '',
+    };
+    const kek = argon2id(new TextEncoder().encode(PASSWORD), salt, { t: 1, m: 8, p: 1, dkLen: 32 });
+    return sealPrivateBundle(bundle, kek, kdfParams);
+}
+
 describe('KeyStoreService', () => {
-    // Each unlock runs a real 64 MiB Argon2id derivation; a few per test outgrow the 5 s default.
+    // The bundles below are sealed with deliberately tiny Argon2id parameters. `unwrapPrivateBundle`
+    // derives from whatever parameters the bundle carries, so this exercises the same unlock path while
+    // keeping each unlock to milliseconds. At the production 64 MiB x 3 passes, each unlock blocks the
+    // main thread for ~2.7 s, which on a slow CI runner starves Karma's socket ping and disconnects it.
+    // The production parameters are covered by the crypto specs and `npm run interop`.
     const defaultTimeout = jasmine.DEFAULT_TIMEOUT_INTERVAL;
     beforeAll(() => (jasmine.DEFAULT_TIMEOUT_INTERVAL = 60000));
     afterAll(() => (jasmine.DEFAULT_TIMEOUT_INTERVAL = defaultTimeout));
@@ -116,7 +136,7 @@ describe('KeyStoreService', () => {
     let dbName: string;
     const sealedBundles = new Map<
         boolean,
-        { bundle: IdentityBundle; wrapped?: Awaited<ReturnType<typeof wrapPrivateBundle>> }
+        { bundle: IdentityBundle; wrapped?: Awaited<ReturnType<typeof sealPrivateBundle>> }
     >();
 
     beforeEach(() => {
@@ -154,9 +174,9 @@ describe('KeyStoreService', () => {
         // Sealing costs a full Argon2id run; the bundle is immutable, so seal each shape once.
         const cached = sealedBundles.get(withPrekey) ?? {
             bundle: generateIdentity(USER, DEVICE, withPrekey),
-            wrapped: undefined as Awaited<ReturnType<typeof wrapPrivateBundle>> | undefined,
+            wrapped: undefined as Awaited<ReturnType<typeof sealPrivateBundle>> | undefined,
         };
-        cached.wrapped ??= await wrapPrivateBundle(cached.bundle, PASSWORD);
+        cached.wrapped ??= await sealCheaply(cached.bundle);
         sealedBundles.set(withPrekey, cached);
         const { bundle, wrapped } = cached as { bundle: IdentityBundle; wrapped: NonNullable<typeof cached.wrapped> };
 

@@ -35,7 +35,11 @@ jobs:
           --health-timeout 5s
           --health-retries 10
       mongodb:
-        image: mongo:8.0
+        # Pinned to 7.0: MongoDB 8.0.21-8.0.29 refuse to start on Linux kernels 6.19-7.0.13 and the
+        # runner kernel is in that range (SERVER-121912, fixed via SERVER-125742). 7.0 is unaffected on
+        # every kernel. 8.0.30+ only lifts the check for kernel 7.0.14+, and Ubuntu-patched kernels are
+        # still rejected until 8.0.37 (SERVER-131779), which is not on Docker Hub yet (latest 8.0.34).
+        image: mongo:7.0.45
         env:
           MONGO_INITDB_ROOT_USERNAME: ci
           MONGO_INITDB_ROOT_PASSWORD: ci-mongo-password
