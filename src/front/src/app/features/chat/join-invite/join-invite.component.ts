@@ -8,6 +8,7 @@ import { InviteLinkPreview } from '../../../core/models/chat.model';
 import { ChatApiService } from '../../../core/services/chat-api.service';
 import { ChatStoreService } from '../../../core/services/chat-store.service';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
+import { avatarKindFor } from '../../../shared/utils/display';
 
 /**
  * The `/join/:token` deep link a chat-info "Copy link" button constructs, and what a clicked
@@ -32,6 +33,7 @@ export class JoinInviteComponent {
     readonly loading = signal(true);
     readonly joining = signal(false);
     readonly error = signal<string | null>(null);
+    readonly avatarKindFor = avatarKindFor;
     readonly preview = signal<InviteLinkPreview | null>(null);
 
     /**

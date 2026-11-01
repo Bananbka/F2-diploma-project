@@ -3,3 +3,15 @@
 <app-context-menu-host />
 <app-confirm-dialog-host />
 <app-sticker-pack-viewer-host />
+@if (settings.isOpen()) {
+    @if (settingsComponent(); as component) {
+        <ng-container *ngComponentOutlet="component" />
+    } @else {
+        <p
+            class="settings-loading"
+            role="status"
+        >
+            Loading settings…
+        </p>
+    }
+}

@@ -51,8 +51,8 @@
 }
 
 .hash {
-    width: 0.875rem;
-    height: 0.875rem;
+    width: calc(var(--avatar-size) * 0.45);
+    height: calc(var(--avatar-size) * 0.45);
     opacity: 0.9;
 }
 

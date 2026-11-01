@@ -1,41 +1,26 @@
-import { DatePipe } from '@angular/common';
-import { HttpErrorResponse } from '@angular/common/http';
-import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
-import { AbstractControl, FormBuilder, FormControl, ReactiveFormsModule, Validators } from '@angular/forms';
-import { Router } from '@angular/router';
-import {
-    AlertTriangle,
-    ArrowLeft,
-    Camera,
-    KeyRound,
-    LucideAngularModule,
-    RefreshCw,
-    Sticker,
-    UserX,
-} from 'lucide-angular';
+import { ChangeDetectionStrategy, Component, DestroyRef, inject, signal } from '@angular/core';
+import { AbstractControl, FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
+import { Camera, LucideAngularModule, Trash2 } from 'lucide-angular';
 import { firstValueFrom } from 'rxjs';
 
-import { CryptoApiService } from '../../../core/services/crypto-api.service';
-import { KeyStoreService } from '../../../core/services/key-store.service';
 import { ProfileApiService, ProfileUpdateRequest } from '../../../core/services/profile-api.service';
 import { SessionService } from '../../../core/services/session.service';
 import { applyServerErrors, errorTextFor } from '../../../shared/forms/server-errors';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
+import { AvatarCropperComponent } from '../../../shared/ui/avatar-cropper/avatar-cropper.component';
+import { SettingsService } from '../settings.service';
 
-/** One published device, plus whether it is the one being used right now. */
-interface DeviceRow {
-    device_id: string;
-    display_name: string;
-    version: number;
-    created_at: string;
-    isThis: boolean;
-    /** Owner-only field; used to show when this device's signed prekey was last rotated. */
-    signed_prekey_created_at: string | null;
-}
-
+/**
+ * The Profile tab: name, username, bio and avatar, plus the account's email and phone (read-only —
+ * there is no endpoint to change either).
+ *
+ * Picking a photo opens the cropper rather than uploading straight away, so the user decides how it
+ * sits inside the round avatar. The cropped result goes through the same upload path as before, and
+ * like before it only becomes the avatar once the profile is saved.
+ */
 @Component({
     selector: 'app-profile',
-    imports: [ReactiveFormsModule, LucideAngularModule, AvatarComponent, DatePipe],
+    imports: [ReactiveFormsModule, LucideAngularModule, AvatarComponent, AvatarCropperComponent],
     templateUrl: './profile.component.html',
     styleUrl: './profile.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
@@ -43,13 +28,7 @@ interface DeviceRow {
 export class ProfileComponent {
     private readonly profileApi = inject(ProfileApiService);
     private readonly session = inject(SessionService);
-    private readonly router = inject(Router);
-    private readonly cryptoApi = inject(CryptoApiService);
-    private readonly keyStore = inject(KeyStoreService);
-
-    constructor() {
-        void this.loadDevices();
-    }
+    private readonly settings = inject(SettingsService);
     private readonly fb = inject(FormBuilder);
 
     readonly user = this.session.user;
@@ -58,13 +37,8 @@ export class ProfileComponent {
     readonly saved = signal(false);
     readonly error = signal<string | null>(null);
     readonly avatarUrl = signal<string | null>(this.session.user()?.avatar_url ?? null);
-
-    readonly devices = signal<DeviceRow[]>([]);
-    readonly devicesLoading = signal(true);
-    readonly revoking = signal(false);
-    readonly deviceError = signal<string | null>(null);
-    /** The device id whose revoke button is armed, if any. */
-    readonly confirmingDevice = signal<string | null>(null);
+    /** The picked file awaiting the cropper; null whenever the cropper is closed. */
+    readonly cropFile = signal<File | null>(null);
 
     readonly form = this.fb.nonNullable.group({
         fullName: [this.session.user()?.full_name ?? '', [Validators.required, Validators.maxLength(30)]],
@@ -75,24 +49,21 @@ export class ProfileComponent {
         bio: [this.session.user()?.bio ?? ''],
     });
 
-    readonly arrowLeftIcon = ArrowLeft;
     readonly cameraIcon = Camera;
-    readonly keyIcon = KeyRound;
-    readonly rotateIcon = RefreshCw;
-    readonly stickerIcon = Sticker;
-    readonly deleteIcon = UserX;
-    readonly warnIcon = AlertTriangle;
+    readonly trashIcon = Trash2;
 
-    // ── Account deletion ────────────────────────────────────────────────────────────────────
+    /** A cropped photo whose upload failed, kept so retrying does not mean cropping it again. */
+    readonly failedUpload = signal<File | null>(null);
 
-    readonly deleteOpen = signal(false);
-    readonly deleting = signal(false);
-    readonly deleteError = signal<string | null>(null);
-    readonly deletePassword = new FormControl('', { nonNullable: true, validators: [Validators.required] });
+    constructor() {
+        // Closing the dialog or switching tab asks first when this returns true.
+        const unregister = this.settings.registerDirtyCheck(() => this.hasUnsavedChanges());
+        inject(DestroyRef).onDestroy(unregister);
+    }
 
-    readonly rotatingPrekey = signal(false);
-    readonly prekeyRotated = signal(false);
-    readonly prekeyError = signal<string | null>(null);
+    hasUnsavedChanges(): boolean {
+        return this.form.dirty || this.avatarUrl() !== (this.session.user()?.avatar_url ?? null);
+    }
 
     messageFor(name: keyof typeof this.form.controls): string | null {
         return errorTextFor(this.form.controls[name], {
@@ -107,14 +78,38 @@ export class ProfileComponent {
         return control.touched && control.invalid;
     }
 
-    async onAvatarPicked(event: Event): Promise<void> {
-        const file = (event.target as HTMLInputElement).files?.[0];
+    onAvatarPicked(event: Event): void {
+        const input = event.target as HTMLInputElement;
+        const file = input.files?.[0];
+        // Clear it so choosing the same file again after a cancel still fires `change`.
+        input.value = '';
         if (!file) {
             return;
         }
+        this.error.set(null);
+        this.cropFile.set(file);
+    }
 
+    cancelCrop(): void {
+        this.cropFile.set(null);
+    }
+
+    async onCropApplied(file: File): Promise<void> {
+        this.cropFile.set(null);
+        await this.upload(file);
+    }
+
+    async retryUpload(): Promise<void> {
+        const file = this.failedUpload();
+        if (file) {
+            await this.upload(file);
+        }
+    }
+
+    private async upload(file: File): Promise<void> {
         this.uploading.set(true);
         this.error.set(null);
+        this.failedUpload.set(null);
 
         try {
             // The avatar bucket is public-read, so the returned URL is directly usable. Attachments
@@ -122,10 +117,18 @@ export class ProfileComponent {
             const uploaded = await firstValueFrom(this.profileApi.upload(file, 'avatar'));
             this.avatarUrl.set(uploaded.url);
         } catch {
+            this.failedUpload.set(file);
             this.error.set('Could not upload that image.');
         } finally {
             this.uploading.set(false);
         }
+    }
+
+    /** Takes effect on Save (`avatar_url: null` clears it server-side), like a new photo does. */
+    removeAvatar(): void {
+        this.failedUpload.set(null);
+        this.error.set(null);
+        this.avatarUrl.set(null);
     }
 
     async save(): Promise<void> {
@@ -146,171 +149,24 @@ export class ProfileComponent {
         if (username !== this.user()?.username) {
             payload.username = username;
         }
-        if (bio) {
-            payload.bio = bio;
+        // An emptied bio is sent as null, which clears it; omitting the key would leave the old one.
+        if (bio !== (this.user()?.bio ?? '')) {
+            payload.bio = bio.trim() ? bio : null;
         }
-        if (this.avatarUrl()) {
-            payload.avatar_url = this.avatarUrl()!;
+        if (this.avatarUrl() !== (this.user()?.avatar_url ?? null)) {
+            payload.avatar_url = this.avatarUrl();
         }
 
         try {
             const updated = await firstValueFrom(this.profileApi.updateProfile(payload));
             // The response omits avatar_url, so keep the locally known value rather than blanking it.
-            this.session.user.set({ ...updated, avatar_url: this.avatarUrl() ?? updated.avatar_url ?? null });
+            this.session.user.set({ ...updated, avatar_url: this.avatarUrl() });
+            this.form.markAsPristine();
             this.saved.set(true);
         } catch (error) {
             this.error.set(applyServerErrors(this.form, error) ?? 'Could not save your profile.');
         } finally {
             this.saving.set(false);
-        }
-    }
-
-    async close(): Promise<void> {
-        await this.router.navigate(['/chats']);
-    }
-
-    async goToPassword(): Promise<void> {
-        await this.router.navigate(['/settings/password']);
-    }
-
-    async goToStickers(): Promise<void> {
-        await this.router.navigate(['/stickers/manage']);
-    }
-
-    openDelete(): void {
-        this.deletePassword.reset('');
-        this.deleteError.set(null);
-        this.deleteOpen.set(true);
-    }
-
-    closeDelete(): void {
-        // Not dismissible mid-request: the account may already be gone by the time it answers.
-        if (this.deleting()) {
-            return;
-        }
-        this.deletePassword.reset('');
-        this.deleteOpen.set(false);
-    }
-
-    /**
-     * Delete the account for good.
-     *
-     * Irreversible, so the dialog states the consequences first and the server demands the password
-     * again. On success the session has already torn down local state; all that is left is to leave
-     * the app. Any failure keeps the dialog open with the account untouched.
-     */
-    async confirmDelete(): Promise<void> {
-        if (this.deletePassword.invalid || this.deleting()) {
-            this.deletePassword.markAsTouched();
-            return;
-        }
-
-        this.deleting.set(true);
-        this.deleteError.set(null);
-
-        try {
-            await this.session.deleteAccount(this.deletePassword.value);
-        } catch (error) {
-            this.deleting.set(false);
-            this.deleteError.set(this.deleteErrorText(error));
-            return;
-        }
-
-        this.deleting.set(false);
-        this.deleteOpen.set(false);
-        await this.router.navigate(['/login']);
-    }
-
-    private deleteErrorText(error: unknown): string {
-        if (error instanceof HttpErrorResponse) {
-            if (error.status === 401) {
-                return 'That is not your password. Your account has not been deleted.';
-            }
-            if (error.status === 429) {
-                return 'Too many attempts. Wait a few minutes and try again. Your account has not been deleted.';
-            }
-        }
-        return 'Could not delete your account. Nothing was changed — please try again.';
-    }
-
-    private async loadDevices(): Promise<void> {
-        this.devicesLoading.set(true);
-        try {
-            const identities = await firstValueFrom(this.cryptoApi.getOwnIdentities());
-            const thisDevice = this.keyStore.deviceId;
-
-            this.devices.set(
-                identities.map((identity) => ({
-                    device_id: identity.device_id,
-                    display_name: identity.display_name ?? '',
-                    version: identity.version,
-                    created_at: identity.created_at,
-                    isThis: identity.device_id === thisDevice,
-                    signed_prekey_created_at: identity.signed_prekey_created_at,
-                }))
-            );
-        } catch {
-            this.deviceError.set('Could not load your devices.');
-        } finally {
-            this.devicesLoading.set(false);
-        }
-    }
-
-    /**
-     * Revoke a device this account no longer controls, two-step.
-     *
-     * Every encrypted chat re-keys as part of the same request, so nothing sent afterwards is
-     * readable with the keys that device holds. What it already received stays readable to it —
-     * that is inherent, and the copy on screen says so rather than implying a remote wipe.
-     */
-    async revokeDevice(deviceId: string): Promise<void> {
-        if (this.confirmingDevice() !== deviceId) {
-            this.confirmingDevice.set(deviceId);
-            return;
-        }
-
-        this.confirmingDevice.set(null);
-        this.revoking.set(true);
-        this.deviceError.set(null);
-
-        try {
-            await firstValueFrom(this.cryptoApi.revokeDevice(deviceId));
-            await this.loadDevices();
-        } catch {
-            this.deviceError.set('Could not revoke that device.');
-        } finally {
-            this.revoking.set(false);
-        }
-    }
-
-    cancelRevoke(): void {
-        this.confirmingDevice.set(null);
-    }
-
-    /**
-     * Rotate this device's medium-term signed prekey.
-     *
-     * Only offered for "This device": rotation re-seals the private bundle with the KEK held in
-     * memory from unlock, which only the device that unlocked it has — there is no way to rotate a
-     * prekey for a device this session did not unlock.
-     */
-    async rotatePrekey(): Promise<void> {
-        if (this.rotatingPrekey()) {
-            return;
-        }
-
-        this.rotatingPrekey.set(true);
-        this.prekeyError.set(null);
-        this.prekeyRotated.set(false);
-
-        try {
-            await this.keyStore.rotatePrekey();
-            this.prekeyRotated.set(true);
-            await this.loadDevices();
-        } catch {
-            this.prekeyError.set('Could not rotate the signed prekey. Please try again shortly.');
-        } finally {
-            this.rotatingPrekey.set(false);
         }
     }
 }

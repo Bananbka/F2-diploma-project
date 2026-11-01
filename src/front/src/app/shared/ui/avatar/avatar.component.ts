@@ -1,9 +1,12 @@
 import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
-import { Hash, LucideAngularModule, UserX } from 'lucide-angular';
+import { Hash, LucideAngularModule, Users, UserX } from 'lucide-angular';
 
-import { avatarColor, initials } from '../../utils/display';
+import { avatarColor, groupInitials, initials } from '../../utils/display';
 
 export type AvatarSize = 'xs' | 'sm' | 'md' | 'lg';
+
+/** What the avatar stands for. Groups and channels take their monogram from the title's words. */
+export type AvatarKind = 'person' | 'group' | 'channel';
 
 @Component({
     selector: 'app-avatar',
@@ -24,10 +27,14 @@ export class AvatarComponent {
     /** A deleted account: a neutral grey face with no initials, never a stale photo or colour. */
     readonly deleted = input(false);
 
-    readonly monogram = computed(() => initials(this.name()));
+    /** People and groups share the same coloured circle; only how the letters are chosen differs. */
+    readonly kind = input<AvatarKind>('person');
+
+    /** Letters (or a lone emoji) for the circle. Empty means "no letters": the kind's icon is shown. */
+    readonly monogram = computed(() => (this.kind() === 'person' ? initials(this.name()) : groupInitials(this.name())));
     readonly color = computed(() => avatarColor(this.seed() || this.name()));
-    readonly isChannel = computed(() => this.name().startsWith('#'));
 
     readonly hashIcon = Hash;
+    readonly usersIcon = Users;
     readonly deletedIcon = UserX;
 }

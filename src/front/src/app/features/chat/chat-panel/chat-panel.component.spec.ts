@@ -308,6 +308,26 @@ describe('ChatPanelComponent', () => {
         });
     });
 
+    describe('escape handled inside the panel', () => {
+        it('does not close the slide-over when a view already used Escape', async () => {
+            (window.matchMedia as jasmine.Spy).and.returnValue({
+                matches: true,
+                addEventListener: () => {},
+                removeEventListener: () => {},
+            });
+            store.showProfile();
+            await render();
+
+            const handled = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+            handled.preventDefault();
+            document.dispatchEvent(handled);
+            expect(store.open()).toBeTrue();
+
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+            expect(store.open()).toBeFalse();
+        });
+    });
+
     describe('resizing', () => {
         it('has a keyboard-accessible resize separator on the left edge when docked', async () => {
             store.showProfile();
@@ -325,6 +345,53 @@ describe('ChatPanelComponent', () => {
             expect(handle.getAttribute('aria-valuenow')).toBe('368');
             expect(localStorage.getItem('panel-width:chat-panel')).toBe('368');
         });
+
+        const VIEWS: { name: string; show: () => void }[] = [
+            { name: 'profile', show: () => store.showProfile() },
+            { name: 'emoji', show: () => store.showPicker('emoji') },
+            { name: 'stickers', show: () => store.showPicker('stickers') },
+        ];
+
+        for (const view of VIEWS) {
+            it(`keeps the separator present, on top and keyboard-resizable in the ${view.name} view`, async () => {
+                view.show();
+                const host = await render();
+                (fixture.nativeElement as HTMLElement).style.height = '600px'; // a realistic column height
+
+                const handles = host.querySelectorAll<HTMLElement>('[role="separator"]');
+                expect(handles.length).toBe(1);
+                const handle = handles[0];
+
+                // Nothing from the view's content may sit over the grab strip, or a drag never starts.
+                const rect = handle.getBoundingClientRect();
+                const misses: string[] = [];
+                for (const y of [4, 40, 120, 300, 500]) {
+                    // Only points inside the visible viewport can be hit-tested.
+                    if (rect.top + y >= window.innerHeight || rect.height <= y) {
+                        continue;
+                    }
+                    const probe = document.elementFromPoint(rect.left + rect.width / 2, rect.top + y);
+                    if (probe !== handle) {
+                        misses.push(`${y}:${probe?.tagName}.${probe?.className}`);
+                    }
+                }
+                expect(misses).toEqual([]);
+                // The host follows the separator in this view, both ways: nothing in the view's content
+                // may hold the panel wider than the separator asks.
+                const rp = host.querySelector<HTMLElement>('app-resizable-panel')!;
+                const widths: number[] = [];
+                for (const key of ['Home', 'End', 'Home']) {
+                    handle.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+                    fixture.detectChanges();
+                    widths.push(rp.offsetWidth);
+                }
+                expect(widths).toEqual([288, 576, 288]);
+
+                handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+                fixture.detectChanges();
+                expect(handle.getAttribute('aria-valuenow')).toBe('304');
+            });
+        }
 
         it('restores the stored width', async () => {
             localStorage.setItem('panel-width:chat-panel', '500');

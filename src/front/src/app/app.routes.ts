@@ -1,6 +1,7 @@
 import { Routes } from '@angular/router';
 
 import { authGuard, guestGuard, unlockGuard } from './core/guards/session.guards';
+import { settingsDeepLinkGuard } from './features/settings/settings.guard';
 
 export const routes: Routes = [
     {
@@ -39,29 +40,22 @@ export const routes: Routes = [
         loadComponent: () => import('./features/auth/unlock/unlock.component').then((m) => m.UnlockComponent),
     },
     {
-        path: 'settings/profile',
+        // Settings is a dialog, not a page. These routes exist so the old links and bookmarks keep
+        // working: the guard opens the dialog and either cancels the navigation or sends the user to
+        // the chat shell for it to sit on. Nested under a pathless parent so `authGuard` runs first —
+        // sibling guards on one route are evaluated together, and the dialog must not open for a
+        // visitor who is about to be bounced to the login page.
+        path: '',
         canActivate: [authGuard],
-        loadComponent: () => import('./features/settings/profile/profile.component').then((m) => m.ProfileComponent),
-    },
-    {
-        path: 'settings/password',
-        canActivate: [authGuard],
-        loadComponent: () =>
-            import('./features/settings/change-password/change-password.component').then(
-                (m) => m.ChangePasswordComponent
-            ),
+        children: [
+            { path: 'settings', canActivate: [settingsDeepLinkGuard], data: { tab: 'profile' }, children: [] },
+            { path: 'settings/:tab', canActivate: [settingsDeepLinkGuard], children: [] },
+            { path: 'stickers/manage', canActivate: [settingsDeepLinkGuard], data: { tab: 'stickers' }, children: [] },
+        ],
     },
     // The full-screen views come before the shell route. The shell matches on an empty path, so
     // leaving them below it would rely on the router backtracking out of a parent whose children all
     // failed — which works, but is a subtle thing to depend on.
-    {
-        path: 'stickers/manage',
-        canActivate: [authGuard],
-        loadComponent: () =>
-            import('./features/chat/stickers/sticker-pack-manager/sticker-pack-manager.component').then(
-                (m) => m.StickerPackManagerComponent
-            ),
-    },
     {
         path: 'stickers/discover',
         canActivate: [authGuard],

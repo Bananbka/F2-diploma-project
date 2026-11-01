@@ -2,3 +2,18 @@
     display: block;
     height: 100%;
 }
+
+.settings-loading {
+    position: fixed;
+    bottom: 1.5rem;
+    left: 50%;
+    z-index: 60;
+    margin: 0;
+    padding: 0.5rem 1rem;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    color: var(--muted-foreground);
+    font-size: 0.8125rem;
+    transform: translateX(-50%);
+}

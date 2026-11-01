@@ -366,11 +366,17 @@
 }
 
 /* The full-screen, single-column secondary views: create group, create channel, chat info. */
-@mixin screen-page {
-    display: flex;
-    flex-direction: column;
-    min-height: 100vh;
-    background: var(--background);
+/* `$embedded` drops the full-viewport frame so the same field/hint/section styles can be used for a
+   panel inside a dialog (the settings tabs) rather than a page of its own. */
+@mixin screen-page($embedded: false) {
+    @if $embedded {
+        display: block;
+    } @else {
+        display: flex;
+        flex-direction: column;
+        min-height: 100vh;
+        background: var(--background);
+    }
 
     .head {
         @include screen-header;

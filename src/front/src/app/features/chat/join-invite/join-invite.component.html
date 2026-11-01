@@ -12,6 +12,7 @@
                 <app-avatar
                     size="lg"
                     [name]="title()"
+                    [kind]="avatarKindFor(preview()!.chat_type)"
                     [seed]="preview()!.chat_id"
                     [imageUrl]="preview()!.avatar_url"
                 />

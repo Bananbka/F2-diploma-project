@@ -29,6 +29,7 @@
         >
             <app-avatar
                 [name]="title()"
+                [kind]="avatarKindFor(chat()!.chat_type)"
                 [seed]="chat()!.id"
                 [imageUrl]="peerDeleted() ? null : chat()!.avatar_url"
                 [deleted]="peerDeleted()"
@@ -432,6 +433,7 @@
                         <app-avatar
                             size="sm"
                             [name]="titleOfChat(target)"
+                            [kind]="avatarKindFor(target.chat_type)"
                             [seed]="target.id"
                             [imageUrl]="target.avatar_url"
                         />

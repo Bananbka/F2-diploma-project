@@ -50,7 +50,7 @@ import { VoiceRecorderService } from '../../../core/services/voice-recorder.serv
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
 import { ContextMenuItem } from '../../../shared/ui/context-menu/context-menu.model';
 import { ContextMenuService } from '../../../shared/ui/context-menu/context-menu.service';
-import { DELETED_USER_LABEL } from '../../../shared/utils/display';
+import { avatarKindFor, DELETED_USER_LABEL } from '../../../shared/utils/display';
 import { ComposedMessage, ComposerComponent } from '../composer/composer.component';
 import { MessageBubbleComponent, MessageMenuRequest } from '../message-bubble/message-bubble.component';
 import { StickerPackViewerService } from '../stickers/sticker-pack-dialog/sticker-pack-viewer';
@@ -133,6 +133,7 @@ export class ChatViewComponent {
         return chat.id === this.chatId();
     }
 
+    readonly avatarKindFor = avatarKindFor;
     readonly isChannel = computed(() => this.chat()?.chat_type === 'channel');
     readonly isGroupLike = computed(() => this.chat()?.chat_type !== 'private');
 

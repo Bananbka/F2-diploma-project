@@ -1,0 +1,164 @@
+@use 'ui';
+
+:host {
+    @include ui.screen-page(true);
+}
+
+.group {
+    margin-top: 2rem;
+}
+
+.tile {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    width: 100%;
+    padding: 0.875rem 1rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-2xl);
+    text-align: left;
+    transition: border-color 0.15s ease;
+
+    &:hover {
+        border-color: rgb(163 88 249 / 30%);
+    }
+}
+
+.tile-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 2.25rem;
+    height: 2.25rem;
+    background: rgb(163 88 249 / 15%);
+    border-radius: var(--radius-lg);
+    color: var(--primary);
+
+    lucide-icon {
+        width: 1.125rem;
+        height: 1.125rem;
+    }
+}
+
+.tile-text {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.tile-title {
+    color: var(--foreground);
+    font-size: 0.875rem;
+    font-weight: 500;
+}
+
+.tile-sub {
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+}
+
+/* ── Danger zone ──────────────────────────────────────────────────────────────────────────── */
+
+.tile.is-danger {
+    &:hover {
+        border-color: var(--danger-border);
+    }
+
+    .tile-icon {
+        background: var(--danger-surface);
+        color: var(--danger);
+    }
+
+    .tile-title {
+        color: var(--danger-strong);
+    }
+}
+
+.lead {
+    margin: 0 0 1rem;
+    color: var(--muted-foreground);
+    font-size: 0.8125rem;
+    line-height: 1.55;
+}
+
+.group:first-of-type {
+    margin-top: 0;
+}
+
+// The delete dialog is a sibling of the page content, not a child of the settings card, so its
+// fixed positioning is relative to the viewport.
+.dialog-backdrop {
+    @include ui.modal-backdrop;
+
+    z-index: 75;
+}
+
+.dialog {
+    @include ui.modal-card(32rem);
+
+    z-index: 76;
+    gap: 0;
+    padding: 1.5rem;
+}
+
+.dialog-title {
+    margin: 0 0 1rem;
+    color: var(--foreground);
+    font-size: 1.125rem;
+    font-weight: 600;
+}
+
+.warning {
+    @include ui.destructive-notice;
+
+    margin-bottom: 1rem;
+}
+
+.warning-list {
+    margin: 0.5rem 0 0;
+    padding-left: 1.125rem;
+    color: var(--danger);
+    font-size: 0.75rem;
+    line-height: 1.6;
+}
+
+.dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    margin-top: 1.25rem;
+}
+
+.dialog-cancel,
+.dialog-confirm {
+    padding: 0.5rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    font-size: 0.8125rem;
+    font-weight: 500;
+
+    &:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+
+    &:focus-visible {
+        outline: 2px solid var(--primary);
+        outline-offset: 2px;
+    }
+}
+
+.dialog-cancel {
+    background: none;
+    color: var(--foreground);
+}
+
+.dialog-confirm {
+    background: var(--danger);
+    border-color: var(--danger);
+    color: #1a0a0a;
+    font-weight: 600;
+}

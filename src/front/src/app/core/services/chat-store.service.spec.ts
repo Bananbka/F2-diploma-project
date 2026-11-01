@@ -1077,7 +1077,8 @@ describe('ChatStoreService', () => {
             ws.messages.next(created);
             ws.messages.next(edited);
             ws.messages.next(deleted);
-            await new Promise((resolve) => setTimeout(resolve, 100));
+            // Wait for the per-chat chain itself, not for a guessed duration.
+            await store.whenIdle();
 
             expect(order).toEqual(['decrypt', 'decrypt']);
             expect(store.messages().some((m) => m.id === ID)).toBeFalse();

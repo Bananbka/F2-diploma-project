@@ -35,8 +35,20 @@
         <span class="sr-only">Safety number</span>
     </button>
 
+    <button
+        type="button"
+        class="rail-button"
+        title="Settings"
+        data-settings-trigger
+        (click)="openSettings('profile', $event)"
+    >
+        <lucide-icon [img]="settingsIcon" />
+        <span class="sr-only">Settings</span>
+    </button>
+
     <div class="account">
         <button
+            #accountTrigger
             type="button"
             class="account-trigger"
             [attr.aria-expanded]="menuOpen()"
@@ -64,7 +76,7 @@
                     type="button"
                     role="menuitem"
                     class="menu-item"
-                    (click)="goTo(['/settings/profile'])"
+                    (click)="openSettings('profile', accountTrigger)"
                 >
                     <lucide-icon [img]="userIcon" />
                     Edit profile
@@ -73,7 +85,7 @@
                     type="button"
                     role="menuitem"
                     class="menu-item"
-                    (click)="goTo(['/settings/password'])"
+                    (click)="openSettings('security', accountTrigger)"
                 >
                     <lucide-icon [img]="keyIcon" />
                     Change password

@@ -1,0 +1,77 @@
+<div
+    class="scrim"
+    (click)="onScrimClick($event)"
+>
+    <div
+        #dialog
+        class="card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-title"
+        tabindex="-1"
+        (keydown)="onKeydown($event)"
+    >
+        <header class="head">
+            <h2 id="settings-title">Settings</h2>
+            <button
+                type="button"
+                class="close"
+                aria-label="Close settings"
+                (click)="close()"
+            >
+                <lucide-icon [img]="closeIcon" />
+            </button>
+        </header>
+
+        <div class="layout">
+            <div
+                #tablist
+                class="tabs"
+                role="tablist"
+                aria-label="Settings sections"
+                [attr.aria-orientation]="narrow() ? 'horizontal' : 'vertical'"
+                (keydown)="onTabKeydown($event)"
+            >
+                @for (tab of tabs; track tab.id) {
+                    <button
+                        type="button"
+                        role="tab"
+                        class="tab"
+                        [id]="tabId(tab.id)"
+                        [class.is-active]="activeTab() === tab.id"
+                        [attr.aria-selected]="activeTab() === tab.id"
+                        aria-controls="settings-panel"
+                        [attr.tabindex]="activeTab() === tab.id ? 0 : -1"
+                        (click)="select(tab.id)"
+                    >
+                        <lucide-icon [img]="tab.icon" />
+                        {{ tab.label }}
+                    </button>
+                }
+            </div>
+
+            <div
+                id="settings-panel"
+                class="panel"
+                role="tabpanel"
+                tabindex="0"
+                [attr.aria-labelledby]="activeTab() ? tabId(activeTab()!) : null"
+            >
+                @switch (activeTab()) {
+                    @case ('profile') {
+                        <app-profile />
+                    }
+                    @case ('security') {
+                        <app-security />
+                    }
+                    @case ('stickers') {
+                        <app-sticker-pack-manager />
+                    }
+                    @case ('privacy') {
+                        <app-privacy />
+                    }
+                }
+            </div>
+        </div>
+    </div>
+</div>

@@ -1,6 +1,6 @@
-import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, DestroyRef, inject, signal } from '@angular/core';
 import { Router } from '@angular/router';
-import { ArrowDown, ArrowLeft, ArrowUp, Globe, Lock, LucideAngularModule, Plus, Trash2, Upload } from 'lucide-angular';
+import { ArrowDown, ArrowUp, Globe, Lock, LucideAngularModule, Plus, Trash2, Upload } from 'lucide-angular';
 import { firstValueFrom } from 'rxjs';
 
 import { Sticker, StickerPack, StickerPackSummary } from '../../../../core/models/sticker.model';
@@ -10,6 +10,7 @@ import { StickerApiService } from '../../../../core/services/sticker-api.service
 import { TwemojiPipe } from '../../../../shared/emoji/twemoji.pipe';
 import { ContextMenuDirective, ContextMenuProvider } from '../../../../shared/ui/context-menu/context-menu.directive';
 import { EmojiPickerComponent } from '../../../../shared/ui/emoji-picker/emoji-picker.component';
+import { SettingsService } from '../../../settings/settings.service';
 
 /** Server-enforced caps, mirrored here only for UX — the backend is the real enforcer. */
 const MAX_PACKS = 50;
@@ -35,6 +36,7 @@ export class StickerPackManagerComponent {
     private readonly profileApi = inject(ProfileApiService);
     private readonly session = inject(SessionService);
     private readonly router = inject(Router);
+    private readonly settings = inject(SettingsService);
 
     readonly packs = signal<StickerPackSummary[]>([]);
     /** This screen only manages packs the signed-in user owns — `GET /stickers/packs/mine` also
@@ -62,7 +64,6 @@ export class StickerPackManagerComponent {
     readonly confirmingDeletePack = signal(false);
     readonly deletingPack = signal(false);
 
-    readonly arrowLeftIcon = ArrowLeft;
     readonly plusIcon = Plus;
     readonly trashIcon = Trash2;
     readonly globeIcon = Globe;
@@ -84,6 +85,14 @@ export class StickerPackManagerComponent {
 
     constructor() {
         void this.loadPacks();
+        // Free-form text in progress: a new pack name, a rename, or an emoji picked for the next upload.
+        const unregister = this.settings.registerDirtyCheck(
+            () =>
+                this.newTitle().trim() !== '' ||
+                this.uploadEmoji() !== '' ||
+                (this.packDetail() !== null && this.titleDraft().trim() !== this.packDetail()!.title)
+        );
+        inject(DestroyRef).onDestroy(unregister);
     }
 
     private async loadPacks(): Promise<void> {
@@ -337,11 +346,10 @@ export class StickerPackManagerComponent {
         }
     }
 
+    /** Discovery is a full page of its own, so the settings dialog gets out of its way first. */
     async goToDiscovery(): Promise<void> {
-        await this.router.navigate(['/stickers/discover']);
-    }
-
-    async close(): Promise<void> {
-        await this.router.navigate(['/chats']);
+        if (await this.settings.requestClose()) {
+            await this.router.navigate(['/stickers/discover']);
+        }
     }
 }

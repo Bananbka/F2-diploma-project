@@ -1,0 +1,160 @@
+<div
+    class="backdrop"
+    aria-hidden="true"
+></div>
+<div
+    #dialog
+    class="dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="cropper-title"
+    aria-describedby="cropper-help"
+    tabindex="-1"
+    (keydown)="onDialogKeydown($event)"
+>
+    <h2
+        id="cropper-title"
+        class="title"
+    >
+        Adjust your photo
+    </h2>
+    <p
+        id="cropper-help"
+        class="help"
+    >
+        Drag to move, scroll or pinch to zoom. With the keyboard, use the arrow keys to move (Shift for bigger steps)
+        and + / − to zoom.
+    </p>
+
+    <div
+        #stage
+        class="stage"
+        [class.is-dragging]="dragging()"
+        tabindex="0"
+        role="group"
+        aria-label="Crop area. The circle is what others will see."
+        (pointerdown)="onPointerDown($event)"
+        (pointermove)="onPointerMove($event)"
+        (pointerup)="onPointerEnd($event)"
+        (pointercancel)="onPointerEnd($event)"
+        (lostpointercapture)="onPointerEnd($event)"
+        (wheel)="onWheel($event)"
+        (keydown)="onStageKeydown($event)"
+    >
+        <canvas
+            #canvas
+            class="picture"
+            [hidden]="status() !== 'ready'"
+        ></canvas>
+        <span
+            class="mask"
+            aria-hidden="true"
+        ></span>
+        @if (status() === 'loading') {
+            <span
+                class="state"
+                role="status"
+                >Loading…</span
+            >
+        }
+    </div>
+
+    @if (status() === 'error') {
+        <p
+            class="error"
+            role="alert"
+        >
+            {{ errorText() }}
+        </p>
+    }
+
+    <div class="controls">
+        <button
+            type="button"
+            class="tool"
+            aria-label="Zoom out"
+            [disabled]="status() !== 'ready'"
+            (click)="zoomBy(0.9)"
+        >
+            <lucide-icon [img]="zoomOutIcon" />
+        </button>
+        <input
+            type="range"
+            class="slider"
+            aria-label="Zoom"
+            [attr.aria-valuetext]="zoomText()"
+            [min]="minZoom"
+            [max]="maxZoom"
+            step="0.01"
+            [value]="crop().zoom"
+            [disabled]="status() !== 'ready'"
+            (input)="onSlider($event)"
+        />
+        <button
+            type="button"
+            class="tool"
+            aria-label="Zoom in"
+            [disabled]="status() !== 'ready'"
+            (click)="zoomBy(1.1)"
+        >
+            <lucide-icon [img]="zoomInIcon" />
+        </button>
+        <span class="divider"></span>
+        <button
+            type="button"
+            class="tool"
+            aria-label="Rotate left"
+            [disabled]="status() !== 'ready'"
+            (click)="rotate(-1)"
+        >
+            <lucide-icon [img]="rotateLeftIcon" />
+        </button>
+        <button
+            type="button"
+            class="tool"
+            aria-label="Rotate right"
+            [disabled]="status() !== 'ready'"
+            (click)="rotate(1)"
+        >
+            <lucide-icon [img]="rotateRightIcon" />
+        </button>
+        <button
+            type="button"
+            class="tool"
+            aria-label="Reset"
+            title="Reset"
+            [disabled]="status() !== 'ready'"
+            (click)="reset()"
+        >
+            <lucide-icon [img]="resetIcon" />
+        </button>
+    </div>
+
+    @if (applyError()) {
+        <p
+            class="error"
+            role="alert"
+        >
+            {{ applyError() }}
+        </p>
+    }
+
+    <div class="actions">
+        <button
+            type="button"
+            class="btn"
+            [disabled]="applying()"
+            (click)="cancel()"
+        >
+            Cancel
+        </button>
+        <button
+            type="button"
+            class="btn is-primary"
+            [disabled]="status() !== 'ready' || applying()"
+            (click)="apply()"
+        >
+            {{ applying() ? 'Applying…' : 'Apply' }}
+        </button>
+    </div>
+</div>

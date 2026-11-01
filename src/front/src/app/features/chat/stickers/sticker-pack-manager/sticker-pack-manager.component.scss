@@ -1,7 +1,7 @@
 @use 'ui';
 
 :host {
-    @include ui.screen-page;
+    @include ui.screen-page(true);
 }
 
 .create-row {
