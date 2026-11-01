@@ -60,7 +60,7 @@ const TAB_VIEWS: readonly TabView[] = [
     changeDetection: ChangeDetectionStrategy.OnPush,
     host: {
         '[class.is-overlay]': 'overlay()',
-        '(document:keydown.escape)': 'onEscape()',
+        '(document:keydown.escape)': 'onEscape($event)',
     },
 })
 export class ChatPanelComponent {
@@ -118,7 +118,11 @@ export class ChatPanelComponent {
         this.panel.close();
     }
 
-    onEscape(): void {
+    onEscape(event?: Event): void {
+        // A view inside the panel (a member profile) that used Escape to go back has already handled it.
+        if (event?.defaultPrevented) {
+            return;
+        }
         if (this.overlay()) {
             this.close();
         }

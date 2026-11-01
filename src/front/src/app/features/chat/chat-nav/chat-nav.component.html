@@ -1,0 +1,157 @@
+<section class="section">
+    <div class="section-head">
+        <button
+            type="button"
+            class="section-toggle"
+            id="chat-nav-toggle-chats"
+            aria-controls="chat-nav-list-chats"
+            [attr.aria-expanded]="!isCollapsed('chats')"
+            (click)="toggle('chats')"
+        >
+            <lucide-icon
+                [img]="chevronIcon"
+                class="chevron"
+                [class.is-open]="!isCollapsed('chats')"
+            />
+            <span class="section-title">Chats</span>
+            @if (selectedLabel('chats'); as label) {
+                <span class="section-selected">{{ label }}</span>
+            }
+        </button>
+    </div>
+
+    <div
+        id="chat-nav-list-chats"
+        class="list"
+        role="listbox"
+        aria-labelledby="chat-nav-toggle-chats"
+        [hidden]="isCollapsed('chats')"
+        (keydown)="onListKeydown($event)"
+    >
+        @for (item of systemItems(); track item.key) {
+            <button
+                type="button"
+                role="option"
+                class="item"
+                [class.is-selected]="selected() === item.key"
+                [attr.aria-selected]="selected() === item.key"
+                [attr.tabindex]="tabIndexFor(systemItems(), item)"
+                (click)="select(item.key)"
+            >
+                <lucide-icon
+                    [img]="item.icon"
+                    class="item-icon"
+                />
+                <span class="item-label">{{ item.label }}</span>
+                @if (item.count > 0) {
+                    <span class="item-count">{{ item.count }}</span>
+                }
+                @if (item.unread > 0) {
+                    <span
+                        class="item-unread"
+                        [attr.aria-label]="item.unread + ' unread'"
+                    >
+                        {{ item.unread }}
+                    </span>
+                }
+            </button>
+        }
+    </div>
+</section>
+
+<section class="section">
+    <div class="section-head">
+        <button
+            type="button"
+            class="section-toggle"
+            id="chat-nav-toggle-folders"
+            aria-controls="chat-nav-list-folders"
+            [attr.aria-expanded]="!isCollapsed('folders')"
+            (click)="toggle('folders')"
+        >
+            <lucide-icon
+                [img]="chevronIcon"
+                class="chevron"
+                [class.is-open]="!isCollapsed('folders')"
+            />
+            <span class="section-title">Folders</span>
+            @if (selectedLabel('folders'); as label) {
+                <span class="section-selected">{{ label }}</span>
+            }
+            @if (folderItems().length > 0) {
+                <span class="section-count">{{ folderItems().length }}</span>
+            }
+        </button>
+        <button
+            type="button"
+            class="head-action"
+            aria-label="New folder"
+            title="New folder"
+            (click)="createFolder.emit()"
+        >
+            <lucide-icon [img]="plusIcon" />
+        </button>
+        <button
+            type="button"
+            class="head-action"
+            aria-label="Folder options"
+            aria-haspopup="menu"
+            title="Folder options"
+            (click)="openFoldersMenu($event)"
+        >
+            <lucide-icon [img]="moreIcon" />
+        </button>
+    </div>
+
+    <div
+        id="chat-nav-list-folders"
+        class="list"
+        role="listbox"
+        aria-labelledby="chat-nav-toggle-folders"
+        [hidden]="isCollapsed('folders')"
+        (keydown)="onListKeydown($event)"
+    >
+        @for (item of folderItems(); track item.key) {
+            <button
+                type="button"
+                role="option"
+                class="item"
+                [class.is-selected]="selected() === item.key"
+                [attr.aria-selected]="selected() === item.key"
+                [attr.tabindex]="tabIndexFor(folderItems(), item)"
+                [appContextMenu]="folderMenu(item.folder!)"
+                (click)="select(item.key)"
+            >
+                <lucide-icon
+                    [img]="item.icon"
+                    class="item-icon"
+                />
+                <span class="item-label">{{ item.label }}</span>
+                <span
+                    class="item-count"
+                    [attr.aria-label]="item.count + (item.count === 1 ? ' chat' : ' chats')"
+                    >{{ item.count }}</span
+                >
+                @if (item.unread > 0) {
+                    <span
+                        class="item-unread"
+                        [attr.aria-label]="item.unread + ' unread'"
+                    >
+                        {{ item.unread }}
+                    </span>
+                }
+            </button>
+        } @empty {
+            <p class="hint">
+                No folders yet.
+                <button
+                    type="button"
+                    class="hint-action"
+                    (click)="createFolder.emit()"
+                >
+                    Create one
+                </button>
+            </p>
+        }
+    </div>
+</section>

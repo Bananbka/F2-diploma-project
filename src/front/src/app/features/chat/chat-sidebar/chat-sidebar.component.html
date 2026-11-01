@@ -48,7 +48,7 @@
                     type="button"
                     role="menuitem"
                     class="menu-item"
-                    (click)="openFolderEditor()"
+                    (click)="openFolderDialog()"
                 >
                     <lucide-icon [img]="folderIcon" />
                     New folder
@@ -58,83 +58,15 @@
     </div>
 </div>
 
-@if (folders().length || folderEditorOpen()) {
-    <div
-        class="folders"
-        role="tablist"
-        aria-label="Chat folders"
-    >
-        <button
-            type="button"
-            role="tab"
-            class="folder-tab"
-            [class.is-active]="activeFolder() === null"
-            [attr.aria-selected]="activeFolder() === null"
-            (click)="activeFolder.set(null)"
-        >
-            All
-        </button>
-
-        @for (folder of folders(); track folder.id) {
-            <span class="folder-tab-wrap">
-                <button
-                    type="button"
-                    role="tab"
-                    class="folder-tab"
-                    [class.is-active]="activeFolder() === folder.id"
-                    [attr.aria-selected]="activeFolder() === folder.id"
-                    [appContextMenu]="folderMenu(folder)"
-                    (click)="activeFolder.set(folder.id)"
-                >
-                    {{ folder.title }}
-                </button>
-                @if (activeFolder() === folder.id) {
-                    <button
-                        type="button"
-                        class="folder-delete"
-                        [attr.aria-label]="'Delete folder ' + folder.title"
-                        (click)="deleteFolder(folder)"
-                    >
-                        ×
-                    </button>
-                }
-            </span>
-        }
-    </div>
-}
-
-@if (folderEditorOpen()) {
-    <form
-        class="folder-form"
-        (ngSubmit)="createFolder()"
-    >
-        <input
-            type="text"
-            placeholder="Folder name"
-            aria-label="New folder name"
-            [value]="newFolderTitle()"
-            (input)="newFolderTitle.set($any($event.target).value)"
-        />
-        <button type="submit">Create</button>
-    </form>
-}
-
-@if (activeFolder() && activeChatId()) {
-    <!-- Membership is edited from wherever the chat is, rather than in a separate manager: the
-         folder is a view over the list, so the list is where it should be adjustable. -->
-    <div class="folder-assign">
-        @for (folder of folders(); track folder.id) {
-            <button
-                type="button"
-                class="folder-chip"
-                [class.is-on]="isChatInFolder(folder, activeChatId()!)"
-                (click)="toggleChatInFolder(folder, activeChatId()!)"
-            >
-                {{ isChatInFolder(folder, activeChatId()!) ? '✓' : '+' }} {{ folder.title }}
-            </button>
-        }
-    </div>
-}
+<app-chat-nav
+    [chats]="chats()"
+    [folders]="folders()"
+    [selected]="view()"
+    (selectedChange)="selectView($event)"
+    (createFolder)="openFolderDialog()"
+    (editFolder)="openFolderDialog($event)"
+    (deleteFolder)="confirmDeleteFolder($event)"
+/>
 
 <div class="list">
     @if (loading() && chats().length === 0) {
@@ -153,6 +85,8 @@
         <p class="empty">
             @if (query()) {
                 Nothing matches “{{ query() }}”.
+            } @else if (view() !== 'all') {
+                Nothing here yet. Pick “All chats” to see everything.
             } @else {
                 No conversations yet. Use the + button to start one.
             }
@@ -170,6 +104,7 @@
         >
             <app-avatar
                 [name]="titleOf(chat)"
+                [kind]="avatarKindFor(chat.chat_type)"
                 [seed]="chat.id"
                 [imageUrl]="chat.peer_is_deleted ? null : chat.avatar_url"
                 [deleted]="chat.peer_is_deleted === true"
@@ -259,3 +194,12 @@
         }
     }
 </div>
+
+@if (folderDialog(); as dialog) {
+    <app-folder-edit-dialog
+        [folder]="dialog.folder"
+        [focus]="dialog.focus"
+        [chats]="chats()"
+        (closed)="folderDialog.set(null)"
+    />
+}

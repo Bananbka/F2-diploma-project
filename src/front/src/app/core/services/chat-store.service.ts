@@ -405,6 +405,16 @@ export class ChatStoreService {
         });
     }
 
+    /**
+     * Resolves once every event queued so far, in every chat, has been applied. Lets callers (and
+     * specs) wait on the work itself instead of sleeping for an arbitrary time.
+     */
+    async whenIdle(): Promise<void> {
+        while (this.chatQueues.size > 0) {
+            await Promise.all([...this.chatQueues.values()]);
+        }
+    }
+
     /** Message ids already counted as unread while their chat was closed; makes replay idempotent. */
     private readonly countedUnread = new Set<string>();
 

@@ -41,29 +41,153 @@
     font-size: 1.25rem;
 }
 
-.profile-tag {
+.badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    margin: 0.5rem 0 0;
+    padding: 0.125rem 0.5rem;
+    background: rgb(139 139 154 / 12%);
+    border-radius: 999px;
+    color: var(--muted-foreground);
+    font-size: 0.6875rem;
+    font-weight: 500;
+    text-transform: capitalize;
+
+    lucide-icon {
+        width: 0.75rem;
+        height: 0.75rem;
+    }
+
+    &.is-ok {
+        background: rgb(163 88 249 / 14%);
+        color: var(--primary);
+    }
+
+    &.is-warn {
+        background: var(--warn-surface);
+        color: var(--warn);
+    }
+
+    &.is-danger {
+        background: var(--danger-surface);
+        color: var(--danger);
+        font-weight: 600;
+    }
+}
+
+/* ── Tabs ─────────────────────────────────────────────────────────────────────────────────── */
+
+.info-tabs {
+    display: flex;
+    gap: 0.25rem;
+    margin-top: 1rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.info-tab {
+    flex: 1;
+    margin-bottom: -1px;
+    padding: 0.5rem 0.5rem 0.625rem;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--muted-foreground);
+    font-size: 0.8125rem;
+    font-weight: 500;
+    cursor: pointer;
+
+    &:hover {
+        color: var(--foreground);
+    }
+
+    &:focus-visible {
+        outline: 2px solid var(--primary);
+        outline-offset: -2px;
+        border-radius: var(--radius-lg);
+    }
+
+    &.is-active {
+        border-bottom-color: var(--primary);
+        color: var(--foreground);
+    }
+}
+
+.tab-body {
+    padding-top: 0.25rem;
+}
+
+/* ── Member profile ───────────────────────────────────────────────────────────────────────── */
+
+.sub-back {
     display: inline-flex;
     align-items: center;
     gap: 0.375rem;
-    margin: 0.375rem 0 0;
+    margin-bottom: 1rem;
+    padding: 0.25rem 0.5rem 0.25rem 0;
+    background: none;
+    border: none;
+    color: var(--muted-foreground);
     font-size: 0.8125rem;
+    cursor: pointer;
+
+    &:hover {
+        color: var(--foreground);
+    }
 
     lucide-icon {
         width: 1rem;
         height: 1rem;
     }
+}
 
-    &.is-ok {
-        color: var(--primary);
+.actions {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 1.25rem;
+}
+
+.facts {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin: 0 0 0.75rem;
+    padding: 0;
+    list-style: none;
+
+    li {
+        display: flex;
+        justify-content: space-between;
+        gap: 0.75rem;
+        padding: 0.375rem 0.25rem;
+        font-size: 0.8125rem;
     }
+}
 
-    &.is-warn {
-        color: var(--warn);
-    }
+.fact-label {
+    color: var(--muted-foreground);
+}
 
-    &.is-danger {
-        color: var(--danger);
-        font-weight: 500;
+.fact-value {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--foreground);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.saved-note {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    margin: 0.5rem 0 0;
+    color: var(--ok);
+    font-size: 0.8125rem;
+
+    lucide-icon {
+        width: 0.875rem;
+        height: 0.875rem;
     }
 }
 
@@ -105,7 +229,13 @@
 /* ── Groups ───────────────────────────────────────────────────────────────────────────────── */
 
 .group {
-    margin-top: 1.5rem;
+    margin-top: 1.25rem;
+
+    .tile + .tile,
+    .saved-note + .tile,
+    .facts + .tile {
+        margin-top: 0.5rem;
+    }
 }
 
 .tile {
@@ -123,8 +253,25 @@
     text-decoration: none;
     transition: border-color 0.15s ease;
 
-    &:hover {
+    &:hover:not(:disabled) {
         border-color: rgb(163 88 249 / 30%);
+    }
+
+    &:disabled {
+        opacity: 0.55;
+    }
+
+    &.is-danger {
+        color: var(--danger);
+
+        .tile-icon {
+            background: var(--danger-surface);
+            color: var(--danger);
+        }
+
+        .tile-title {
+            color: var(--danger);
+        }
     }
 }
 
@@ -438,11 +585,23 @@
     display: flex;
     align-items: center;
     gap: 0.75rem;
+    width: 100%;
     padding: 0.5rem 0.75rem;
+    background: none;
+    border: none;
     border-radius: var(--radius-lg);
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
 
     &:hover {
         background: rgb(37 37 45 / 30%);
+    }
+
+    &:focus-visible {
+        outline: 2px solid var(--primary);
+        outline-offset: -2px;
     }
 }
 
@@ -588,4 +747,29 @@
     &.is-cancel {
         color: var(--text-muted);
     }
+}
+
+.action-error {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+    padding: 0.5rem 0.5rem 0.5rem 0.75rem;
+    background: var(--danger-surface);
+    border: 1px solid var(--danger-border);
+    border-radius: var(--radius-lg);
+    color: var(--danger);
+    font-size: 0.8125rem;
+}
+
+.retry {
+    margin-top: 0.5rem;
+    padding: 0.375rem 0.75rem;
+    background: var(--surface-raised);
+    border: none;
+    border-radius: var(--radius-lg);
+    color: var(--foreground);
+    font-size: 0.8125rem;
+    cursor: pointer;
 }

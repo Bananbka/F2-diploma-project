@@ -1,11 +1,11 @@
 import { HttpErrorResponse } from '@angular/common/http';
-import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, DestroyRef, inject, signal } from '@angular/core';
 import { AbstractControl, FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
-import { Router } from '@angular/router';
-import { ArrowLeft, Eye, EyeOff, LucideAngularModule, ShieldCheck } from 'lucide-angular';
+import { Eye, EyeOff, LucideAngularModule, ShieldCheck } from 'lucide-angular';
 
 import { SessionService } from '../../../core/services/session.service';
 import { applyServerErrors, errorTextFor } from '../../../shared/forms/server-errors';
+import { SettingsService } from '../settings.service';
 
 type Phase = 'input' | 'rewrapping' | 'done';
 
@@ -18,8 +18,8 @@ type Phase = 'input' | 'rewrapping' | 'done';
 })
 export class ChangePasswordComponent {
     private readonly session = inject(SessionService);
-    private readonly router = inject(Router);
     private readonly fb = inject(FormBuilder);
+    private readonly settings = inject(SettingsService);
 
     readonly phase = signal<Phase>('input');
     readonly showPassword = signal(false);
@@ -33,10 +33,15 @@ export class ChangePasswordComponent {
 
     readonly passwordsMatch = computed(() => this.form.controls.confirm.value === this.form.controls.newPassword.value);
 
-    readonly arrowLeftIcon = ArrowLeft;
     readonly eyeIcon = Eye;
     readonly eyeOffIcon = EyeOff;
     readonly shieldCheckIcon = ShieldCheck;
+
+    constructor() {
+        // Typed passwords are lost if the dialog closes; a re-seal in flight must not be walked away from.
+        const unregister = this.settings.registerDirtyCheck(() => this.phase() === 'rewrapping' || this.form.dirty);
+        inject(DestroyRef).onDestroy(unregister);
+    }
 
     messageFor(name: keyof typeof this.form.controls): string | null {
         return errorTextFor(this.form.controls[name], {
@@ -86,7 +91,11 @@ export class ChangePasswordComponent {
         }
     }
 
-    async close(): Promise<void> {
-        await this.router.navigate(['/chats']);
+    /** Back to a blank form once the success message has been read. */
+    reset(): void {
+        this.form.reset();
+        this.showPassword.set(false);
+        this.error.set(null);
+        this.phase.set('input');
     }
 }

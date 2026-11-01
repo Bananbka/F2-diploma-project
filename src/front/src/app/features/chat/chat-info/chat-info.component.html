@@ -12,7 +12,10 @@
     </header>
 }
 
-<div class="body">
+<div
+    class="body"
+    #root
+>
     @if (loading()) {
         <p class="muted">Loading…</p>
     } @else if (error()) {
@@ -22,407 +25,148 @@
         >
             {{ error() }}
         </p>
+        <button
+            type="button"
+            class="retry"
+            (click)="retry()"
+        >
+            Try again
+        </button>
     } @else if (chat()) {
-        <section class="profile">
-            <app-avatar
-                size="lg"
-                [name]="title()"
-                [seed]="chat()!.id"
-                [imageUrl]="chat()!.peer_is_deleted ? null : chat()!.avatar_url"
-                [deleted]="chat()!.peer_is_deleted === true"
-            />
-            <h3 class="profile-name">{{ title() }}</h3>
-            @if (peerUsername()) {
-                <p class="profile-username">&#64;{{ peerUsername() }}</p>
-            }
-
-            @if (isChannel()) {
-                <p class="profile-tag is-warn">
-                    <lucide-icon [img]="shieldOffIcon" />
-                    Signed · not encrypted
-                </p>
-            } @else if (memberSetVerified() === true) {
-                <p class="profile-tag is-ok">
-                    <lucide-icon [img]="shieldCheckIcon" />
-                    Member set matches the current key epoch
-                </p>
-            } @else if (memberSetVerified() === false) {
-                <p class="profile-tag is-danger">
-                    <lucide-icon [img]="shieldAlertIcon" />
-                    Member set does not match the key epoch
-                </p>
-            }
-        </section>
-
-        <!-- Highest severity in the app. Stated in terms of what it means, not as a generic error:
-             the recomputed member hash disagrees with the epoch commitment, so an extra device may
-             have been inserted that would read future messages. -->
-        @if (memberSetVerified() === false) {
-            <section
-                class="alarm"
+        @if (actionError(); as message) {
+            <div
+                class="action-error"
                 role="alert"
             >
-                <lucide-icon [img]="shieldAlertIcon" />
-                <div>
-                    <p class="alarm-title">The server may be lying to you</p>
-                    <p class="alarm-note">
-                        The member list below hashes to a different value than the one committed to this chat's current
-                        key epoch. A device may have been added without the members' knowledge, and it would be able to
-                        read messages sent from now on. This client will not distribute keys while that is true, so
-                        sending is blocked. Confirm the member list with the other participants by another channel
-                        before continuing.
-                    </p>
-                </div>
-            </section>
-        }
-
-        @if (isPrivate()) {
-            <section class="group">
-                <p class="section">Security</p>
-
-                @if (peerId()) {
-                    <a
-                        class="tile"
-                        [routerLink]="['/chats', chat()!.id, 'safety', peerId()!]"
-                    >
-                        <span class="tile-icon">
-                            <lucide-icon [img]="shieldIcon" />
-                        </span>
-                        <span class="tile-text">
-                            <span class="tile-title">Safety number</span>
-                            <span class="mono tile-sub">
-                                @if (safetyPreview().length) {
-                                    {{ safetyPreview().join(' ') }}…
-                                } @else {
-                                    Compare to confirm no key was substituted
-                                }
-                            </span>
-                        </span>
-                        <lucide-icon
-                            [img]="chevronRightIcon"
-                            class="tile-chevron"
-                        />
-                    </a>
-                }
-            </section>
-        }
-
-        <section class="group">
-            <p class="section">Notifications</p>
-            <button
-                type="button"
-                class="tile"
-                [attr.aria-pressed]="isMuted()"
-                (click)="toggleMute()"
-            >
-                <span class="tile-icon">
-                    <lucide-icon [img]="isMuted() ? bellOffIcon : bellIcon" />
-                </span>
-                <span class="tile-text">
-                    <span class="tile-title">Mute notifications</span>
-                    <span class="tile-sub">
-                        {{ isMuted() ? 'Muted — no local notifications for this chat' : 'Not muted' }}
-                    </span>
-                </span>
-                <span
-                    class="switch"
-                    [class.is-on]="isMuted()"
-                    aria-hidden="true"
-                ></span>
-            </button>
-        </section>
-
-        @if (canManageInvites()) {
-            <section class="group">
-                <p class="section">Invite link</p>
-
-                <div class="invite-create">
-                    <label class="invite-field">
-                        <span>Expires</span>
-                        <select
-                            [value]="expiryPreset()"
-                            [disabled]="inviteBusy()"
-                            (change)="expiryPreset.set($any($event.target).value)"
-                        >
-                            <option value="none">Never</option>
-                            <option value="1d">In 1 day</option>
-                            <option value="7d">In 7 days</option>
-                        </select>
-                    </label>
-                    <label class="invite-field">
-                        <span>Uses</span>
-                        <select
-                            [value]="maxUsesPreset()"
-                            [disabled]="inviteBusy()"
-                            (change)="maxUsesPreset.set($any($event.target).value)"
-                        >
-                            <option value="none">No limit</option>
-                            <option value="1">1 use</option>
-                            <option value="10">10 uses</option>
-                        </select>
-                    </label>
-                    <button
-                        type="button"
-                        class="section-action invite-generate"
-                        [disabled]="inviteBusy()"
-                        (click)="createInviteLink()"
-                    >
-                        <lucide-icon [img]="linkIcon" />
-                        Generate link
-                    </button>
-                </div>
-
-                @if (inviteError()) {
-                    <p
-                        class="error"
-                        role="alert"
-                    >
-                        {{ inviteError() }}
-                    </p>
-                }
-
-                @if (inviteLinksLoading()) {
-                    <p class="muted small">Loading invite links…</p>
-                } @else if (activeInviteLinks().length) {
-                    <ul class="invite-list">
-                        @for (link of activeInviteLinks(); track link.id) {
-                            <li class="invite-row">
-                                <span class="invite-text">
-                                    <span class="mono invite-url">{{ inviteLinkUrl(link) }}</span>
-                                    <span class="invite-sub">
-                                        {{ link.use_count }}{{ link.max_uses ? '/' + link.max_uses : '' }} used
-                                        @if (link.expires_at) {
-                                            · expires {{ link.expires_at | date: 'short' }}
-                                        }
-                                    </span>
-                                </span>
-                                <button
-                                    type="button"
-                                    class="member-action"
-                                    [disabled]="inviteBusy()"
-                                    [attr.aria-label]="'Copy invite link'"
-                                    title="Copy link"
-                                    (click)="copyInviteLink(link)"
-                                >
-                                    <lucide-icon [img]="copiedToken() === link.token ? checkIcon : copyIcon" />
-                                </button>
-                                <!-- Armed on first press, like transferring ownership below: revoking
-                                     is irreversible and sits right next to the copy button. -->
-                                @if (confirming() === 'revoke:' + link.id) {
-                                    <button
-                                        type="button"
-                                        class="member-action is-confirm"
-                                        [disabled]="inviteBusy()"
-                                        (click)="revokeInviteLink(link)"
-                                    >
-                                        Revoke?
-                                    </button>
-                                    <button
-                                        type="button"
-                                        class="member-action"
-                                        [disabled]="inviteBusy()"
-                                        aria-label="Cancel"
-                                        title="Cancel"
-                                        (click)="cancelConfirm()"
-                                    >
-                                        <lucide-icon [img]="xIcon" />
-                                    </button>
-                                } @else {
-                                    <button
-                                        type="button"
-                                        class="member-action"
-                                        [disabled]="inviteBusy()"
-                                        aria-label="Revoke invite link"
-                                        title="Revoke"
-                                        (click)="revokeInviteLink(link)"
-                                    >
-                                        <lucide-icon [img]="xIcon" />
-                                    </button>
-                                }
-                            </li>
-                        }
-                    </ul>
-                } @else {
-                    <p class="muted small">No active invite links. Generate one to invite people by link.</p>
-                }
-            </section>
-        }
-
-        <section class="group">
-            <div class="section-row">
-                <p class="section">{{ isChannel() ? 'Subscribers' : 'Members' }} · {{ members().length }}</p>
-                @if (canManage() && !isPrivate()) {
-                    <button
-                        type="button"
-                        class="section-action"
-                        (click)="addOpen.set(!addOpen())"
-                    >
-                        <lucide-icon [img]="userPlusIcon" />
-                        Add
-                    </button>
-                }
+                <span>{{ message }}</span>
+                <button
+                    type="button"
+                    class="member-action"
+                    aria-label="Dismiss"
+                    title="Dismiss"
+                    (click)="actionError.set(null)"
+                >
+                    <lucide-icon [img]="xIcon" />
+                </button>
             </div>
+        }
+        @if (selectedMember(); as member) {
+            <!-- A member's profile, in place of the tabs. Back returns to the list with the tab intact. -->
+            <section
+                class="member-view"
+                (keydown.escape)="onMemberEscape($event)"
+            >
+                <button
+                    type="button"
+                    class="sub-back"
+                    (click)="closeMember()"
+                >
+                    <lucide-icon [img]="arrowLeftIcon" />
+                    {{ isChannel() ? 'Subscribers' : 'Members' }}
+                </button>
 
-            @if (addOpen()) {
-                <div class="add-panel">
-                    <div class="search">
-                        <lucide-icon [img]="searchIcon" />
-                        <input
-                            type="search"
-                            placeholder="Search people by username…"
-                            aria-label="Search people to add"
-                            [value]="addQuery()"
-                            (input)="searchPeople($any($event.target).value)"
-                        />
-                    </div>
-
-                    <!-- Adding a member rotates the key epoch, so this is not a cosmetic change:
-                         everyone re-mints a chain and the joiner is covered only by the new one. -->
-                    <p class="add-note">
-                        Adding someone rotates this chat's keys. They will be able to read messages sent from now on,
-                        but not what came before.
+                <div class="profile">
+                    <app-avatar
+                        size="lg"
+                        [name]="member.name"
+                        [seed]="member.userId"
+                        [imageUrl]="member.avatarUrl"
+                        [deleted]="member.deleted"
+                    />
+                    <h3 class="profile-name">{{ member.isMe ? member.name + ' (you)' : member.name }}</h3>
+                    @if (member.username && !member.deleted) {
+                        <p class="profile-username">&#64;{{ member.username }}</p>
+                    }
+                    <p class="badge is-neutral">
+                        @if (member.role === 'owner') {
+                            <lucide-icon [img]="crownIcon" />
+                        }
+                        {{ member.role }}
                     </p>
-
-                    @for (person of addResults(); track person.id) {
-                        <button
-                            type="button"
-                            class="add-result"
-                            [disabled]="busy()"
-                            (click)="addParticipant(person)"
-                        >
-                            <app-avatar
-                                size="sm"
-                                [name]="person.full_name"
-                                [seed]="person.id"
-                                [imageUrl]="person.avatar_url"
-                            />
-                            <span class="add-result-text">
-                                <span class="member-name">{{ person.full_name }}</span>
-                                <span class="member-sub">&#64;{{ person.username }}</span>
-                            </span>
-                            <lucide-icon [img]="userPlusIcon" />
-                        </button>
+                    @if (member.deleted) {
+                        <p class="badge is-neutral">Account deleted</p>
+                    } @else if (!isChannel()) {
+                        @if (member.hasKeys) {
+                            <p
+                                class="badge is-ok"
+                                title="The roster publishes an identity key for this member. That is not the same as having verified it: compare the safety number."
+                            >
+                                <lucide-icon [img]="shieldCheckIcon" />
+                                Identity key published
+                            </p>
+                        } @else {
+                            <p
+                                class="badge is-warn"
+                                title="No identity key published, so this member cannot receive encrypted messages."
+                            >
+                                <lucide-icon [img]="shieldAlertIcon" />
+                                No identity key
+                            </p>
+                        }
                     }
                 </div>
-            }
 
-            <ul class="members">
-                @for (member of members(); track member.userId) {
-                    <li
-                        class="member"
-                        [appContextMenu]="memberMenu(member)"
-                    >
-                        <app-avatar
-                            size="sm"
-                            [name]="member.name"
-                            [seed]="member.userId"
-                            [imageUrl]="member.avatarUrl"
-                            [deleted]="member.deleted"
-                        />
-
-                        <span class="member-text">
-                            <span class="member-line">
-                                <span
-                                    class="member-name"
-                                    [class.is-unresolved]="!member.resolved"
-                                    >{{ member.isMe ? 'You' : member.name }}</span
-                                >
-
-                                <!-- Published keys are a fact about the roster, not a claim that the
-                                     identity has been verified out of band. Those are different
-                                     things and the label says which one this is. -->
-                                @if (!isChannel()) {
-                                    <!-- A deleted member gets no pip at all: a check would imply a live,
-                                         verifiable identity, and an alert would imply a fault. The
-                                         subline below says what it is. -->
-                                    @if (member.deleted) {
-                                        <!-- intentionally empty -->
-                                    } @else if (member.hasKeys) {
-                                        <span
-                                            class="pip is-ok"
-                                            title="Identity key published for this member"
-                                        >
-                                            <lucide-icon [img]="shieldCheckIcon" />
-                                        </span>
-                                    } @else {
-                                        <span
-                                            class="pip is-warn"
-                                            title="No identity key published — cannot receive encrypted messages"
-                                        >
-                                            <lucide-icon [img]="shieldAlertIcon" />
-                                        </span>
-                                    }
-                                }
+                <div class="actions">
+                    @if (!member.isMe && !member.deleted && member.hasKeys && !isChannel()) {
+                        <a
+                            class="tile"
+                            [routerLink]="['/chats', chat()!.id, 'safety', member.userId]"
+                        >
+                            <span class="tile-icon"><lucide-icon [img]="shieldIcon" /></span>
+                            <span class="tile-text">
+                                <span class="tile-title">Safety number</span>
+                                <span class="tile-sub">Compare to confirm no key was substituted</span>
                             </span>
-                            <span class="member-sub">
-                                {{ member.role }}
-                                @if (member.deleted) {
-                                    · account deleted
-                                } @else if (member.username) {
-                                    · &#64;{{ member.username }}
-                                }
-                            </span>
-                        </span>
+                            <lucide-icon
+                                [img]="chevronRightIcon"
+                                class="tile-chevron"
+                            />
+                        </a>
+                    }
 
-                        @if (!member.isMe && !member.deleted && !contacted().has(member.userId)) {
+                    @if (!member.isMe && !member.deleted && !isPrivate()) {
+                        <button
+                            type="button"
+                            class="tile"
+                            [disabled]="busy()"
+                            (click)="messageMember(member)"
+                        >
+                            <span class="tile-icon"><lucide-icon [img]="messageIcon" /></span>
+                            <span class="tile-text">
+                                <span class="tile-title">Message</span>
+                                <span class="tile-sub">Open a private chat</span>
+                            </span>
+                        </button>
+                    }
+
+                    @if (!member.isMe && !member.deleted) {
+                        @if (contacted().has(member.userId)) {
+                            <p class="saved-note">
+                                <lucide-icon [img]="checkIcon" />
+                                Saved as a contact
+                            </p>
+                        } @else {
                             <button
                                 type="button"
-                                class="member-action"
+                                class="tile"
                                 [disabled]="busy()"
-                                [attr.aria-label]="'Save ' + member.name + ' as a contact'"
-                                title="Save as contact"
                                 (click)="addContact(member)"
                             >
-                                <lucide-icon [img]="bookmarkIcon" />
+                                <span class="tile-icon"><lucide-icon [img]="bookmarkIcon" /></span>
+                                <span class="tile-text">
+                                    <span class="tile-title">Save as contact</span>
+                                    <span class="tile-sub">Lets their name resolve everywhere</span>
+                                </span>
                             </button>
-                        } @else if (contacted().has(member.userId)) {
-                            <span
-                                class="member-saved"
-                                title="Saved as a contact"
-                            >
-                                <lucide-icon [img]="checkIcon" />
+                        }
+                    }
+
+                    @if (canChangeRole(member)) {
+                        <label class="tile role-tile">
+                            <span class="tile-icon"><lucide-icon [img]="userPlusIcon" /></span>
+                            <span class="tile-text">
+                                <span class="tile-title">Role</span>
                             </span>
-                        }
-
-                        @if (canTransferTo(member)) {
-                            <!-- Armed on first press. Irreversible from this side: afterwards only
-                                 the new owner can hand it back. -->
-                            @if (confirming() === 'owner:' + member.userId) {
-                                <button
-                                    type="button"
-                                    class="member-action is-confirm"
-                                    [disabled]="busy()"
-                                    (click)="transferOwnership(member.userId)"
-                                >
-                                    Make owner?
-                                </button>
-                                <button
-                                    type="button"
-                                    class="member-action"
-                                    [disabled]="busy()"
-                                    aria-label="Cancel"
-                                    title="Cancel"
-                                    (click)="cancelConfirm()"
-                                >
-                                    <lucide-icon [img]="xIcon" />
-                                </button>
-                            } @else {
-                                <button
-                                    type="button"
-                                    class="member-action"
-                                    [disabled]="busy()"
-                                    [attr.aria-label]="'Make ' + member.name + ' the owner'"
-                                    title="Make owner"
-                                    (click)="transferOwnership(member.userId)"
-                                >
-                                    <lucide-icon [img]="crownIcon" />
-                                </button>
-                            }
-                        }
-
-                        @if (canChangeRole(member)) {
-                            <!-- Only admin and member here. Granting OWNER is a separate action
-                                 above, because it demotes the current owner in the same step. -->
                             <select
                                 class="member-role"
                                 [disabled]="busy()"
@@ -433,122 +177,594 @@
                                 <option value="admin">Admin</option>
                                 <option value="member">Member</option>
                             </select>
-                        }
+                        </label>
+                    }
 
-                        @if (canRemove(member)) {
+                    @if (canTransferTo(member)) {
+                        <button
+                            type="button"
+                            class="tile"
+                            [disabled]="busy()"
+                            (click)="confirmMakeOwner(member)"
+                        >
+                            <span class="tile-icon"><lucide-icon [img]="crownIcon" /></span>
+                            <span class="tile-text">
+                                <span class="tile-title">Make owner</span>
+                                <span class="tile-sub">You become an admin</span>
+                            </span>
+                        </button>
+                    }
+
+                    @if (canRemove(member)) {
+                        <button
+                            type="button"
+                            class="tile is-danger"
+                            [disabled]="busy()"
+                            (click)="confirmRemove(member)"
+                        >
+                            <span class="tile-icon"><lucide-icon [img]="userMinusIcon" /></span>
+                            <span class="tile-text">
+                                <span class="tile-title">Remove from chat</span>
+                                <span class="tile-sub">Rotates the chat's keys</span>
+                            </span>
+                        </button>
+                    }
+                </div>
+            </section>
+        } @else {
+            <section class="profile">
+                <app-avatar
+                    size="lg"
+                    [name]="title()"
+                    [kind]="avatarKindFor(chat()!.chat_type)"
+                    [seed]="chat()!.id"
+                    [imageUrl]="chat()!.peer_is_deleted ? null : chat()!.avatar_url"
+                    [deleted]="chat()!.peer_is_deleted === true"
+                />
+                <h3 class="profile-name">{{ title() }}</h3>
+                @if (peerUsername()) {
+                    <p class="profile-username">&#64;{{ peerUsername() }}</p>
+                } @else if (!isPrivate()) {
+                    <p class="profile-username">
+                        {{ members().length }} {{ isChannel() ? 'subscriber' : 'member'
+                        }}{{ members().length === 1 ? '' : 's' }}
+                    </p>
+                }
+
+                <!-- One compact badge; the full wording is the tooltip and the alarm below when it fails. -->
+                @if (isChannel()) {
+                    <p
+                        class="badge is-warn"
+                        title="Channel posts are signed so you know who wrote them, but they are not encrypted."
+                    >
+                        <lucide-icon [img]="shieldOffIcon" />
+                        Signed · not encrypted
+                    </p>
+                } @else if (memberSetVerified() === true) {
+                    <p
+                        class="badge is-ok"
+                        title="The member list matches the commitment for the current key epoch."
+                    >
+                        <lucide-icon [img]="shieldCheckIcon" />
+                        Key epoch verified
+                    </p>
+                } @else if (memberSetVerified() === false) {
+                    <p
+                        class="badge is-danger"
+                        title="The member list does not match the commitment for the current key epoch."
+                    >
+                        <lucide-icon [img]="shieldAlertIcon" />
+                        Epoch mismatch
+                    </p>
+                }
+            </section>
+
+            <!-- Highest severity in the app. Stated in terms of what it means, not as a generic error:
+                 the recomputed member hash disagrees with the epoch commitment, so an extra device may
+                 have been inserted that would read future messages. -->
+            @if (memberSetVerified() === false) {
+                <section
+                    class="alarm"
+                    role="alert"
+                >
+                    <lucide-icon [img]="shieldAlertIcon" />
+                    <div>
+                        <p class="alarm-title">The server may be lying to you</p>
+                        <p class="alarm-note">
+                            The member list below hashes to a different value than the one committed to this chat's
+                            current key epoch. A device may have been added without the members' knowledge, and it would
+                            be able to read messages sent from now on. This client will not distribute keys while that
+                            is true, so sending is blocked. Confirm the member list with the other participants by
+                            another channel before continuing.
+                        </p>
+                    </div>
+                </section>
+            }
+
+            <div
+                class="info-tabs"
+                role="tablist"
+                aria-label="Chat details"
+            >
+                @for (item of tabs(); track item.id) {
+                    <button
+                        type="button"
+                        role="tab"
+                        class="info-tab"
+                        [id]="'chat-info-tab-' + item.id"
+                        [class.is-active]="tab() === item.id"
+                        [attr.aria-selected]="tab() === item.id"
+                        [attr.aria-controls]="'chat-info-body-' + item.id"
+                        [attr.tabindex]="tab() === item.id ? 0 : -1"
+                        (click)="selectTab(item.id)"
+                        (keydown)="onTabKeydown($event, root)"
+                    >
+                        {{ item.label }}
+                    </button>
+                }
+            </div>
+
+            <div
+                class="tab-body"
+                role="tabpanel"
+                [id]="'chat-info-body-' + tab()"
+                [attr.aria-labelledby]="'chat-info-tab-' + tab()"
+            >
+                @switch (tab()) {
+                    @case ('main') {
+                        @if (isPrivate()) {
+                            <section class="group">
+                                @if (peer(); as other) {
+                                    <ul class="facts">
+                                        <li>
+                                            <span class="fact-label">Name</span>
+                                            <span class="fact-value">{{ other.name }}</span>
+                                        </li>
+                                        @if (peerUsername()) {
+                                            <li>
+                                                <span class="fact-label">Username</span>
+                                                <span class="fact-value">&#64;{{ peerUsername() }}</span>
+                                            </li>
+                                        }
+                                        <li>
+                                            <span class="fact-label">Identity key</span>
+                                            <span class="fact-value">
+                                                @if (other.deleted) {
+                                                    Account deleted
+                                                } @else if (other.hasKeys) {
+                                                    Published
+                                                } @else {
+                                                    Not published
+                                                }
+                                            </span>
+                                        </li>
+                                    </ul>
+                                }
+
+                                @if (peerId()) {
+                                    <a
+                                        class="tile"
+                                        [routerLink]="['/chats', chat()!.id, 'safety', peerId()!]"
+                                    >
+                                        <span class="tile-icon">
+                                            <lucide-icon [img]="shieldIcon" />
+                                        </span>
+                                        <span class="tile-text">
+                                            <span class="tile-title">Safety number</span>
+                                            <span class="mono tile-sub">
+                                                @if (safetyPreview().length) {
+                                                    {{ safetyPreview().join(' ') }}…
+                                                } @else {
+                                                    Compare to confirm no key was substituted
+                                                }
+                                            </span>
+                                        </span>
+                                        <lucide-icon
+                                            [img]="chevronRightIcon"
+                                            class="tile-chevron"
+                                        />
+                                    </a>
+                                }
+
+                                @if (peer(); as other) {
+                                    @if (!other.deleted) {
+                                        @if (contacted().has(other.userId)) {
+                                            <p class="saved-note">
+                                                <lucide-icon [img]="checkIcon" />
+                                                Saved as a contact
+                                            </p>
+                                        } @else {
+                                            <button
+                                                type="button"
+                                                class="tile"
+                                                [disabled]="busy()"
+                                                (click)="addContact(other)"
+                                            >
+                                                <span class="tile-icon"><lucide-icon [img]="bookmarkIcon" /></span>
+                                                <span class="tile-text">
+                                                    <span class="tile-title">Save as contact</span>
+                                                    <span class="tile-sub">Lets their name resolve everywhere</span>
+                                                </span>
+                                            </button>
+                                        }
+                                    }
+                                }
+                            </section>
+                        } @else {
+                            <section class="group">
+                                <div class="section-row">
+                                    <p class="section">
+                                        {{ isChannel() ? 'Subscribers' : 'Members' }} · {{ members().length }}
+                                    </p>
+                                    @if (canManage()) {
+                                        <button
+                                            type="button"
+                                            class="section-action"
+                                            (click)="addOpen.set(!addOpen())"
+                                        >
+                                            <lucide-icon [img]="userPlusIcon" />
+                                            Add
+                                        </button>
+                                    }
+                                </div>
+
+                                @if (addOpen()) {
+                                    <div class="add-panel">
+                                        <div class="search">
+                                            <lucide-icon [img]="searchIcon" />
+                                            <input
+                                                type="search"
+                                                placeholder="Search people by username…"
+                                                aria-label="Search people to add"
+                                                [value]="addQuery()"
+                                                (input)="searchPeople($any($event.target).value)"
+                                            />
+                                        </div>
+
+                                        <!-- Adding a member rotates the key epoch, so this is not a cosmetic change:
+                                             everyone re-mints a chain and the joiner is covered only by the new one. -->
+                                        <p class="add-note">
+                                            Adding someone rotates this chat's keys. They will be able to read messages
+                                            sent from now on, but not what came before.
+                                        </p>
+
+                                        @for (person of addResults(); track person.id) {
+                                            <button
+                                                type="button"
+                                                class="add-result"
+                                                [disabled]="busy()"
+                                                (click)="addParticipant(person)"
+                                            >
+                                                <app-avatar
+                                                    size="sm"
+                                                    [name]="person.full_name"
+                                                    [seed]="person.id"
+                                                    [imageUrl]="person.avatar_url"
+                                                />
+                                                <span class="add-result-text">
+                                                    <span class="member-name">{{ person.full_name }}</span>
+                                                    <span class="member-sub">&#64;{{ person.username }}</span>
+                                                </span>
+                                                <lucide-icon [img]="userPlusIcon" />
+                                            </button>
+                                        }
+                                    </div>
+                                }
+
+                                <ul class="members">
+                                    @for (member of members(); track member.userId) {
+                                        <li [appContextMenu]="memberMenu(member)">
+                                            <!-- The whole row opens the member's profile: Enter and Space work
+                                                 because it is a real button, and the actions that used to
+                                                 crowd the row now live in that profile. -->
+                                            <button
+                                                type="button"
+                                                class="member"
+                                                [attr.data-member-id]="member.userId"
+                                                [attr.aria-label]="
+                                                    'Open profile of ' + (member.isMe ? 'you' : member.name)
+                                                "
+                                                (click)="openMember(member)"
+                                            >
+                                                <app-avatar
+                                                    size="sm"
+                                                    [name]="member.name"
+                                                    [seed]="member.userId"
+                                                    [imageUrl]="member.avatarUrl"
+                                                    [deleted]="member.deleted"
+                                                />
+
+                                                <span class="member-text">
+                                                    <span class="member-line">
+                                                        <span
+                                                            class="member-name"
+                                                            [class.is-unresolved]="!member.resolved"
+                                                            >{{ member.isMe ? 'You' : member.name }}</span
+                                                        >
+
+                                                        <!-- Published keys are a fact about the roster, not a claim
+                                                             that the identity has been verified out of band. -->
+                                                        @if (!isChannel()) {
+                                                            <!-- A deleted member gets no pip at all: a check would
+                                                                 imply a live, verifiable identity, and an alert a
+                                                                 fault. The subline says what it is. -->
+                                                            @if (member.deleted) {
+                                                                <!-- intentionally empty -->
+                                                            } @else if (member.hasKeys) {
+                                                                <span
+                                                                    class="pip is-ok"
+                                                                    title="Identity key published for this member"
+                                                                >
+                                                                    <lucide-icon [img]="shieldCheckIcon" />
+                                                                </span>
+                                                            } @else {
+                                                                <span
+                                                                    class="pip is-warn"
+                                                                    title="No identity key published — cannot receive encrypted messages"
+                                                                >
+                                                                    <lucide-icon [img]="shieldAlertIcon" />
+                                                                </span>
+                                                            }
+                                                        }
+                                                    </span>
+                                                    <span class="member-sub">
+                                                        {{ member.role }}
+                                                        @if (member.deleted) {
+                                                            · account deleted
+                                                        } @else if (member.username) {
+                                                            · &#64;{{ member.username }}
+                                                        }
+                                                    </span>
+                                                </span>
+                                                <lucide-icon
+                                                    [img]="chevronRightIcon"
+                                                    class="tile-chevron"
+                                                />
+                                            </button>
+                                        </li>
+                                    }
+                                </ul>
+
+                                @if (!isChannel() && membersWithoutKeys() > 0) {
+                                    <p class="warn-line">
+                                        <lucide-icon [img]="shieldAlertIcon" />
+                                        {{ membersWithoutKeys() }} member{{
+                                            membersWithoutKeys() === 1 ? ' has' : 's have'
+                                        }}
+                                        not published an identity key yet and cannot read encrypted messages.
+                                    </p>
+                                }
+                            </section>
+                        }
+                    }
+
+                    @case ('settings') {
+                        <section class="group">
+                            <p class="section">Notifications</p>
                             <button
                                 type="button"
-                                class="member-action"
-                                [disabled]="busy()"
-                                [attr.aria-label]="'Remove ' + member.name"
-                                title="Remove from chat"
-                                (click)="removeMember(member.userId)"
+                                class="tile"
+                                [attr.aria-pressed]="isMuted()"
+                                (click)="toggleMute()"
                             >
-                                <lucide-icon [img]="userMinusIcon" />
+                                <span class="tile-icon">
+                                    <lucide-icon [img]="isMuted() ? bellOffIcon : bellIcon" />
+                                </span>
+                                <span class="tile-text">
+                                    <span class="tile-title">Mute notifications</span>
+                                    <span class="tile-sub">
+                                        {{ isMuted() ? 'Muted — no local notifications for this chat' : 'Not muted' }}
+                                    </span>
+                                </span>
+                                <span
+                                    class="switch"
+                                    [class.is-on]="isMuted()"
+                                    aria-hidden="true"
+                                ></span>
                             </button>
+                        </section>
+
+                        @if (canManageInvites()) {
+                            <section class="group">
+                                <p class="section">Invite link</p>
+
+                                <div class="invite-create">
+                                    <label class="invite-field">
+                                        <span>Expires</span>
+                                        <select
+                                            [value]="expiryPreset()"
+                                            [disabled]="inviteBusy()"
+                                            (change)="expiryPreset.set($any($event.target).value)"
+                                        >
+                                            <option value="none">Never</option>
+                                            <option value="1d">In 1 day</option>
+                                            <option value="7d">In 7 days</option>
+                                        </select>
+                                    </label>
+                                    <label class="invite-field">
+                                        <span>Uses</span>
+                                        <select
+                                            [value]="maxUsesPreset()"
+                                            [disabled]="inviteBusy()"
+                                            (change)="maxUsesPreset.set($any($event.target).value)"
+                                        >
+                                            <option value="none">No limit</option>
+                                            <option value="1">1 use</option>
+                                            <option value="10">10 uses</option>
+                                        </select>
+                                    </label>
+                                    <button
+                                        type="button"
+                                        class="section-action invite-generate"
+                                        [disabled]="inviteBusy()"
+                                        (click)="createInviteLink()"
+                                    >
+                                        <lucide-icon [img]="linkIcon" />
+                                        Generate link
+                                    </button>
+                                </div>
+
+                                @if (inviteError()) {
+                                    <p
+                                        class="error"
+                                        role="alert"
+                                    >
+                                        {{ inviteError() }}
+                                    </p>
+                                }
+
+                                @if (inviteLinksLoading()) {
+                                    <p class="muted small">Loading invite links…</p>
+                                } @else if (activeInviteLinks().length) {
+                                    <ul class="invite-list">
+                                        @for (link of activeInviteLinks(); track link.id) {
+                                            <li class="invite-row">
+                                                <span class="invite-text">
+                                                    <span class="mono invite-url">{{ inviteLinkUrl(link) }}</span>
+                                                    <span class="invite-sub">
+                                                        {{ link.use_count
+                                                        }}{{ link.max_uses ? '/' + link.max_uses : '' }}
+                                                        used
+                                                        @if (link.expires_at) {
+                                                            · expires {{ link.expires_at | date: 'short' }}
+                                                        }
+                                                    </span>
+                                                </span>
+                                                <button
+                                                    type="button"
+                                                    class="member-action"
+                                                    [disabled]="inviteBusy()"
+                                                    [attr.aria-label]="'Copy invite link'"
+                                                    title="Copy link"
+                                                    (click)="copyInviteLink(link)"
+                                                >
+                                                    <lucide-icon
+                                                        [img]="copiedToken() === link.token ? checkIcon : copyIcon"
+                                                    />
+                                                </button>
+                                                <!-- Armed on first press: revoking is irreversible and sits right
+                                                     next to the copy button. -->
+                                                @if (confirming() === 'revoke:' + link.id) {
+                                                    <button
+                                                        type="button"
+                                                        class="member-action is-confirm"
+                                                        [disabled]="inviteBusy()"
+                                                        (click)="revokeInviteLink(link)"
+                                                    >
+                                                        Revoke?
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        class="member-action"
+                                                        [disabled]="inviteBusy()"
+                                                        aria-label="Cancel"
+                                                        title="Cancel"
+                                                        (click)="cancelConfirm()"
+                                                    >
+                                                        <lucide-icon [img]="xIcon" />
+                                                    </button>
+                                                } @else {
+                                                    <button
+                                                        type="button"
+                                                        class="member-action"
+                                                        [disabled]="inviteBusy()"
+                                                        aria-label="Revoke invite link"
+                                                        title="Revoke"
+                                                        (click)="revokeInviteLink(link)"
+                                                    >
+                                                        <lucide-icon [img]="xIcon" />
+                                                    </button>
+                                                }
+                                            </li>
+                                        }
+                                    </ul>
+                                } @else {
+                                    <p class="muted small">
+                                        No active invite links. Generate one to invite people by link.
+                                    </p>
+                                }
+                            </section>
                         }
-                    </li>
-                }
-            </ul>
+                    }
 
-            @if (!isChannel() && membersWithoutKeys() > 0) {
-                <p class="warn-line">
-                    <lucide-icon [img]="shieldAlertIcon" />
-                    {{ membersWithoutKeys() }} member{{ membersWithoutKeys() === 1 ? ' has' : 's have' }} not published
-                    an identity key yet and cannot read encrypted messages.
-                </p>
-            }
-        </section>
+                    @case ('data') {
+                        <section class="group">
+                            <p class="section">Data</p>
+                            <button
+                                type="button"
+                                class="tile export-row"
+                                (click)="exportOpen.set(true)"
+                            >
+                                <span class="tile-icon">
+                                    <lucide-icon [img]="downloadIcon" />
+                                </span>
+                                <span class="tile-text">
+                                    <span class="tile-title">Export chat history</span>
+                                    <span class="tile-sub">Save a decrypted JSON copy to this device</span>
+                                </span>
+                            </button>
+                            <button
+                                type="button"
+                                class="tile clear-row"
+                                (click)="clearHistory()"
+                            >
+                                <span class="tile-icon">
+                                    <lucide-icon [img]="eraserIcon" />
+                                </span>
+                                <span class="tile-text">
+                                    <span class="tile-title">Clear history</span>
+                                    <span class="tile-sub">Only for you</span>
+                                </span>
+                            </button>
+                        </section>
 
-        <section class="group">
-            <p class="section">Data</p>
-            <button
-                type="button"
-                class="tile export-row"
-                (click)="exportOpen.set(true)"
-            >
-                <span class="tile-icon">
-                    <lucide-icon [img]="downloadIcon" />
-                </span>
-                <span class="tile-text">
-                    <span class="tile-title">Export chat history</span>
-                    <span class="tile-sub">Save a decrypted JSON copy to this device</span>
-                </span>
-            </button>
-        </section>
+                        @if (!isPrivate()) {
+                            <section class="group">
+                                <p class="section">Leave</p>
+                                <div class="panel">
+                                    <button
+                                        type="button"
+                                        class="danger-row"
+                                        [disabled]="busy() || ownerMustTransferFirst()"
+                                        (click)="leave()"
+                                    >
+                                        <lucide-icon [img]="logOutIcon" />
+                                        {{ isChannel() ? 'Unsubscribe from channel' : 'Leave chat' }}
+                                    </button>
 
-        @if (exportOpen()) {
-            <app-export-dialog
-                [chatId]="chatId()"
-                (closed)="exportOpen.set(false)"
-            />
-        }
+                                    @if (isOwner()) {
+                                        <button
+                                            type="button"
+                                            class="danger-row"
+                                            [disabled]="busy()"
+                                            (click)="deleteChat()"
+                                        >
+                                            <lucide-icon [img]="trashIcon" />
+                                            {{ isChannel() ? 'Delete channel' : 'Delete chat' }}
+                                        </button>
+                                    }
+                                </div>
 
-        <section class="group">
-            <div class="panel">
-                <button
-                    type="button"
-                    class="danger-row"
-                    [disabled]="busy() || ownerMustTransferFirst()"
-                    (click)="leave()"
-                >
-                    <lucide-icon [img]="logOutIcon" />
-                    {{ isChannel() ? 'Unsubscribe from channel' : 'Leave chat' }}
-                </button>
-
-                @if (isOwner() && !isPrivate()) {
-                    @if (confirming() === 'delete') {
-                        <button
-                            type="button"
-                            class="danger-row is-confirm"
-                            [disabled]="busy()"
-                            (click)="deleteChat()"
-                        >
-                            <lucide-icon [img]="trashIcon" />
-                            Delete permanently, for everyone
-                        </button>
-                        <button
-                            type="button"
-                            class="danger-row is-cancel"
-                            [disabled]="busy()"
-                            (click)="cancelConfirm()"
-                        >
-                            Cancel
-                        </button>
-                    } @else {
-                        <button
-                            type="button"
-                            class="danger-row"
-                            [disabled]="busy()"
-                            (click)="deleteChat()"
-                        >
-                            <lucide-icon [img]="trashIcon" />
-                            {{ isChannel() ? 'Delete channel' : 'Delete chat' }}
-                        </button>
+                                @if (ownerMustTransferFirst()) {
+                                    <!-- Said before they press it, not after the server refuses: the way out
+                                         is not something a user can guess from a rejection. -->
+                                    <p class="muted small">
+                                        You own this {{ isChannel() ? 'channel' : 'chat' }}, so you cannot leave it.
+                                        Make someone else the owner first, or delete it.
+                                    </p>
+                                }
+                            </section>
+                        }
                     }
                 }
             </div>
 
-            @if (ownerMustTransferFirst()) {
-                <!-- Said before they press it, not after the server refuses: a chat with no owner
-                     would have nobody able to delete it or hand it on, and the way out is not
-                     something the user can guess from a rejection. -->
-                <p class="muted small">
-                    You own this {{ isChannel() ? 'channel' : 'chat' }}, so you cannot leave it. Make someone else the
-                    owner first, or delete it.
-                </p>
-            } @else if (!isChannel()) {
-                <p class="muted small">
-                    Leaving rotates the group key, so nothing sent after you go will be readable with the key you hold.
-                </p>
+            @if (exportOpen()) {
+                <app-export-dialog
+                    [chatId]="chatId()"
+                    (closed)="exportOpen.set(false)"
+                />
             }
-
-            @if (isOwner() && !isPrivate()) {
-                <p class="muted small">
-                    Deleting removes the {{ isChannel() ? 'channel' : 'chat' }} and every message in it for
-                    <strong>everyone</strong>, not just for you. This cannot be undone.
-                </p>
-            }
-        </section>
+        }
     }
 </div>

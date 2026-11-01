@@ -1,0 +1,169 @@
+@use 'ui';
+
+// Above the settings dialog (which hosts it) and below the confirm dialog.
+.backdrop {
+    @include ui.modal-backdrop;
+
+    z-index: 75;
+}
+
+.dialog {
+    @include ui.modal-card(24rem);
+
+    z-index: 76;
+    gap: 1rem;
+    padding: 1.25rem;
+
+    &:focus {
+        outline: none;
+    }
+}
+
+.title {
+    margin: 0;
+    color: var(--foreground);
+    font-size: 1.0625rem;
+    font-weight: 600;
+}
+
+.help {
+    margin: -0.5rem 0 0;
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+    line-height: 1.5;
+}
+
+.stage {
+    position: relative;
+    flex-shrink: 0;
+    width: min(18rem, 100%);
+    aspect-ratio: 1;
+    margin: 0 auto;
+    overflow: hidden;
+    background: var(--surface-raised);
+    border-radius: var(--radius-lg);
+    cursor: grab;
+    // The browser must not scroll or zoom the page for gestures that belong to the cropper.
+    touch-action: none;
+    user-select: none;
+
+    &.is-dragging {
+        cursor: grabbing;
+    }
+
+    &:focus-visible {
+        outline: 2px solid var(--primary);
+        outline-offset: 2px;
+    }
+}
+
+.picture {
+    display: block;
+    width: 100%;
+    height: 100%;
+}
+
+// Dims everything outside the inscribed circle: what is inside is what the avatar will show.
+.mask {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    box-shadow:
+        0 0 0 100vmax rgb(0 0 0 / 55%),
+        inset 0 0 0 2px rgb(255 255 255 / 70%);
+    pointer-events: none;
+}
+
+.state {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted-foreground);
+    font-size: 0.8125rem;
+}
+
+.controls {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+
+.slider {
+    flex: 1;
+    min-width: 3rem;
+    accent-color: var(--primary);
+}
+
+.tool {
+    @include ui.icon-button(2rem);
+
+    lucide-icon {
+        width: 1.125rem;
+        height: 1.125rem;
+    }
+
+    &:focus-visible {
+        outline: 2px solid var(--primary);
+        outline-offset: 1px;
+    }
+}
+
+.divider {
+    align-self: stretch;
+    width: 1px;
+    margin: 0.25rem 0.25rem;
+    background: var(--border);
+}
+
+.error {
+    margin: 0;
+    padding: 0.625rem 0.75rem;
+    background: var(--danger-surface);
+    border: 1px solid var(--danger-border);
+    border-radius: var(--radius-lg);
+    color: var(--danger-strong);
+    font-size: 0.8125rem;
+}
+
+.actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+}
+
+.btn {
+    padding: 0.5rem 1rem;
+    background: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--foreground);
+    font-size: 0.875rem;
+    font-weight: 500;
+    cursor: pointer;
+
+    &:hover:not(:disabled) {
+        background: var(--surface-raised);
+    }
+
+    &:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+
+    &:focus-visible {
+        outline: 2px solid var(--primary);
+        outline-offset: 2px;
+    }
+
+    &.is-primary {
+        background: var(--primary);
+        border-color: transparent;
+        color: var(--primary-foreground);
+
+        &:hover:not(:disabled) {
+            opacity: 0.9;
+        }
+    }
+}

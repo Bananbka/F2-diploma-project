@@ -21,13 +21,13 @@
         [style.background-color]="color()"
         aria-hidden="true"
     >
-        @if (isChannel()) {
+        @if (monogram()) {
+            {{ monogram() }}
+        } @else {
             <lucide-icon
-                [img]="hashIcon"
+                [img]="kind() === 'channel' ? hashIcon : usersIcon"
                 class="hash"
             />
-        } @else {
-            {{ monogram() }}
         }
     </span>
     <span class="sr-only">{{ name() }}</span>

@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, computed, inject, input, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, effect, inject, input, signal, untracked } from '@angular/core';
 import { Router } from '@angular/router';
 import {
     BellOff,
@@ -10,7 +10,6 @@ import {
     Plus,
     Search,
     ShieldOff,
-    Trash2,
     Users,
 } from 'lucide-angular';
 import { firstValueFrom } from 'rxjs';
@@ -19,19 +18,22 @@ import { Chat, UserSearchResult } from '../../../core/models/chat.model';
 import { ChatApiService } from '../../../core/services/chat-api.service';
 import { ChatStoreService } from '../../../core/services/chat-store.service';
 import { DirectoryService } from '../../../core/services/directory.service';
-import { Folder, FolderApiService } from '../../../core/services/folder-api.service';
+import { Folder } from '../../../core/services/folder-api.service';
+import { FolderStoreService } from '../../../core/services/folder-store.service';
 import { ToastService } from '../../../core/services/toast.service';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
 import { ConfirmService } from '../../../shared/ui/confirm-dialog/confirm.service';
 import { ContextMenuDirective, ContextMenuProvider } from '../../../shared/ui/context-menu/context-menu.directive';
-import { ContextMenuEntry } from '../../../shared/ui/context-menu/context-menu.model';
-import { chatListTime, DELETED_USER_LABEL } from '../../../shared/utils/display';
+import { avatarKindFor, chatListTime, chatTitle } from '../../../shared/utils/display';
+import { ChatNavComponent, FolderEditRequest } from '../chat-nav/chat-nav.component';
+import { chatsInView, ChatViewKey, isFolderKey } from '../chat-nav/chat-views';
+import { FolderEditDialogComponent } from '../folder-edit-dialog/folder-edit-dialog.component';
 import { ChatFilter } from '../navigation-rail/navigation-rail.component';
 import { buildChatMenu } from './chat-menu';
 
 @Component({
     selector: 'app-chat-sidebar',
-    imports: [LucideAngularModule, AvatarComponent, ContextMenuDirective],
+    imports: [LucideAngularModule, AvatarComponent, ContextMenuDirective, ChatNavComponent, FolderEditDialogComponent],
     templateUrl: './chat-sidebar.component.html',
     styleUrl: './chat-sidebar.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
@@ -40,21 +42,43 @@ export class ChatSidebarComponent {
     private readonly store = inject(ChatStoreService);
     private readonly chatApi = inject(ChatApiService);
     private readonly directory = inject(DirectoryService);
-    private readonly folderApi = inject(FolderApiService);
+    private readonly folderStore = inject(FolderStoreService);
     private readonly toast = inject(ToastService);
     private readonly router = inject(Router);
     private readonly confirm = inject(ConfirmService);
 
     readonly filter = input.required<ChatFilter>();
+    /** Bumped on every rail click, so choosing the filter that is already current still resets the view. */
+    readonly filterVersion = input(0);
 
     constructor() {
-        void this.loadFolders();
+        void this.folderStore.load();
+
+        // The rail's Chats / Groups / Channels still pick a view; after that the nav owns it.
+        effect(() => {
+            const filter = this.filter();
+            this.filterVersion();
+            untracked(() => this.view.set(filter));
+        });
+
+        // A selected folder that is gone (deleted elsewhere) must not leave the list filtered by
+        // nothing while the nav shows no selection: fall back to everything, in both places.
+        effect(() => {
+            const view = this.view();
+            if (
+                isFolderKey(view) &&
+                this.folderStore.loaded() &&
+                !this.folders().some((f) => `folder:${f.id}` === view)
+            ) {
+                untracked(() => this.view.set('all'));
+            }
+        });
     }
 
     readonly query = signal('');
     readonly menuOpen = signal(false);
-    readonly folderEditorOpen = signal(false);
-    readonly newFolderTitle = signal('');
+    /** The folder dialog: closed, creating, or editing one (and which part to land on). */
+    readonly folderDialog = signal<{ folder: Folder | null; focus: 'name' | 'chats' } | null>(null);
     readonly people = signal<UserSearchResult[]>([]);
     readonly searching = signal(false);
 
@@ -63,24 +87,14 @@ export class ChatSidebarComponent {
     readonly error = this.store.chatsError;
     readonly activeChatId = this.store.activeChatId;
 
-    readonly folders = signal<Folder[]>([]);
-    readonly activeFolder = signal<string | null>(null);
+    readonly folders = this.folderStore.folders;
+    /** The selected view: a system view or one of the user's folders. */
+    readonly view = signal<ChatViewKey>('all');
 
     readonly visibleChats = computed(() => {
-        const filter = this.filter();
         const needle = this.query().trim().toLowerCase();
-        const folderId = this.activeFolder();
-        const inFolder = folderId
-            ? new Set(
-                  this.folders()
-                      .find((f) => f.id === folderId)
-                      ?.items.map((i) => i.chat_id) ?? []
-              )
-            : null;
 
-        return this.chats()
-            .filter((chat) => filter === 'all' || chat.chat_type === filter)
-            .filter((chat) => !inFolder || inFolder.has(chat.id))
+        return chatsInView(this.chats(), this.view(), this.folders())
             .filter((chat) => !needle || this.titleOf(chat).toLowerCase().includes(needle))
             .sort((a, b) => this.pinKey(b) - this.pinKey(a) || this.sortKey(b) - this.sortKey(a));
     });
@@ -94,58 +108,37 @@ export class ChatSidebarComponent {
         return Number.isNaN(parsed) ? 1 : parsed;
     }
 
-    async loadFolders(): Promise<void> {
-        try {
-            this.folders.set(await firstValueFrom(this.folderApi.getFolders()));
-        } catch {
-            // Folders are an organisational convenience; the unfiltered list still works without them.
-            this.folders.set([]);
-        }
+    selectView(key: ChatViewKey): void {
+        this.view.set(key);
     }
 
-    /**
-     * Put the open chat in a folder, or take it out.
-     *
-     * The whole membership set is sent because `PATCH` replaces `chat_ids` outright rather than
-     * merging — passing only the delta would silently empty the folder.
-     */
+    /** Put the chat in a folder, or take it out (the row menu's "Add to folder"). */
     async toggleChatInFolder(folder: Folder, chatId: string): Promise<void> {
-        const current = folder.items.map((item) => item.chat_id);
-        const next = current.includes(chatId) ? current.filter((id) => id !== chatId) : [...current, chatId];
-
-        try {
-            await firstValueFrom(this.folderApi.updateFolder(folder.id, { chat_ids: next }));
-            await this.loadFolders();
-        } catch {
+        if (!(await this.folderStore.toggleChat(folder.id, chatId))) {
             this.toast.error('Could not update that folder.');
         }
     }
 
-    async createFolder(): Promise<void> {
-        const title = this.newFolderTitle().trim();
-        if (!title) {
-            return;
-        }
-
-        try {
-            await firstValueFrom(this.folderApi.createFolder(title, []));
-            this.newFolderTitle.set('');
-            this.folderEditorOpen.set(false);
-            await this.loadFolders();
-        } catch {
-            // The input keeps its value, so the attempt is not lost.
-            this.toast.error('Could not create that folder.');
-        }
+    openFolderDialog(request?: FolderEditRequest): void {
+        this.menuOpen.set(false);
+        this.folderDialog.set({ folder: request?.folder ?? null, focus: request?.focus ?? 'name' });
     }
 
-    async deleteFolder(folder: Folder): Promise<void> {
-        try {
-            await firstValueFrom(this.folderApi.deleteFolder(folder.id));
-            if (this.activeFolder() === folder.id) {
-                this.activeFolder.set(null);
+    async confirmDeleteFolder(folder: Folder): Promise<void> {
+        const confirmed = await this.confirm.ask({
+            title: 'Delete folder?',
+            message: `The folder “${folder.title}” is removed. The chats in it are not affected.`,
+            confirmLabel: 'Delete folder',
+            danger: true,
+        });
+        if (!confirmed) {
+            return;
+        }
+        if (await this.folderStore.remove(folder)) {
+            if (this.view() === `folder:${folder.id}`) {
+                this.view.set('all');
             }
-            await this.loadFolders();
-        } catch {
+        } else {
             this.toast.error('Could not delete that folder.');
         }
     }
@@ -160,6 +153,7 @@ export class ChatSidebarComponent {
         return this.people().filter((person) => !existing.has(person.full_name.toLowerCase()));
     });
 
+    readonly avatarKindFor = avatarKindFor;
     readonly searchIcon = Search;
     readonly plusIcon = Plus;
     readonly usersIcon = Users;
@@ -170,22 +164,10 @@ export class ChatSidebarComponent {
     readonly bellOffIcon = BellOff;
     readonly pinIcon = Pin;
 
-    isChatInFolder(folder: Folder, chatId: string): boolean {
-        return folder.items.some((item) => item.chat_id === chatId);
-    }
-
-    openFolderEditor(): void {
-        this.menuOpen.set(false);
-        this.folderEditorOpen.set(true);
-    }
-
     private searchTimer: ReturnType<typeof setTimeout> | null = null;
 
     titleOf(chat: Chat): string {
-        if (chat.chat_type === 'private' && chat.peer_is_deleted) {
-            return DELETED_USER_LABEL;
-        }
-        return chat.title ?? (chat.chat_type === 'channel' ? 'Channel' : 'Untitled chat');
+        return chatTitle(chat);
     }
 
     preview(chat: Chat) {
@@ -243,18 +225,6 @@ export class ChatSidebarComponent {
             });
     }
 
-    /** Delete is the only destructive folder action the tabs offer today. */
-    folderMenu(folder: Folder): ContextMenuProvider {
-        return (): ContextMenuEntry[] => [
-            {
-                icon: Trash2,
-                label: 'Delete folder',
-                danger: true,
-                action: () => void this.confirmDeleteFolder(folder),
-            },
-        ];
-    }
-
     private async mute(chat: Chat, until: string | null): Promise<void> {
         if (!(await this.store.setMuted(chat.id, until))) {
             this.toast.error('Could not update notifications for that chat.');
@@ -309,18 +279,6 @@ export class ChatSidebarComponent {
         });
         if (sure) {
             await this.store.deleteChat(chat.id);
-        }
-    }
-
-    private async confirmDeleteFolder(folder: Folder): Promise<void> {
-        const confirmed = await this.confirm.ask({
-            title: 'Delete folder?',
-            message: `The folder “${folder.title}” is removed. The chats in it are not affected.`,
-            confirmLabel: 'Delete folder',
-            danger: true,
-        });
-        if (confirmed) {
-            await this.deleteFolder(folder);
         }
     }
 

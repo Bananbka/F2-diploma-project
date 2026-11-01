@@ -38,6 +38,12 @@ export class ChatShellComponent {
     private readonly panel = inject(ChatPanelStoreService);
 
     readonly filter = signal<ChatFilter>('all');
+    readonly filterVersion = signal(0);
+
+    onFilterChange(filter: ChatFilter): void {
+        this.filter.set(filter);
+        this.filterVersion.update((v) => v + 1);
+    }
     readonly panelOpen = this.panel.open;
 
     readonly isOnline = this.store.isOnline;

@@ -11,6 +11,7 @@ import { MessageService } from '../../../core/services/message.service';
 import { ProfileApiService } from '../../../core/services/profile-api.service';
 import { SessionService } from '../../../core/services/session.service';
 import { WebSocketService } from '../../../core/services/websocket.service';
+import { SettingsService } from '../../settings/settings.service';
 import { NavigationRailComponent } from './navigation-rail.component';
 
 const AVATAR = 'http://localhost:4200/objects/avatars/me.webp';
@@ -79,5 +80,38 @@ describe('NavigationRailComponent avatar', () => {
 
         expect(authApi.me).toHaveBeenCalledTimes(2);
         expect(avatarSrc()).toBe(AVATAR);
+    });
+
+    describe('settings entry', () => {
+        let settings: SettingsService;
+
+        beforeEach(async () => {
+            settings = TestBed.inject(SettingsService);
+            await session.restore();
+            fixture.detectChanges();
+        });
+
+        afterEach(() => settings.close());
+
+        const root = () => fixture.nativeElement as HTMLElement;
+
+        it('has a Settings button that opens the dialog on the Profile tab', () => {
+            const button = root().querySelector<HTMLButtonElement>('button[title="Settings"]')!;
+            button.focus();
+            button.click();
+
+            expect(settings.activeTab()).toBe('profile');
+        });
+
+        it('opens Profile and Security from the account menu', () => {
+            root().querySelector<HTMLButtonElement>('.account-trigger')!.click();
+            fixture.detectChanges();
+            const items = [...root().querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+
+            items.find((b) => b.textContent!.includes('Change password'))!.click();
+            expect(settings.activeTab()).toBe('security');
+            fixture.detectChanges();
+            expect(root().querySelector('[role="menu"]')).toBeNull();
+        });
     });
 });

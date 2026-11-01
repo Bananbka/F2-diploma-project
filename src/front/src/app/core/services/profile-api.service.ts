@@ -16,8 +16,9 @@ import { ConfigService } from './config.service';
 export interface ProfileUpdateRequest {
     full_name: string;
     username?: string;
-    bio?: string;
-    avatar_url?: string;
+    /** `null` clears it; the server treats an explicit null as "remove" for these two. */
+    bio?: string | null;
+    avatar_url?: string | null;
 }
 
 export interface UploadedFile {

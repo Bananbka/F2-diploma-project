@@ -1,5 +1,16 @@
 import { DatePipe } from '@angular/common';
-import { ChangeDetectionStrategy, Component, computed, effect, inject, input, signal } from '@angular/core';
+import {
+    afterNextRender,
+    ChangeDetectionStrategy,
+    Component,
+    computed,
+    effect,
+    ElementRef,
+    inject,
+    Injector,
+    input,
+    signal,
+} from '@angular/core';
 import { Router, RouterLink } from '@angular/router';
 import {
     ArrowLeft,
@@ -11,9 +22,11 @@ import {
     Copy,
     Crown,
     Download,
+    Eraser,
     Link,
     LogOut,
     LucideAngularModule,
+    MessageSquare,
     Search,
     Shield,
     ShieldAlert,
@@ -41,14 +54,28 @@ import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
 import { ConfirmRequest, ConfirmService } from '../../../shared/ui/confirm-dialog/confirm.service';
 import { ContextMenuDirective, ContextMenuProvider } from '../../../shared/ui/context-menu/context-menu.directive';
 import { ContextMenuEntry } from '../../../shared/ui/context-menu/context-menu.model';
-import { DELETED_USER_LABEL } from '../../../shared/utils/display';
-import { safetyNumberGroups } from '../../../shared/utils/display';
+import { avatarKindFor, DELETED_USER_LABEL, safetyNumberGroups } from '../../../shared/utils/display';
 import { ExportDialogComponent } from '../export-dialog/export-dialog.component';
 
 /** Mirrors the server's `ROLE_RANK`: removal needs a strictly higher rank than the target. */
 const MEMBER_RANK: Record<ParticipantRole, number> = { owner: 3, admin: 2, member: 1 };
 
-interface MemberRow {
+/** `main` is Members for a group or channel and Profile for a private chat. */
+export type InfoTab = 'main' | 'settings' | 'data';
+
+const INFO_TABS: readonly InfoTab[] = ['main', 'settings', 'data'];
+const TAB_KEY = 'chat-info-tab';
+
+function readStoredTab(): InfoTab {
+    try {
+        const value = sessionStorage.getItem(TAB_KEY);
+        return INFO_TABS.find((tab) => tab === value) ?? 'main';
+    } catch {
+        return 'main';
+    }
+}
+
+export interface MemberRow {
     userId: string;
     name: string;
     username: string | null;
@@ -79,6 +106,8 @@ export class ChatInfoComponent {
     private readonly store = inject(ChatStoreService);
     private readonly router = inject(Router);
     private readonly confirm = inject(ConfirmService);
+    private readonly injector = inject(Injector);
+    private readonly element = inject<ElementRef<HTMLElement>>(ElementRef);
 
     readonly chatId = input.required<string>();
     /** Shown inside the conversation's side panel (Profile tab) instead of as its own screen. */
@@ -90,6 +119,13 @@ export class ChatInfoComponent {
     readonly loading = signal(true);
     readonly error = signal<string | null>(null);
     readonly busy = signal(false);
+    /** A failed action. Shown inline above the content; only a failed load replaces the content. */
+    readonly actionError = signal<string | null>(null);
+
+    /** Selected tab, kept for the session so reopening the panel lands where the user left off. */
+    readonly tab = signal<InfoTab>(readStoredTab());
+    /** The member whose profile is open in place of the tabs, if any. */
+    readonly selectedMemberId = signal<string | null>(null);
 
     readonly addOpen = signal(false);
     readonly addQuery = signal('');
@@ -154,6 +190,14 @@ export class ChatInfoComponent {
         return bindingsValid && computeMemberSetHash(roster.members) === roster.member_set_hash;
     });
 
+    readonly avatarKindFor = avatarKindFor;
+
+    readonly tabs = computed<{ id: InfoTab; label: string }[]>(() => [
+        { id: 'main', label: this.isPrivate() ? 'Profile' : this.isChannel() ? 'Subscribers' : 'Members' },
+        { id: 'settings', label: 'Settings' },
+        { id: 'data', label: 'Data' },
+    ]);
+
     readonly isPrivate = computed(() => this.chat()?.chat_type === 'private');
     readonly isChannel = computed(() => this.chat()?.chat_type === 'channel');
 
@@ -216,6 +260,14 @@ export class ChatInfoComponent {
         });
     });
 
+    readonly selectedMember = computed(() => {
+        const id = this.selectedMemberId();
+        return id ? (this.members().find((m) => m.userId === id) ?? null) : null;
+    });
+
+    /** The counterpart in a private chat, shown on the Profile tab. */
+    readonly peer = computed(() => (this.isPrivate() ? (this.members().find((m) => !m.isMe) ?? null) : null));
+
     readonly peerId = computed(() => this.members().find((m) => !m.isMe)?.userId ?? null);
     /** The counterpart's handle in a private chat. Never shown for a deleted account. */
     readonly peerUsername = computed(() => {
@@ -266,6 +318,8 @@ export class ChatInfoComponent {
     readonly crownIcon = Crown;
     readonly xIcon = X;
     readonly downloadIcon = Download;
+    readonly eraserIcon = Eraser;
+    readonly messageIcon = MessageSquare;
     /** The export dialog is open. */
     readonly exportOpen = signal(false);
     readonly bellIcon = Bell;
@@ -316,6 +370,141 @@ export class ChatInfoComponent {
         effect(() => void this.load(this.chatId()));
     }
 
+    selectTab(tab: InfoTab): void {
+        this.actionError.set(null);
+        this.tab.set(tab);
+        try {
+            sessionStorage.setItem(TAB_KEY, tab);
+        } catch {
+            // Preference only.
+        }
+    }
+
+    /** Roving tabindex: arrows/Home/End move between tabs and select them. */
+    onTabKeydown(event: KeyboardEvent, host: HTMLElement): void {
+        const order = this.tabs().map((t) => t.id);
+        const index = order.indexOf(this.tab());
+        let next: number;
+        switch (event.key) {
+            case 'ArrowRight':
+                next = (index + 1) % order.length;
+                break;
+            case 'ArrowLeft':
+                next = (index - 1 + order.length) % order.length;
+                break;
+            case 'Home':
+                next = 0;
+                break;
+            case 'End':
+                next = order.length - 1;
+                break;
+            default:
+                return;
+        }
+        event.preventDefault();
+        this.selectTab(order[next]);
+        host.querySelector<HTMLElement>(`#chat-info-tab-${order[next]}`)?.focus();
+    }
+
+    openMember(member: MemberRow): void {
+        this.actionError.set(null);
+        this.selectedMemberId.set(member.userId);
+        afterNextRender(() => this.element.nativeElement.querySelector<HTMLElement>('.sub-back')?.focus(), {
+            injector: this.injector,
+        });
+    }
+
+    /** Back to the list; focus returns to the row that was opened, which is re-rendered by then. */
+    closeMember(): void {
+        const id = this.selectedMemberId();
+        this.actionError.set(null);
+        this.selectedMemberId.set(null);
+        if (id) {
+            afterNextRender(
+                () => this.element.nativeElement.querySelector<HTMLElement>(`[data-member-id="${id}"]`)?.focus(),
+                { injector: this.injector }
+            );
+        }
+    }
+
+    /** Escape inside a member profile goes back one level and is not seen by the panel's own handler. */
+    onMemberEscape(event: Event): void {
+        event.preventDefault();
+        event.stopPropagation();
+        this.closeMember();
+    }
+
+    /** Try the load again after it failed. */
+    retry(): void {
+        void this.load(this.chatId());
+    }
+
+    /** Open (or create) the private chat with this member. The server returns the existing one if there is one. */
+    async messageMember(member: MemberRow): Promise<void> {
+        this.busy.set(true);
+        try {
+            const chat = await firstValueFrom(this.chatApi.createPrivateChat(member.userId));
+            // The chat exists now; a failed list refresh must not strand the user on this screen.
+            try {
+                await this.store.loadChats();
+            } catch {
+                // The list catches up on the next refresh or realtime event.
+            }
+            await this.router.navigate(['/chats', chat.id]);
+        } catch {
+            this.actionError.set('Could not open a chat with that person.');
+        } finally {
+            this.busy.set(false);
+        }
+    }
+
+    async confirmMakeOwner(member: MemberRow): Promise<void> {
+        await this.confirmThen(
+            {
+                title: 'Make this member the owner?',
+                message: `${member.name} becomes the owner and you become an admin. Only they can hand it back.`,
+                confirmLabel: 'Make owner',
+            },
+            async () => {
+                this.confirming.set(`owner:${member.userId}`);
+                await this.transferOwnership(member.userId);
+            }
+        );
+    }
+
+    async confirmRemove(member: MemberRow): Promise<void> {
+        await this.confirmThen(
+            {
+                title: 'Remove this member?',
+                message: `${member.name} is removed and the chat rotates its keys, so they cannot read anything sent afterwards.`,
+                confirmLabel: 'Remove',
+                danger: true,
+            },
+            async () => {
+                if (await this.removeMember(member.userId)) {
+                    this.closeMember();
+                }
+            }
+        );
+    }
+
+    async clearHistory(): Promise<void> {
+        await this.confirmThen(
+            {
+                title: 'Clear history?',
+                message:
+                    'This clears the conversation for you only. Everyone else keeps their copy, and new messages will still arrive.',
+                confirmLabel: 'Clear history',
+                danger: true,
+            },
+            async () => {
+                if (!(await this.store.clearHistory(this.chatId()))) {
+                    this.actionError.set('Could not clear the history.');
+                }
+            }
+        );
+    }
+
     private async load(chatId: string): Promise<void> {
         this.loading.set(true);
         this.error.set(null);
@@ -325,6 +514,7 @@ export class ChatInfoComponent {
         this.roster.set(null);
         this.safetyNumber.set(null);
         this.inviteLinks.set([]);
+        this.selectedMemberId.set(null);
 
         try {
             // `GET /chats/{id}` is the only endpoint that populates participants — the list endpoint
@@ -508,7 +698,7 @@ export class ChatInfoComponent {
             await this.load(this.chatId());
             await this.store.loadChats();
         } catch {
-            this.error.set('Could not transfer ownership.');
+            this.actionError.set('Could not transfer ownership.');
         } finally {
             this.busy.set(false);
         }
@@ -522,12 +712,17 @@ export class ChatInfoComponent {
      * messengers deleting a conversation only removes your own copy.
      */
     async deleteChat(): Promise<void> {
-        if (this.confirming() !== 'delete') {
-            this.confirming.set('delete');
+        const noun = this.isChannel() ? 'channel' : 'chat';
+        const confirmed = await this.confirm.ask({
+            title: `Delete ${noun} for everyone?`,
+            message: `Deleting removes the ${noun} and every message in it for everyone, not just for you. This cannot be undone.`,
+            confirmLabel: 'Delete permanently',
+            danger: true,
+        });
+        if (!confirmed) {
             return;
         }
 
-        this.confirming.set(null);
         this.busy.set(true);
         try {
             await firstValueFrom(this.chatApi.deleteChat(this.chatId()));
@@ -535,7 +730,7 @@ export class ChatInfoComponent {
             await this.store.loadChats();
             await this.router.navigate(['/chats']);
         } catch {
-            this.error.set('Could not delete this chat.');
+            this.actionError.set('Could not delete this chat.');
         } finally {
             this.busy.set(false);
         }
@@ -551,7 +746,7 @@ export class ChatInfoComponent {
             await firstValueFrom(this.chatApi.changeRole(this.chatId(), userId, role));
             await this.load(this.chatId());
         } catch {
-            this.error.set('Could not change that role.');
+            this.actionError.set('Could not change that role.');
         } finally {
             this.busy.set(false);
         }
@@ -570,7 +765,7 @@ export class ChatInfoComponent {
             this.contacted.update((ids) => new Set(ids).add(member.userId));
             await this.directory.warm();
         } catch {
-            this.error.set('Could not add that contact.');
+            this.actionError.set('Could not add that contact.');
         } finally {
             this.busy.set(false);
         }
@@ -610,7 +805,7 @@ export class ChatInfoComponent {
             await this.load(this.chatId());
             await this.store.loadChats();
         } catch {
-            this.error.set('Could not add that person.');
+            this.actionError.set('Could not add that person.');
         } finally {
             this.busy.set(false);
         }
@@ -633,6 +828,13 @@ export class ChatInfoComponent {
                     action: () => void this.router.navigate(['/chats', this.chatId(), 'safety', member.userId]),
                 });
             }
+            if (!member.isMe && !member.deleted && !this.isPrivate()) {
+                entries.push({
+                    icon: MessageSquare,
+                    label: 'Message',
+                    action: () => void this.messageMember(member),
+                });
+            }
             if (!member.isMe && !member.deleted && !this.contacted().has(member.userId)) {
                 entries.push({
                     icon: BookmarkPlus,
@@ -652,18 +854,7 @@ export class ChatInfoComponent {
                 entries.push({
                     icon: Crown,
                     label: 'Make owner',
-                    action: () =>
-                        void this.confirmThen(
-                            {
-                                title: 'Make this member the owner?',
-                                message: `${member.name} becomes the owner and you become an admin. Only they can hand it back.`,
-                                confirmLabel: 'Make owner',
-                            },
-                            () => {
-                                this.confirming.set(`owner:${member.userId}`);
-                                return this.transferOwnership(member.userId);
-                            }
-                        ),
+                    action: () => void this.confirmMakeOwner(member),
                 });
             }
             if (this.canRemove(member)) {
@@ -672,16 +863,7 @@ export class ChatInfoComponent {
                     icon: UserMinus,
                     label: 'Remove from chat',
                     danger: true,
-                    action: () =>
-                        void this.confirmThen(
-                            {
-                                title: 'Remove this member?',
-                                message: `${member.name} is removed and the chat rotates its keys, so they cannot read anything sent afterwards.`,
-                                confirmLabel: 'Remove',
-                                danger: true,
-                            },
-                            () => this.removeMember(member.userId)
-                        ),
+                    action: () => void this.confirmRemove(member),
                 });
             }
             return entries;
@@ -694,20 +876,35 @@ export class ChatInfoComponent {
         }
     }
 
-    async removeMember(userId: string): Promise<void> {
+    async removeMember(userId: string): Promise<boolean> {
         this.busy.set(true);
+        this.actionError.set(null);
         try {
             await firstValueFrom(this.chatApi.removeParticipants(this.chatId(), [userId]));
             await this.load(this.chatId());
             await this.store.loadChats();
+            return true;
         } catch {
-            this.error.set('Could not remove that member.');
+            this.actionError.set('Could not remove that member.');
+            return false;
         } finally {
             this.busy.set(false);
         }
     }
 
     async leave(): Promise<void> {
+        const confirmed = await this.confirm.ask({
+            title: this.isChannel() ? 'Unsubscribe from channel?' : 'Leave chat?',
+            message: this.isChannel()
+                ? 'You will stop receiving posts from this channel and cannot rejoin without being added again.'
+                : 'Leaving rotates the group key, so nothing sent after you go will be readable with the key you hold. You cannot rejoin without being added again.',
+            confirmLabel: this.isChannel() ? 'Unsubscribe' : 'Leave',
+            danger: true,
+        });
+        if (!confirmed) {
+            return;
+        }
+
         this.busy.set(true);
         try {
             await firstValueFrom(this.chatApi.leaveChat(this.chatId()));
@@ -715,7 +912,7 @@ export class ChatInfoComponent {
             await this.store.loadChats();
             await this.router.navigate(['/chats']);
         } catch {
-            this.error.set('Could not leave this chat.');
+            this.actionError.set('Could not leave this chat.');
         } finally {
             this.busy.set(false);
         }

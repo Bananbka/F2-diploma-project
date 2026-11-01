@@ -1,0 +1,114 @@
+<div
+    class="backdrop"
+    (click)="close()"
+></div>
+<form
+    class="dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="folder-dialog-title"
+    (keydown)="onKeydown($event)"
+    (submit)="$event.preventDefault(); save()"
+>
+    <div class="head">
+        <h2 id="folder-dialog-title">{{ isEdit() ? 'Edit folder' : 'New folder' }}</h2>
+        <button
+            type="button"
+            class="close"
+            aria-label="Close"
+            (click)="close()"
+        >
+            <lucide-icon [img]="closeIcon" />
+        </button>
+    </div>
+
+    <label class="field">
+        <span class="label">Name</span>
+        <input
+            #nameField
+            type="text"
+            placeholder="Folder name"
+            autocomplete="off"
+            [maxLength]="maxTitle"
+            [value]="name()"
+            (input)="name.set($any($event.target).value)"
+        />
+    </label>
+
+    <div class="field">
+        <span
+            class="label"
+            id="folder-chats-label"
+        >
+            Chats · {{ picked().size }} selected
+        </span>
+        <div class="search">
+            <lucide-icon [img]="searchIcon" />
+            <input
+                #searchField
+                type="search"
+                placeholder="Search chats"
+                aria-label="Search chats"
+                autocomplete="off"
+                [value]="query()"
+                (input)="query.set($any($event.target).value)"
+            />
+        </div>
+
+        <ul
+            class="chat-list"
+            aria-labelledby="folder-chats-label"
+        >
+            @for (chat of visible(); track chat.id) {
+                <li>
+                    <label class="chat-row">
+                        <input
+                            type="checkbox"
+                            [checked]="picked().has(chat.id)"
+                            (change)="toggle(chat.id)"
+                        />
+                        <app-avatar
+                            size="sm"
+                            [name]="chatTitle(chat)"
+                            [kind]="avatarKindFor(chat.chat_type)"
+                            [seed]="chat.id"
+                            [imageUrl]="chat.peer_is_deleted ? null : chat.avatar_url"
+                            [deleted]="chat.peer_is_deleted === true"
+                        />
+                        <span class="chat-name">{{ chatTitle(chat) }}</span>
+                    </label>
+                </li>
+            } @empty {
+                <li class="empty">
+                    {{ query() ? 'No chats match “' + query() + '”.' : 'You have no chats to add yet.' }}
+                </li>
+            }
+        </ul>
+    </div>
+
+    @if (error()) {
+        <p
+            class="error"
+            role="alert"
+        >
+            {{ error() }}
+        </p>
+    }
+
+    <div class="actions">
+        <button
+            type="button"
+            class="btn"
+            (click)="close()"
+        >
+            Cancel
+        </button>
+        <button
+            type="submit"
+            class="btn is-primary"
+            [disabled]="!canSave()"
+        >
+            {{ isEdit() ? 'Save' : 'Create' }}
+        </button>
+    </div>
+</form>

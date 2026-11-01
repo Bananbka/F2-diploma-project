@@ -1,373 +1,154 @@
-<header class="head">
-    <button
-        type="button"
-        class="back"
-        aria-label="Back"
-        (click)="close()"
-    >
-        <lucide-icon [img]="arrowLeftIcon" />
-    </button>
-    <h2>Your profile</h2>
-</header>
+<form
+    [formGroup]="form"
+    (ngSubmit)="save()"
+>
+    <div class="identity">
+        <label class="avatar-picker">
+            <app-avatar
+                size="lg"
+                [name]="form.controls.fullName.value || 'You'"
+                [seed]="user()?.id ?? ''"
+                [imageUrl]="avatarUrl()"
+            />
+            <span class="avatar-overlay">
+                <lucide-icon [img]="cameraIcon" />
+            </span>
+            <input
+                type="file"
+                accept="image/*"
+                class="sr-only"
+                (change)="onAvatarPicked($event)"
+            />
+            <span class="sr-only">Change avatar</span>
+        </label>
 
-<div class="body">
-    <form
-        [formGroup]="form"
-        (ngSubmit)="save()"
-    >
-        <div class="identity">
-            <label class="avatar-picker">
-                <app-avatar
-                    size="lg"
-                    [name]="form.controls.fullName.value || 'You'"
-                    [seed]="user()?.id ?? ''"
-                    [imageUrl]="avatarUrl()"
-                />
-                <span class="avatar-overlay">
-                    <lucide-icon [img]="cameraIcon" />
-                </span>
-                <input
-                    type="file"
-                    accept="image/*"
-                    class="sr-only"
-                    (change)="onAvatarPicked($event)"
-                />
-                <span class="sr-only">Change avatar</span>
-            </label>
-
-            <p class="identity-hint">
-                @if (uploading()) {
-                    Uploading…
-                } @else {
-                    Your avatar is stored unencrypted and is visible to anyone who can see your profile.
-                }
-            </p>
-        </div>
-
-        <div class="fields">
-            <div class="field">
-                <label for="fullName">Full name</label>
-                <input
-                    id="fullName"
-                    type="text"
-                    autocomplete="name"
-                    formControlName="fullName"
-                    [attr.aria-invalid]="isInvalid(form.controls.fullName)"
-                />
-                @if (messageFor('fullName'); as message) {
-                    <p class="hint is-error">{{ message }}</p>
-                }
-            </div>
-
-            <div class="field">
-                <label for="username">Username</label>
-                <input
-                    id="username"
-                    type="text"
-                    autocomplete="username"
-                    formControlName="username"
-                    [attr.aria-invalid]="isInvalid(form.controls.username)"
-                />
-                @if (messageFor('username'); as message) {
-                    <p class="hint is-error">{{ message }}</p>
-                } @else {
-                    <p class="hint">Other people find you by this.</p>
-                }
-            </div>
-
-            <div class="field">
-                <label for="bio">Bio</label>
-                <textarea
-                    id="bio"
-                    rows="3"
-                    placeholder="Something about you"
-                    formControlName="bio"
-                ></textarea>
-            </div>
-        </div>
-
-        @if (error()) {
-            <p
-                class="error"
-                role="alert"
+        @if (avatarUrl() && !uploading()) {
+            <button
+                type="button"
+                class="link-button"
+                (click)="removeAvatar()"
             >
-                {{ error() }}
-            </p>
+                <lucide-icon [img]="trashIcon" />
+                Remove photo
+            </button>
         }
 
-        @if (saved()) {
-            <p
-                class="saved"
-                role="status"
-            >
-                Profile saved.
-            </p>
-        }
-
-        <button
-            type="submit"
-            class="submit"
-            [disabled]="saving() || uploading()"
-        >
-            {{ saving() ? 'Saving…' : 'Save profile' }}
-        </button>
-    </form>
-
-    <section class="group">
-        <p class="section">Security</p>
-        <button
-            type="button"
-            class="tile"
-            (click)="goToPassword()"
-        >
-            <span class="tile-icon">
-                <lucide-icon [img]="keyIcon" />
-            </span>
-            <span class="tile-text">
-                <span class="tile-title">Change password</span>
-                <span class="tile-sub">Keeps your message history — your keys are re-sealed, not replaced.</span>
-            </span>
-        </button>
-    </section>
-
-    <section class="group">
-        <p class="section">Stickers</p>
-        <button
-            type="button"
-            class="tile"
-            (click)="goToStickers()"
-        >
-            <span class="tile-icon">
-                <lucide-icon [img]="stickerIcon" />
-            </span>
-            <span class="tile-text">
-                <span class="tile-title">Manage sticker packs</span>
-                <span class="tile-sub">Create packs, add stickers, and browse public ones to subscribe to.</span>
-            </span>
-        </button>
-    </section>
-
-    <section class="group">
-        <p class="section">Danger zone</p>
-        <button
-            type="button"
-            class="tile is-danger"
-            (click)="openDelete()"
-        >
-            <span class="tile-icon">
-                <lucide-icon [img]="deleteIcon" />
-            </span>
-            <span class="tile-text">
-                <span class="tile-title">Delete account</span>
-                <span class="tile-sub"
-                    >Permanently erase your profile and sign out everywhere. This cannot be undone.</span
-                >
-            </span>
-        </button>
-    </section>
-
-    <section class="group">
-        <p class="section">Your devices</p>
-
-        @if (devicesLoading()) {
-            <p class="muted small">Loading…</p>
-        } @else if (devices().length === 0) {
-            <p class="muted small">No devices have published keys for this account yet.</p>
-        } @else {
-            <ul class="devices">
-                @for (device of devices(); track device.device_id) {
-                    <li class="device">
-                        <span class="device-text">
-                            <span class="device-name">
-                                {{ device.display_name || 'Unnamed device' }}
-                                @if (device.isThis) {
-                                    <span class="device-tag">This device</span>
-                                }
-                            </span>
-                            <span class="device-sub">
-                                Key v{{ device.version }} · added {{ device.created_at | date: 'd MMM y' }}
-                                @if (device.signed_prekey_created_at) {
-                                    · prekey rotated {{ device.signed_prekey_created_at | date: 'd MMM y' }}
-                                } @else {
-                                    · no signed prekey yet
-                                }
-                            </span>
-                        </span>
-
-                        <!-- Rotation re-seals the private bundle with the in-memory KEK from unlock,
-                             which only the device that unlocked it holds — so this is only offered
-                             for the current device, never for another one in the list. -->
-                        @if (device.isThis) {
-                            <button
-                                type="button"
-                                class="device-action is-neutral"
-                                [disabled]="rotatingPrekey()"
-                                aria-label="Rotate this device's signed prekey"
-                                (click)="rotatePrekey()"
-                            >
-                                <lucide-icon [img]="rotateIcon" />
-                                {{ rotatingPrekey() ? 'Rotating…' : 'Rotate prekey' }}
-                            </button>
-                        }
-
-                        <!-- Revoking your own device would lock this session out of its keys with no
-                             way back, so it is not offered. The last remaining device is likewise
-                             excluded: the server refuses it, because an account with no device can
-                             read nothing and cannot publish a replacement. -->
-                        @if (!device.isThis && devices().length > 1) {
-                            @if (confirmingDevice() === device.device_id) {
-                                <button
-                                    type="button"
-                                    class="device-action is-confirm"
-                                    [disabled]="revoking()"
-                                    (click)="revokeDevice(device.device_id)"
-                                >
-                                    Revoke?
-                                </button>
-                                <button
-                                    type="button"
-                                    class="device-action"
-                                    [disabled]="revoking()"
-                                    (click)="cancelRevoke()"
-                                >
-                                    Cancel
-                                </button>
-                            } @else {
-                                <button
-                                    type="button"
-                                    class="device-action"
-                                    [disabled]="revoking()"
-                                    [attr.aria-label]="'Revoke ' + (device.display_name || 'this device')"
-                                    (click)="revokeDevice(device.device_id)"
-                                >
-                                    Revoke
-                                </button>
-                            }
-                        }
-                    </li>
-                }
-            </ul>
-        }
-
-        @if (deviceError()) {
-            <p
-                class="error-line"
-                role="alert"
-            >
-                {{ deviceError() }}
-            </p>
-        }
-
-        @if (prekeyError()) {
-            <p
-                class="error-line"
-                role="alert"
-            >
-                {{ prekeyError() }}
-            </p>
-        }
-
-        @if (prekeyRotated()) {
-            <p
-                class="saved-line"
-                role="status"
-            >
-                Signed prekey rotated.
-            </p>
-        }
-
-        <p class="muted small">
-            Revoke a device you no longer have. Your encrypted chats re-key immediately, so nothing sent afterwards can
-            be read with the keys it holds — but it keeps whatever it already received, which no server can take back.
-        </p>
-
-        <p class="muted small">
-            Rotating your signed prekey gives forward secrecy to future messages: after one further rotation, someone
-            who steals this device's keys can no longer use them to open messages sent under an older prekey. (The most
-            recently retired prekey is kept for one extra rotation, so a message already in flight when you rotate still
-            arrives.) It does not change your identity key or re-key any chat.
-        </p>
-    </section>
-</div>
-
-@if (deleteOpen()) {
-    <div
-        class="dialog-backdrop"
-        (click)="closeDelete()"
-    ></div>
-    <div
-        class="dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="delete-title"
-        (keydown.escape)="closeDelete()"
-    >
-        <form (ngSubmit)="confirmDelete()">
-            <h3
-                id="delete-title"
-                class="dialog-title"
-            >
-                Delete your account?
-            </h3>
-
-            <div class="warning">
-                <lucide-icon [img]="warnIcon" />
-                <div>
-                    <p class="warning-title">This is permanent and cannot be undone</p>
-                    <ul class="warning-list">
-                        <li>Your name, username, email, phone number, bio and avatar are erased.</li>
-                        <li>Every device is revoked and you are signed out everywhere.</li>
-                        <li>
-                            Messages you sent stay in other people's chats, still readable to them, and are shown as
-                            "Deleted user". They are not removed.
-                        </li>
-                        <li>Private chats with you become read-only for the other person.</li>
-                        <li>
-                            Groups you own pass to their longest-standing admin, or otherwise their oldest member. A
-                            group with no one else in it is deleted.
-                        </li>
-                        <li>Your contacts, folders and sticker packs are deleted.</li>
-                    </ul>
-                </div>
-            </div>
-
-            <div class="field">
-                <label for="deletePassword">Enter your password to confirm</label>
-                <input
-                    id="deletePassword"
-                    type="password"
-                    autocomplete="current-password"
-                    [formControl]="deletePassword"
-                    [attr.aria-invalid]="deletePassword.touched && deletePassword.invalid"
-                />
-            </div>
-
-            @if (deleteError()) {
-                <p
-                    class="error"
-                    role="alert"
-                >
-                    {{ deleteError() }}
-                </p>
+        <p class="identity-hint">
+            @if (uploading()) {
+                Uploading…
+            } @else {
+                Choose a photo, then position it inside the circle. Your avatar is stored unencrypted and is visible to
+                anyone who can see your profile.
             }
+        </p>
+    </div>
 
-            <div class="dialog-actions">
+    <div class="fields">
+        <div class="field">
+            <label for="fullName">Full name</label>
+            <input
+                id="fullName"
+                type="text"
+                autocomplete="name"
+                formControlName="fullName"
+                [attr.aria-invalid]="isInvalid(form.controls.fullName)"
+            />
+            @if (messageFor('fullName'); as message) {
+                <p class="hint is-error">{{ message }}</p>
+            }
+        </div>
+
+        <div class="field">
+            <label for="username">Username</label>
+            <input
+                id="username"
+                type="text"
+                autocomplete="username"
+                formControlName="username"
+                [attr.aria-invalid]="isInvalid(form.controls.username)"
+            />
+            @if (messageFor('username'); as message) {
+                <p class="hint is-error">{{ message }}</p>
+            } @else {
+                <p class="hint">Other people find you by this.</p>
+            }
+        </div>
+
+        <div class="field">
+            <label for="bio">Bio</label>
+            <textarea
+                id="bio"
+                rows="3"
+                placeholder="Something about you"
+                formControlName="bio"
+            ></textarea>
+        </div>
+
+        @if (user()?.email) {
+            <div class="field">
+                <label for="email">Email</label>
+                <input
+                    id="email"
+                    type="email"
+                    readonly
+                    [value]="user()?.email"
+                />
+            </div>
+        }
+
+        @if (user()?.phone_number) {
+            <div class="field">
+                <label for="phone">Phone</label>
+                <input
+                    id="phone"
+                    type="tel"
+                    readonly
+                    [value]="user()?.phone_number"
+                />
+            </div>
+        }
+    </div>
+
+    @if (error()) {
+        <p
+            class="error"
+            role="alert"
+        >
+            {{ error() }}
+            @if (failedUpload()) {
                 <button
                     type="button"
-                    class="dialog-cancel"
-                    [disabled]="deleting()"
-                    (click)="closeDelete()"
+                    class="retry"
+                    (click)="retryUpload()"
                 >
-                    Cancel
+                    Retry
                 </button>
-                <button
-                    type="submit"
-                    class="dialog-confirm"
-                    [disabled]="deleting() || deletePassword.invalid"
-                >
-                    {{ deleting() ? 'Deleting…' : 'Delete my account' }}
-                </button>
-            </div>
-        </form>
-    </div>
+            }
+        </p>
+    }
+
+    @if (saved()) {
+        <p
+            class="saved"
+            role="status"
+        >
+            Profile saved.
+        </p>
+    }
+
+    <button
+        type="submit"
+        class="submit"
+        [disabled]="saving() || uploading()"
+    >
+        {{ saving() ? 'Saving…' : 'Save profile' }}
+    </button>
+</form>
+
+@if (cropFile(); as file) {
+    <app-avatar-cropper
+        [file]="file"
+        (applied)="onCropApplied($event)"
+        (cancelled)="cancelCrop()"
+    />
 }

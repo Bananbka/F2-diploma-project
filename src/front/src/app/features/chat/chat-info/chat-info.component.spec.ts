@@ -1,5 +1,5 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { provideRouter } from '@angular/router';
+import { provideRouter, Router } from '@angular/router';
 import { of, throwError } from 'rxjs';
 
 import { Chat, InviteLink } from '../../../core/models/chat.model';
@@ -50,11 +50,13 @@ describe('ChatInfoComponent', () => {
     const linkB = makeLink('link-b', 'token-b');
 
     beforeEach(async () => {
+        sessionStorage.removeItem('chat-info-tab');
         chatApi = jasmine.createSpyObj<ChatApiService>('ChatApiService', [
             'getChat',
             'listInviteLinks',
             'revokeInviteLink',
             'createInviteLink',
+            'createPrivateChat',
         ]);
         chatApi.getChat.and.returnValue(of(CHAT));
         chatApi.listInviteLinks.and.returnValue(of([linkA, linkB]));
@@ -161,6 +163,8 @@ describe('ChatInfoComponent', () => {
         expect(chatApi.revokeInviteLink).not.toHaveBeenCalled();
         expect(fixture.componentInstance.confirming()).toBe(`revoke:${linkA.id}`);
 
+        fixture.componentInstance.selectTab('settings');
+        fixture.detectChanges();
         const host = fixture.nativeElement as HTMLElement;
         expect(host.textContent).toContain('Revoke?');
     });
@@ -204,6 +208,218 @@ describe('ChatInfoComponent', () => {
 
         expect(fixture.componentInstance.confirming()).toBeNull();
         expect(chatApi.revokeInviteLink).not.toHaveBeenCalled();
+    });
+
+    describe('tabs and member profile', () => {
+        const PEER_ID = 'cccccccc-0000-4000-8000-000000000003';
+        const GROUP: Chat = {
+            ...CHAT,
+            participants: [
+                { user_id: OWNER_ID, role: 'owner', joined_at: '2024-01-01T00:00:00Z' },
+                { user_id: PEER_ID, role: 'member', joined_at: '2024-01-01T00:00:00Z' },
+            ],
+        };
+        const PRIVATE: Chat = { ...GROUP, chat_type: 'private', title: null };
+
+        async function open(chat: Chat): Promise<HTMLElement> {
+            chatApi.getChat.and.returnValue(of(chat));
+            fixture = TestBed.createComponent(ChatInfoComponent);
+            fixture.componentRef.setInput('chatId', CHAT_ID);
+            fixture.componentRef.setInput('embedded', true);
+            fixture.detectChanges();
+            await fixture.whenStable();
+            fixture.detectChanges();
+            return fixture.nativeElement as HTMLElement;
+        }
+
+        const tabLabels = (host: HTMLElement) =>
+            Array.from(host.querySelectorAll('[role="tab"]')).map((t) => t.textContent?.trim());
+
+        it('offers Members, Settings and Data for a group', async () => {
+            const host = await open(GROUP);
+            expect(tabLabels(host)).toEqual(['Members', 'Settings', 'Data']);
+            expect(host.querySelector('.members')).not.toBeNull();
+            expect(host.querySelector('.invite-create')).toBeNull();
+        });
+
+        it('offers Profile, Settings and Data for a private chat, without a member list', async () => {
+            const host = await open(PRIVATE);
+            expect(tabLabels(host)).toEqual(['Profile', 'Settings', 'Data']);
+            expect(host.querySelector('.members')).toBeNull();
+        });
+
+        it('moves between tabs with the arrow keys and remembers the choice for the session', async () => {
+            const host = await open(GROUP);
+            const first = host.querySelector<HTMLElement>('#chat-info-tab-main')!;
+            first.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+            fixture.detectChanges();
+
+            expect(fixture.componentInstance.tab()).toBe('settings');
+            expect(sessionStorage.getItem('chat-info-tab')).toBe('settings');
+            expect(host.querySelector('.invite-create')).not.toBeNull();
+
+            const again = await open(GROUP);
+            expect(again.querySelector('#chat-info-tab-settings')?.getAttribute('aria-selected')).toBe('true');
+        });
+
+        it('keeps leave and delete off the Members and Settings tabs', async () => {
+            const host = await open(GROUP);
+            expect(host.querySelector('.danger-row')).toBeNull();
+
+            fixture.componentInstance.selectTab('data');
+            fixture.detectChanges();
+            expect(host.querySelectorAll('.danger-row').length).toBe(2);
+        });
+
+        it('opens a member profile on click and goes back to the list', async () => {
+            const host = await open(GROUP);
+            const rows = host.querySelectorAll<HTMLButtonElement>('button.member');
+            expect(rows.length).toBe(2);
+
+            rows[1].click();
+            fixture.detectChanges();
+
+            expect(host.querySelector('.member-view')).not.toBeNull();
+            expect(host.querySelector('[role="tablist"]')).toBeNull();
+            expect(host.querySelector('.member-view')?.textContent).toContain('Save as contact');
+            expect(host.querySelector('.member-view')?.textContent).toContain('Message');
+            // The viewer owns the chat, so the RBAC controls for a plain member are offered.
+            expect(host.querySelector('.member-view')?.textContent).toContain('Remove from chat');
+
+            host.querySelector<HTMLButtonElement>('.sub-back')!.click();
+            fixture.detectChanges();
+            expect(host.querySelector('.member-view')).toBeNull();
+            expect(host.querySelector('[role="tablist"]')).not.toBeNull();
+        });
+
+        it('offers no contact, message or removal actions on your own profile', async () => {
+            const host = await open(GROUP);
+            host.querySelector<HTMLButtonElement>('button.member')!.click();
+            fixture.detectChanges();
+
+            const text = host.querySelector('.member-view')!.textContent!;
+            expect(text).not.toContain('Save as contact');
+            expect(text).not.toContain('Remove from chat');
+        });
+
+        it('shows a failed action inline and keeps the panel, instead of replacing it', async () => {
+            const host = await open(GROUP);
+            chatApi.createPrivateChat.and.returnValue(throwError(() => new Error('no')));
+            host.querySelectorAll<HTMLButtonElement>('button.member')[1].click();
+            fixture.detectChanges();
+            Array.from(host.querySelectorAll<HTMLButtonElement>('.member-view button.tile'))
+                .find((b) => b.textContent?.includes('Message'))!
+                .click();
+            await fixture.whenStable();
+            fixture.detectChanges();
+
+            expect(host.querySelector('.action-error')?.textContent).toContain('Could not open a chat');
+            expect(host.querySelector('.member-view')).not.toBeNull();
+            expect(fixture.componentInstance.error()).toBeNull();
+
+            host.querySelector<HTMLButtonElement>('.action-error button')!.click();
+            fixture.detectChanges();
+            expect(host.querySelector('.action-error')).toBeNull();
+        });
+
+        it('clears an action error when the tab or the member changes', async () => {
+            const host = await open(GROUP);
+            fixture.componentInstance.actionError.set('x');
+            fixture.componentInstance.selectTab('settings');
+            expect(fixture.componentInstance.actionError()).toBeNull();
+
+            fixture.componentInstance.actionError.set('x');
+            fixture.componentInstance.openMember(fixture.componentInstance.members()[1]);
+            expect(fixture.componentInstance.actionError()).toBeNull();
+            expect(host).toBeTruthy();
+        });
+
+        it('offers a retry when the load itself fails', async () => {
+            chatApi.getChat.and.returnValue(throwError(() => new Error('down')));
+            fixture = TestBed.createComponent(ChatInfoComponent);
+            fixture.componentRef.setInput('chatId', CHAT_ID);
+            fixture.componentRef.setInput('embedded', true);
+            fixture.detectChanges();
+            await fixture.whenStable();
+            fixture.detectChanges();
+            const host = fixture.nativeElement as HTMLElement;
+            expect(host.querySelector('.error')?.textContent).toContain('Could not load');
+
+            chatApi.getChat.and.returnValue(of(GROUP));
+            host.querySelector<HTMLButtonElement>('.retry')!.click();
+            await fixture.whenStable();
+            fixture.detectChanges();
+            expect(host.querySelector('.error')).toBeNull();
+            expect(host.querySelector('.members')).not.toBeNull();
+        });
+
+        it('goes back on Escape inside a member profile without the panel seeing it, and refocuses the row', async () => {
+            const host = await open(GROUP);
+            const row = host.querySelectorAll<HTMLButtonElement>('button.member')[1];
+            row.focus();
+            row.click();
+            fixture.detectChanges();
+            await fixture.whenStable();
+            expect(document.activeElement).toBe(host.querySelector('.sub-back'));
+
+            const seen = jasmine.createSpy('document');
+            document.addEventListener('keydown', seen);
+            const event = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+            host.querySelector('.sub-back')!.dispatchEvent(event);
+            fixture.detectChanges();
+            await fixture.whenStable();
+            document.removeEventListener('keydown', seen);
+
+            expect(event.defaultPrevented).toBeTrue();
+            expect(seen).not.toHaveBeenCalled();
+            expect(host.querySelector('.member-view')).toBeNull();
+            expect(document.activeElement).toBe(host.querySelectorAll('button.member')[1]);
+        });
+
+        it('still navigates to the new chat when refreshing the list fails', async () => {
+            const host = await open(GROUP);
+            const store = TestBed.inject(ChatStoreService) as unknown as { loadChats: () => Promise<void> };
+            store.loadChats = () => Promise.reject(new Error('down'));
+            chatApi.createPrivateChat.and.returnValue(of({ ...CHAT, id: 'dm-2', chat_type: 'private' }));
+            const router = TestBed.inject(Router);
+            spyOn(router, 'navigate').and.resolveTo(true);
+
+            await fixture.componentInstance.messageMember(fixture.componentInstance.members()[1]);
+
+            expect(router.navigate).toHaveBeenCalledWith(['/chats', 'dm-2']);
+            expect(host).toBeTruthy();
+        });
+
+        it('keeps the profile open when removing the member fails', async () => {
+            await open(GROUP);
+            (chatApi as unknown as { removeParticipants: jasmine.Spy }).removeParticipants = jasmine
+                .createSpy()
+                .and.returnValue(throwError(() => new Error('no')));
+            const component = fixture.componentInstance;
+            component.openMember(component.members()[1]);
+
+            expect(await component.removeMember(PEER_ID)).toBeFalse();
+            expect(component.selectedMemberId()).not.toBeNull();
+            expect(component.actionError()).toContain('Could not remove');
+        });
+
+        it('opens or creates a private chat from the Message action', async () => {
+            const host = await open(GROUP);
+            chatApi.createPrivateChat.and.returnValue(of({ ...CHAT, id: 'dm-1', chat_type: 'private' }));
+            const router = TestBed.inject(Router);
+            spyOn(router, 'navigate').and.resolveTo(true);
+
+            host.querySelectorAll<HTMLButtonElement>('button.member')[1].click();
+            fixture.detectChanges();
+            const message = Array.from(host.querySelectorAll<HTMLButtonElement>('.member-view button.tile')).find((b) =>
+                b.textContent?.includes('Message')
+            )!;
+            message.click();
+            await fixture.whenStable();
+
+            expect(chatApi.createPrivateChat).toHaveBeenCalledWith(PEER_ID);
+            expect(router.navigate).toHaveBeenCalledWith(['/chats', 'dm-1']);
+        });
     });
 
     describe('embedded in the side panel', () => {
