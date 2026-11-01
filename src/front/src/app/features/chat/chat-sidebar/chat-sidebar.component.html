@@ -83,6 +83,7 @@
                     class="folder-tab"
                     [class.is-active]="activeFolder() === folder.id"
                     [attr.aria-selected]="activeFolder() === folder.id"
+                    [appContextMenu]="folderMenu(folder)"
                     (click)="activeFolder.set(folder.id)"
                 >
                     {{ folder.title }}
@@ -163,6 +164,8 @@
             type="button"
             class="row"
             [class.is-active]="activeChatId() === chat.id"
+            [class.is-pinned]="chat.is_pinned"
+            [appContextMenu]="chatMenu(chat)"
             (click)="openChat(chat.id)"
         >
             <app-avatar
@@ -191,6 +194,13 @@
                                 aria-label="Muted"
                             />
                         }
+                        @if (chat.is_pinned) {
+                            <lucide-icon
+                                [img]="pinIcon"
+                                class="pin-icon"
+                                aria-label="Pinned"
+                            />
+                        }
                     </span>
                     <span class="time">{{ timeOf(chat) }}</span>
                 </span>
@@ -210,6 +220,14 @@
                     </span>
                     @if (chat.unread_count > 0) {
                         <span class="unread">{{ chat.unread_count }}</span>
+                    } @else if (chat.marked_unread) {
+                        <!-- Flagged by hand: there may be nothing new to count, but the user asked to
+                             come back to this chat, so it keeps a badge until it is read. -->
+                        <span
+                            class="unread is-dot"
+                            role="img"
+                            aria-label="Marked as unread"
+                        ></span>
                     }
                 </span>
             </span>

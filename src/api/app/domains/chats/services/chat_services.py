@@ -226,6 +226,10 @@ async def get_user_chats(
             Chat,
             me.last_read_message_id,
             me.muted_until,
+            me.pinned_at,
+            me.marked_unread,
+            me.role.label("my_role"),
+            me.history_start_message_id,
             Contact.alias_name.label("partner_alias"),
         )
         .join(me, and_(Chat.id == me.chat_id, me.user_id == user_id))
@@ -248,7 +252,13 @@ async def get_user_chats(
         .options(selectinload(Chat.participants).selectinload(ChatParticipant.user))
         # `updated_at` is null until something updates the row, and NULLs sort first under DESC in
         # Postgres — so brand-new chats outranked active ones. coalesce falls back to creation.
-        .order_by(func.coalesce(Chat.updated_at, Chat.created_at).desc(), Chat.id)
+        # Pinned chats first (most recently pinned on top), then by activity. Done in SQL so that
+        # limit/offset page over the final order rather than reordering within a page.
+        .order_by(
+            me.pinned_at.desc().nulls_last(),
+            func.coalesce(Chat.updated_at, Chat.created_at).desc(),
+            Chat.id,
+        )
         .limit(limit)
         .offset(offset)
     )
@@ -260,6 +270,10 @@ async def get_user_chats(
         chat = row.Chat
         chat.last_read_message_id = row.last_read_message_id
         chat.muted_until = row.muted_until
+        chat.pinned_at = row.pinned_at
+        chat.marked_unread = row.marked_unread
+        chat.my_role = row.my_role
+        chat.history_start_message_id = row.history_start_message_id
         chat.partner_alias = row.partner_alias
         chats.append(chat)
 
@@ -388,6 +402,171 @@ async def set_chat_mute(
     return participant
 
 
+MAX_PINNED_CHATS = 5
+
+
+async def set_chat_pinned(
+    db: AsyncSession, chat_id: uuid.UUID, user_id: uuid.UUID, pinned: bool
+) -> tuple[ChatParticipant, bool]:
+    """Pin or unpin a chat in this user's own list. Returns the row and whether it changed.
+
+    Idempotent: pinning a pinned chat keeps its original `pinned_at` (so it does not jump to the
+    top) and does not count against the limit; unpinning an unpinned chat does nothing. The cap is
+    check-then-act over several rows, so it is serialised per user with an advisory lock - without
+    it two concurrent pins at 4/5 would both pass.
+    """
+    await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(f"pin:{user_id}"))))
+
+    participant = (
+        await db.execute(
+            select(ChatParticipant).where(
+                ChatParticipant.chat_id == chat_id, ChatParticipant.user_id == user_id
+            )
+        )
+    ).scalar_one_or_none()
+    if participant is None:
+        raise AppException(403, "ACCESS_DENIED", "You are not a participant of this chat.")
+
+    if pinned == (participant.pinned_at is not None):
+        return participant, False
+
+    if pinned:
+        count = await db.scalar(
+            select(func.count())
+            .select_from(ChatParticipant)
+            .where(ChatParticipant.user_id == user_id, ChatParticipant.pinned_at.is_not(None))
+        )
+        if count >= MAX_PINNED_CHATS:
+            raise AppException(
+                409,
+                "PINNED_CHAT_LIMIT",
+                f"You can pin at most {MAX_PINNED_CHATS} chats. Unpin one first.",
+            )
+
+    participant.pinned_at = func.now() if pinned else None
+    await db.commit()
+    await db.refresh(participant)
+    return participant, True
+
+
+async def set_chat_marked_unread(
+    db: AsyncSession, chat_id: uuid.UUID, user_id: uuid.UUID, marked: bool
+) -> tuple[bool, bool]:
+    """Set this user's manual unread flag. Returns `(marked_unread, changed)`.
+
+    Touches only the flag: `last_read_message_id` and therefore every real unread count stay put.
+    """
+    current = await db.scalar(
+        select(ChatParticipant.marked_unread).where(
+            ChatParticipant.chat_id == chat_id, ChatParticipant.user_id == user_id
+        )
+    )
+    if current is None:
+        raise AppException(403, "ACCESS_DENIED", "You are not a participant of this chat.")
+
+    if current == marked:
+        return marked, False
+
+    await db.execute(
+        update(ChatParticipant)
+        .where(ChatParticipant.chat_id == chat_id, ChatParticipant.user_id == user_id)
+        .values(marked_unread=marked)
+    )
+    await db.commit()
+    return marked, True
+
+
+async def clear_marked_unread(
+    db: AsyncSession, chat_id: uuid.UUID, user_id: uuid.UUID
+) -> bool:
+    """Reading a chat resets the manual unread flag. True if it was actually set.
+
+    Separate from `update_participant_last_read` on purpose: that one only reports whether the
+    read position *advanced*, and a user opening a chat they are already caught up on (the very
+    case "mark as unread" is for) advances nothing but must still clear the flag.
+
+    This runs on every read frame, which is a hot path, so the common case (flag not set) is one
+    indexed SELECT and no write or commit. The UPDATE re-asserts the flag, so a racing clear is
+    still counted once.
+    """
+    is_set = await db.scalar(
+        select(ChatParticipant.marked_unread).where(
+            ChatParticipant.chat_id == chat_id, ChatParticipant.user_id == user_id
+        )
+    )
+    if not is_set:
+        return False
+
+    res = await db.execute(
+        update(ChatParticipant)
+        .where(
+            ChatParticipant.chat_id == chat_id,
+            ChatParticipant.user_id == user_id,
+            ChatParticipant.marked_unread.is_(True),
+        )
+        .values(marked_unread=False)
+    )
+    await db.commit()
+    return res.rowcount > 0
+
+
+async def clear_chat_history(
+    db: AsyncSession,
+    mongo_db,
+    chat_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> str | None:
+    """Hide the chat's existing history from this user only. Returns their new floor.
+
+    The floor is the newest message id in the chat (control messages included, so a trailing vote
+    cannot reappear as "unread"). Nothing is deleted from Mongo: every other member keeps the full
+    history, and the floor is applied by every read path that already honours
+    `history_start_message_id`. The read position moves to the same id and the manual unread flag is
+    cleared, since nothing is left to be unread.
+
+    An empty chat is a no-op and returns the existing floor unchanged. Callers authorise first.
+    """
+    newest = await mongo_db["messages"].find_one(
+        {"chat_id": chat_id}, {"_id": 1}, sort=[("_id", -1)]
+    )
+
+    current_floor = await db.scalar(
+        select(ChatParticipant.history_start_message_id).where(
+            ChatParticipant.chat_id == chat_id, ChatParticipant.user_id == user_id
+        )
+    )
+    if newest is None:
+        return current_floor
+
+    floor = str(newest["_id"])
+    # Floors only move forward: a repeat clear, or one racing a newer clear, never regresses it.
+    await db.execute(
+        update(ChatParticipant)
+        .where(
+            ChatParticipant.chat_id == chat_id,
+            ChatParticipant.user_id == user_id,
+            (ChatParticipant.history_start_message_id.is_(None))
+            | (collate(ChatParticipant.history_start_message_id, "C") <= collate(floor, "C")),
+        )
+        .values(
+            history_start_message_id=floor,
+            marked_unread=False,
+        )
+    )
+    await db.execute(
+        update(ChatParticipant)
+        .where(
+            ChatParticipant.chat_id == chat_id,
+            ChatParticipant.user_id == user_id,
+            (ChatParticipant.last_read_message_id.is_(None))
+            | (collate(ChatParticipant.last_read_message_id, "C") < collate(floor, "C")),
+        )
+        .values(last_read_message_id=floor)
+    )
+    await db.commit()
+    return floor
+
+
 async def get_chat_participants_by_user(db: AsyncSession, user_id: uuid.UUID):
     stmt = select(ChatParticipant).where(ChatParticipant.user_id == user_id)
     res = await db.execute(stmt)
@@ -398,6 +577,25 @@ async def enrich_chats_with_mongo_data(
     mongo_db: AsyncIOMotorDatabase, user_id: uuid.UUID, pg_chats: list
 ) -> list[dict]:
     chat_ids = [chat.id for chat in pg_chats]
+
+    # Each chat is matched from the caller's own history floor onward. The floor is what "clear
+    # history" and a late join set, so a chat whose only messages sit below it has no preview and
+    # no unread count, exactly as if it were empty. Unread needs no separate floor term: nothing at
+    # or below the floor survives this match to be counted.
+    #
+    # Fails closed: a floor that is present but not a valid ObjectId (the column has a CHECK, so
+    # this should be unreachable) hides the chat's messages entirely rather than falling back to
+    # an unscoped match that would expose history the member was never meant to see.
+    scope_branches = []
+    for chat in pg_chats:
+        floor = getattr(chat, "history_start_message_id", None)
+        if not floor:
+            scope_branches.append({"chat_id": chat.id})
+        elif ObjectId.is_valid(floor):
+            scope_branches.append({"chat_id": chat.id, "_id": {"$gt": ObjectId(floor)}})
+        # else: no branch, so nothing of this chat can match.
+    if not scope_branches:
+        scope_branches.append({"_id": {"$exists": False}})  # matches nothing
 
     unread_branches = []
     for chat in pg_chats:
@@ -416,7 +614,7 @@ async def enrich_chats_with_mongo_data(
 
     pipeline = [
         # Poll control messages (votes) are neither unread nor a chat preview.
-        {"$match": {"chat_id": {"$in": chat_ids}, "is_control": {"$ne": True}}},
+        {"$match": {"$or": scope_branches, "is_control": {"$ne": True}}},
         {"$sort": {"_id": -1}},
         {
             "$group": {
@@ -430,7 +628,7 @@ async def enrich_chats_with_mongo_data(
     ]
 
     collection = mongo_db["messages"]
-    aggregated_data = await collection.aggregate(pipeline).to_list(None)
+    aggregated_data = await collection.aggregate(pipeline, allowDiskUse=True).to_list(None)
 
     mongo_dict = {doc["_id"]: doc for doc in aggregated_data}
 
@@ -464,6 +662,9 @@ async def enrich_chats_with_mongo_data(
                 "unread_count": stats["unread_count"],
                 "last_message": last_msg,
                 "muted_until": getattr(chat, "muted_until", None),
+                "pinned_at": getattr(chat, "pinned_at", None),
+                "marked_unread": bool(getattr(chat, "marked_unread", False)),
+                "my_role": getattr(chat, "my_role", None),
                 "peer_is_deleted": peer_is_deleted,
                 "created_at": chat.created_at,
                 "updated_at": chat.updated_at,
@@ -712,16 +913,32 @@ async def delete_chat(
     db: AsyncSession,
     mongo_db,
     chat_id: uuid.UUID,
+    user_id: uuid.UUID,
 ) -> list[uuid.UUID]:
     """Delete a chat, its participants and every message in it. Returns who to notify.
 
     Also missing entirely, which is why groups accumulated forever. Participants are read before
     the delete, because after it there is nobody left to send the notification to.
 
+    The chat lock is taken first and the caller's ownership is re-read under it. The route's own
+    check ran before the lock, so a concurrent `transfer_ownership` could demote the caller between
+    that check and this delete, and a demoted owner would still destroy the chat. Both operations
+    take the same lock, so exactly one of them wins and the other sees its outcome.
+
     Messages live in Mongo and the chat row lives in Postgres, so this cannot be one transaction.
     Mongo goes first: an orphaned Postgres row is a chat that still lists and can be retried,
     whereas orphaned Mongo documents are invisible and unreachable forever.
     """
+    await lock_chat(db, chat_id)
+
+    role = await db.scalar(
+        select(ChatParticipant.role).where(
+            ChatParticipant.chat_id == chat_id, ChatParticipant.user_id == user_id
+        )
+    )
+    if role is not ParticipantRole.OWNER:
+        raise AppException(403, "ACCESS_DENIED", "Only the owner can delete this chat.")
+
     participant_ids = list(await get_chat_participants_ids(db, chat_id))
 
     await purge_chat_messages(mongo_db, [chat_id])

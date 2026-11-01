@@ -151,3 +151,14 @@ guarantee that does not exist.
   unreadable. The UI must say so plainly *before* the user proceeds, not after.
 - Ordinary states still apply: empty chat list, loading, offline/reconnecting, message
   sending/sent/failed.
+
+## Context menus
+
+One overlay (`ContextMenuService` + `app-context-menu-host`) serves every custom menu; elements opt in with `[appContextMenu]` and an entries provider.
+
+- **Triggers:** right-click; Menu key or Shift+F10 on the focused element (anchored to it, first item focused); touch press held 500 ms (cancelled by movement beyond 10 px or lifting early; the lifting finger cannot activate an item for 400 ms; the click that ends the press is swallowed).
+- **Keyboard:** Up/Down/Home/End, type-ahead by first letter, Right opens a submenu and Left or Escape returns, Enter/Space activate (native button click), Tab or Escape close. Focus goes to the menu and returns to the trigger on action, Escape and Tab (not on an outside click, scroll or resize).
+- **Closes on:** outside press, Escape, scroll anywhere, window resize, navigation, or another menu opening.
+- **Semantics:** `menu` / `menuitem` / `menuitemcheckbox` (with `aria-checked`), `aria-haspopup`/`aria-expanded` on submenu parents, `aria-disabled` plus a `title` reason on disabled items. Destructive items are red and always followed by a confirmation dialog.
+- **What keeps the native menu:** text fields, links and selected text inside a host; hosts whose provider returns no entries (emoji outside "Recently used"); anywhere without `appContextMenu`.
+- **Menus that exist:** chat-list rows (pin, mute submenu, mark unread/read, add to folder, clear history, leave/delete as the server allows: never for private chats, Delete instead of Leave for an owner behind two confirmations), folder tabs (delete), message bubbles (same builder as the overflow button; a sticker adds View Sticker Set), stickers in the picker and Recently used (View Sticker Set, Remove from Recent), emoji in Recently used, chat members, and stickers in the pack manager.

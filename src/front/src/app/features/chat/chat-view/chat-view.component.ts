@@ -48,15 +48,12 @@ import { contentOf, DecryptedMessage } from '../../../core/services/message.serv
 import { SessionService } from '../../../core/services/session.service';
 import { VoiceRecorderService } from '../../../core/services/voice-recorder.service';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
-import {
-    ContextMenuComponent,
-    ContextMenuItem,
-    MenuAnchor,
-} from '../../../shared/ui/context-menu/context-menu.component';
+import { ContextMenuItem } from '../../../shared/ui/context-menu/context-menu.model';
+import { ContextMenuService } from '../../../shared/ui/context-menu/context-menu.service';
 import { DELETED_USER_LABEL } from '../../../shared/utils/display';
 import { ComposedMessage, ComposerComponent } from '../composer/composer.component';
-import { MessageBubbleComponent } from '../message-bubble/message-bubble.component';
-import { StickerPackDialogComponent } from '../stickers/sticker-pack-dialog/sticker-pack-dialog.component';
+import { MessageBubbleComponent, MessageMenuRequest } from '../message-bubble/message-bubble.component';
+import { StickerPackViewerService } from '../stickers/sticker-pack-dialog/sticker-pack-viewer';
 
 /**
  * How far the pointer must travel before a press becomes a message sweep rather than a click.
@@ -67,14 +64,7 @@ const DRAG_SELECT_THRESHOLD_PX = 8;
 
 @Component({
     selector: 'app-chat-view',
-    imports: [
-        LucideAngularModule,
-        AvatarComponent,
-        MessageBubbleComponent,
-        ComposerComponent,
-        ContextMenuComponent,
-        StickerPackDialogComponent,
-    ],
+    imports: [LucideAngularModule, AvatarComponent, MessageBubbleComponent, ComposerComponent],
     templateUrl: './chat-view.component.html',
     styleUrl: './chat-view.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
@@ -82,6 +72,8 @@ const DRAG_SELECT_THRESHOLD_PX = 8;
 export class ChatViewComponent {
     private readonly store = inject(ChatStoreService);
     private readonly directory = inject(DirectoryService);
+    private readonly contextMenu = inject(ContextMenuService);
+    protected readonly stickerViewer = inject(StickerPackViewerService);
     private readonly session = inject(SessionService);
     private readonly router = inject(Router);
     private readonly panel = inject(ChatPanelStoreService);
@@ -114,9 +106,6 @@ export class ChatViewComponent {
     readonly replyingTo = signal<DecryptedMessage | null>(null);
     readonly editing = signal<DecryptedMessage | null>(null);
 
-    readonly menuItems = signal<ContextMenuItem[]>([]);
-    readonly menuAnchor = signal<MenuAnchor | null>(null);
-
     readonly isSelecting = this.store.isSelecting;
     readonly selectedIds = this.store.selectedIds;
     readonly selectionCount = this.store.selectionCount;
@@ -125,8 +114,6 @@ export class ChatViewComponent {
 
     /** Open only while choosing where to forward to. */
     readonly forwardPickerOpen = signal(false);
-    /** Image url of the sticker whose pack is open, or `null` when no pack dialog is showing. */
-    readonly stickerPackUrl = signal<string | null>(null);
 
     /**
      * Every conversation, including this one.
@@ -371,8 +358,20 @@ export class ChatViewComponent {
      * editing needs a message we wrote and could open, deleting needs to be ours. An item that would
      * be rejected is worse than an absent one.
      */
-    openMessageMenu(request: { message: DecryptedMessage; x: number; y: number }): void {
-        const message = request.message;
+    openMessageMenu(request: MessageMenuRequest): void {
+        const items = [...(request.extra ?? []), ...this.buildMessageMenu(request.message)];
+        this.contextMenu.open(
+            items,
+            { x: request.x, y: request.y },
+            { source: request.source, trigger: request.trigger }
+        );
+    }
+
+    /**
+     * The entries for one message — the single builder behind the right-click menu, the overflow
+     * button and the Menu key, so the three can never drift apart.
+     */
+    buildMessageMenu(message: DecryptedMessage): ContextMenuItem[] {
         const items: ContextMenuItem[] = [{ icon: Reply, label: 'Reply', action: () => this.startReply(message) }];
 
         if (message.text !== null) {
@@ -405,12 +404,7 @@ export class ChatViewComponent {
             });
         }
 
-        this.menuItems.set(items);
-        this.menuAnchor.set({ x: request.x, y: request.y });
-    }
-
-    closeMenu(): void {
-        this.menuAnchor.set(null);
+        return items;
     }
 
     toggleSelected(messageId: string): void {

@@ -163,6 +163,14 @@ export class ChatPanelComponent {
         }
     }
 
+    onEmojiRecentRemoved(emoji: string): void {
+        this.recents.removeEmoji(emoji);
+    }
+
+    onStickerRecentRemoved(stickerId: string): void {
+        this.recents.removeSticker(stickerId);
+    }
+
     onStickerPicked(sticker: StickerModel): void {
         const accepted = this.panel.composer()?.sendSticker(sticker) ?? false;
         this.refused.set(!accepted);

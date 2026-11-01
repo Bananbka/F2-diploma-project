@@ -102,6 +102,7 @@
                         [embedded]="true"
                         [recents]="recentEmoji()"
                         (pick)="onEmojiPicked($event)"
+                        (recentRemoved)="onEmojiRecentRemoved($event)"
                     />
                 </fieldset>
             }
@@ -137,6 +138,7 @@
                     <app-sticker-picker
                         [recentIds]="recentStickerIds()"
                         (stickerPicked)="onStickerPicked($event)"
+                        (recentRemoved)="onStickerRecentRemoved($event)"
                     />
                 </fieldset>
             }

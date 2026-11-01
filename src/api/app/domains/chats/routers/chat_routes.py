@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import audit
 from app.core.audit import AuditEvent
 from app.core.exceptions import AppException
+from app.core.rate_limit import enforce_rate_limit
 from app.core.responses import SuccessResponse
 from app.domains.chats.models import ChatParticipant, ChatType, ParticipantRole
 from app.domains.chats.schemas.chat_schemas import (
@@ -16,10 +17,16 @@ from app.domains.chats.schemas.chat_schemas import (
     ChannelCreateRequest,
     ChatParticipantResponse,
     ChatResponse,
+    ClearHistoryRequest,
+    ClearHistoryResponse,
     GroupChatCreateRequest,
+    MarkUnreadRequest,
+    MarkUnreadResponse,
     MuteChatRequest,
     MuteChatResponse,
     ParticipantReadState,
+    PinChatRequest,
+    PinChatResponse,
     PrivateChatCreateRequest,
     TransferOwnershipRequest,
     UserListRequest,
@@ -40,6 +47,27 @@ from app.infrastructure.services.event_publisher import (
 from app.infrastructure.services import redis_service
 
 router = APIRouter(prefix="/chats", tags=["Chats"])
+
+# Chat-list menu actions (pin, mark unread, clear history). Per-user, cheap, and a person
+# tapping through a menu produces a handful a minute - this only stops a script.
+CHAT_MENU_WINDOW = 60
+CHAT_MENU_LIMIT = 60
+
+# Deleting a chat is destructive and slow (it purges Mongo and object storage), so it gets a much
+# tighter budget than the menu toggles.
+CHAT_DELETE_WINDOW = 3600
+CHAT_DELETE_LIMIT = 20
+
+
+async def _menu_rate_limit(redis: Redis, user: User) -> None:
+    await enforce_rate_limit(
+        redis,
+        scope="chat-menu",
+        identifier=str(user.id),
+        limit=CHAT_MENU_LIMIT,
+        window_seconds=CHAT_MENU_WINDOW,
+        message="Too many chat list changes. Please slow down.",
+    )
 
 
 async def _announce_epoch(
@@ -72,6 +100,13 @@ async def private_chat(
     chat = await chat_services.get_or_create_private_chat(
         db, user.id, data.target_user_id
     )
+    # Reopening an existing chat must report the caller's own pin/unread state, not defaults.
+    mine = next((p for p in chat.participants if p.user_id == user.id), None)
+    if mine is not None:
+        chat.pinned_at = mine.pinned_at
+        chat.marked_unread = mine.marked_unread
+        chat.my_role = mine.role
+        chat.muted_until = mine.muted_until
     return SuccessResponse(data=chat)
 
 
@@ -87,6 +122,9 @@ async def create_group_chat(
     await redis_service.send_chat_created_message(
         publisher, chat, user.id, data.participant_ids
     )
+
+    # After the broadcast: that payload goes to every member and must not claim OWNER for them.
+    chat.my_role = ParticipantRole.OWNER
 
     return SuccessResponse(data=chat)
 
@@ -108,6 +146,9 @@ async def create_channel(
     await redis_service.send_chat_created_message(
         publisher, chat, user.id, data.subscriber_ids
     )
+
+    # After the broadcast: that payload goes to every member and must not claim OWNER for them.
+    chat.my_role = ParticipantRole.OWNER
 
     return SuccessResponse(data=chat)
 
@@ -168,6 +209,9 @@ async def get_chat(
     # Not populated by `get_chat_by_id` itself, since mute is per-participant, not a chat-level
     # column — the list endpoint gets it from the join in `get_user_chats` instead.
     chat.muted_until = participant.muted_until
+    chat.pinned_at = participant.pinned_at
+    chat.marked_unread = participant.marked_unread
+    chat.my_role = participant.role
 
     if chat.chat_type == ChatType.PRIVATE:
         chat.peer_is_deleted = bool(
@@ -242,6 +286,106 @@ async def mute_chat(
     )
     return SuccessResponse(
         data=MuteChatResponse(chat_id=chat_id, muted_until=participant.muted_until)
+    )
+
+
+@router.patch("/{chat_id}/pin", response_model=SuccessResponse[PinChatResponse])
+async def pin_chat(
+    data: PinChatRequest,
+    chat_id: uuid.UUID = Path(..., description="Chat ID"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+    publisher: EventPublisher = Depends(get_event_publisher),
+):
+    """Pin or unpin this chat in the caller's own list (max 5 pinned, 409 PINNED_CHAT_LIMIT).
+
+    Idempotent. Only the caller's other devices are told, via `chat_updated`.
+    """
+    await _menu_rate_limit(redis, user)
+
+    participant, changed = await chat_services.set_chat_pinned(
+        db, chat_id, user.id, data.pinned
+    )
+    if changed:
+        await redis_service.send_chat_updated(
+            publisher,
+            chat_id=chat_id,
+            recipient_ids=[user.id],
+            payload={
+                "pinned": data.pinned,
+                "pinned_at": participant.pinned_at.isoformat()
+                if participant.pinned_at
+                else None,
+            },
+        )
+    return SuccessResponse(
+        data=PinChatResponse(chat_id=chat_id, pinned_at=participant.pinned_at)
+    )
+
+
+@router.patch("/{chat_id}/unread", response_model=SuccessResponse[MarkUnreadResponse])
+async def mark_chat_unread(
+    data: MarkUnreadRequest,
+    chat_id: uuid.UUID = Path(..., description="Chat ID"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+    publisher: EventPublisher = Depends(get_event_publisher),
+):
+    """Set or clear the caller's manual unread flag. Moves no read position.
+
+    The flag is cleared automatically the next time the caller reads the chat (a `message_read`
+    frame on the socket) or clears its history.
+    """
+    await _menu_rate_limit(redis, user)
+
+    marked, changed = await chat_services.set_chat_marked_unread(
+        db, chat_id, user.id, data.marked
+    )
+    if changed:
+        await redis_service.send_chat_updated(
+            publisher,
+            chat_id=chat_id,
+            recipient_ids=[user.id],
+            payload={"marked_unread": marked},
+        )
+    return SuccessResponse(data=MarkUnreadResponse(chat_id=chat_id, marked_unread=marked))
+
+
+@router.post(
+    "/{chat_id}/clear-history", response_model=SuccessResponse[ClearHistoryResponse]
+)
+async def clear_history(
+    data: ClearHistoryRequest | None = None,
+    chat_id: uuid.UUID = Path(..., description="Chat ID"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
+    redis: Redis = Depends(get_redis),
+    publisher: EventPublisher = Depends(get_event_publisher),
+):
+    """Hide the chat's current history from the caller only; everyone else keeps all of it.
+
+    Allowed in every chat type the caller belongs to. Idempotent; on an empty chat it is a no-op.
+    """
+    await _menu_rate_limit(redis, user)
+
+    if await messages_service.is_user_in_chat(db, user.id, chat_id) is None:
+        raise AppException(
+            403, "ACCESS_DENIED", "You dont have permission to access this chat."
+        )
+
+    floor = await chat_services.clear_chat_history(db, mongo_db, chat_id, user.id)
+    if floor is not None:
+        await redis_service.send_chat_updated(
+            publisher,
+            chat_id=chat_id,
+            recipient_ids=[user.id],
+            payload={"history_cleared": True, "floor": floor},
+        )
+    return SuccessResponse(
+        data=ClearHistoryResponse(chat_id=chat_id, history_start_message_id=floor)
     )
 
 
@@ -349,6 +493,7 @@ async def delete_participants(
     )
 
     chat = await chat_services.get_chat_by_id(db, chat_id)
+    chat.my_role = chat_p.role
 
     return SuccessResponse(data=chat)
 
@@ -464,6 +609,7 @@ async def add_participants(
     )
 
     chat = await chat_services.get_chat_by_id(db, chat_id)
+    chat.my_role = chat_p.role
 
     return SuccessResponse(data=chat)
 
@@ -534,6 +680,7 @@ async def delete_chat(
     user: User = Depends(get_current_user),
     chat_id: uuid.UUID = Path(..., description="Chat ID"),
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
     publisher: EventPublisher = Depends(get_event_publisher),
     mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
 ):
@@ -542,6 +689,15 @@ async def delete_chat(
     Private chats are excluded: deleting one would destroy the other person's copy of the
     conversation on a decision they were never party to.
     """
+    await enforce_rate_limit(
+        redis,
+        scope="chat-delete",
+        identifier=str(user.id),
+        limit=CHAT_DELETE_LIMIT,
+        window_seconds=CHAT_DELETE_WINDOW,
+        message="Too many chat deletions. Please wait and try again.",
+    )
+
     participant = await messages_service.is_user_in_chat(db, user.id, chat_id)
     if participant is None:
         raise AppException(
@@ -564,7 +720,9 @@ async def delete_chat(
     # only still answers because the session happens to use expire_on_commit=False.
     chat_type = chat.chat_type.value
 
-    participant_ids = await chat_services.delete_chat(db, mongo_db, chat_id)
+    participant_ids = await chat_services.delete_chat(
+        db, mongo_db, chat_id, user.id
+    )
 
     await redis_service.send_chat_deleted(
         publisher, chat_id=chat_id, recipient_ids=participant_ids

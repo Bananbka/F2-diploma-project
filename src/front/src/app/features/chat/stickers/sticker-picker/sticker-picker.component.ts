@@ -10,12 +10,15 @@ import {
     signal,
 } from '@angular/core';
 import { RouterLink } from '@angular/router';
-import { Clock, Compass, LucideAngularModule, Search, Settings2, Smile } from 'lucide-angular';
+import { Clock, Compass, Layers, LucideAngularModule, Search, Settings2, Smile, X } from 'lucide-angular';
 import { firstValueFrom } from 'rxjs';
 
 import { Sticker, StickerPack, StickerPackSummary } from '../../../../core/models/sticker.model';
 import { StickerApiService } from '../../../../core/services/sticker-api.service';
+import { ContextMenuDirective, ContextMenuProvider } from '../../../../shared/ui/context-menu/context-menu.directive';
+import { ContextMenuEntry } from '../../../../shared/ui/context-menu/context-menu.model';
 import { activeSectionKey, JUMP_SETTLE_MS, scrollToSection } from '../../../../shared/ui/section-scroll';
+import { StickerPackViewerService } from '../sticker-pack-dialog/sticker-pack-viewer';
 
 /** A labelled run of stickers: one of the user's packs. */
 interface PackSection {
@@ -38,7 +41,7 @@ interface PackSection {
  */
 @Component({
     selector: 'app-sticker-picker',
-    imports: [LucideAngularModule, RouterLink],
+    imports: [LucideAngularModule, RouterLink, ContextMenuDirective],
     templateUrl: './sticker-picker.component.html',
     styleUrl: './sticker-picker.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
@@ -46,11 +49,14 @@ interface PackSection {
 export class StickerPickerComponent implements OnInit {
     private readonly stickerApi = inject(StickerApiService);
     private readonly elementRef = inject<ElementRef<HTMLElement>>(ElementRef);
+    private readonly packViewer = inject(StickerPackViewerService);
 
     /** Ids of recently used stickers, newest first. Resolved against loaded packs, never trusted as urls. */
     readonly recentIds = input<readonly string[]>([]);
 
     readonly stickerPicked = output<Sticker>();
+    /** "Remove from Recent" was chosen for this sticker id; the host owns the list. */
+    readonly recentRemoved = output<string>();
 
     readonly tray = signal<StickerPackSummary[]>([]);
     readonly packDetails = signal<Map<string, StickerPack>>(new Map());
@@ -164,6 +170,26 @@ export class StickerPickerComponent implements OnInit {
 
     private scroller(): HTMLElement | null {
         return this.elementRef.nativeElement.querySelector<HTMLElement>('.scroll');
+    }
+
+    /**
+     * Menu for a sticker: its pack, and, in "Recently used", forgetting it. The pack dialog resolves
+     * the pack from the sticker's image url, so that is all it needs.
+     */
+    stickerMenu(sticker: Sticker, recent: boolean): ContextMenuProvider {
+        return () => {
+            const entries: ContextMenuEntry[] = [
+                { icon: Layers, label: 'View Sticker Set', action: () => this.packViewer.open(sticker.image_url) },
+            ];
+            if (recent) {
+                entries.push({
+                    icon: X,
+                    label: 'Remove from Recent',
+                    action: () => this.recentRemoved.emit(sticker.id),
+                });
+            }
+            return entries;
+        };
     }
 
     pick(sticker: Sticker): void {

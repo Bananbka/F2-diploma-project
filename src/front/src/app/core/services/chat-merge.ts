@@ -34,6 +34,12 @@ export function mergeChatDetail(list: Chat | undefined, detail: Chat): Chat {
         muted_until: detail.muted_until !== undefined ? detail.muted_until : list.muted_until,
         is_muted: detail.is_muted ?? list.is_muted,
         peer_is_deleted: list.peer_is_deleted ?? detail.peer_is_deleted,
+        // Pin and manual-unread are mutated optimistically and by realtime echoes, both of which land
+        // on the list copy. The detail is a snapshot from an earlier request and can be older.
+        is_pinned: list.is_pinned ?? detail.is_pinned,
+        pinned_at: list.pinned_at !== undefined ? list.pinned_at : detail.pinned_at,
+        marked_unread: list.marked_unread ?? detail.marked_unread,
+        my_role: list.my_role ?? detail.my_role,
         participants: detail.participants.length > 0 ? detail.participants : list.participants,
     };
 }

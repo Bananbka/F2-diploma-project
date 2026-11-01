@@ -8,6 +8,7 @@ import { ProfileApiService } from '../../../../core/services/profile-api.service
 import { SessionService } from '../../../../core/services/session.service';
 import { StickerApiService } from '../../../../core/services/sticker-api.service';
 import { TwemojiPipe } from '../../../../shared/emoji/twemoji.pipe';
+import { ContextMenuDirective, ContextMenuProvider } from '../../../../shared/ui/context-menu/context-menu.directive';
 import { EmojiPickerComponent } from '../../../../shared/ui/emoji-picker/emoji-picker.component';
 
 /** Server-enforced caps, mirrored here only for UX — the backend is the real enforcer. */
@@ -24,7 +25,7 @@ const MAX_STICKERS_PER_PACK = 120;
  */
 @Component({
     selector: 'app-sticker-pack-manager',
-    imports: [LucideAngularModule, EmojiPickerComponent, TwemojiPipe],
+    imports: [LucideAngularModule, EmojiPickerComponent, TwemojiPipe, ContextMenuDirective],
     templateUrl: './sticker-pack-manager.component.html',
     styleUrl: './sticker-pack-manager.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
@@ -218,6 +219,39 @@ export class StickerPackManagerComponent {
         } finally {
             this.uploading.set(false);
         }
+    }
+
+    /** The same three actions as the row's inline buttons, with the same disabled conditions. */
+    stickerMenu(sticker: Sticker, index: number): ContextMenuProvider {
+        return () => {
+            const count = this.packDetail()?.stickers.length ?? 0;
+            const busy = this.busyStickerId() === sticker.id;
+            return [
+                {
+                    icon: ArrowUp,
+                    label: 'Move up',
+                    disabled: index === 0 || busy,
+                    disabledReason: busy ? 'Saving…' : 'Already first in the pack',
+                    action: () => void this.move(sticker, -1),
+                },
+                {
+                    icon: ArrowDown,
+                    label: 'Move down',
+                    disabled: index === count - 1 || busy,
+                    disabledReason: busy ? 'Saving…' : 'Already last in the pack',
+                    action: () => void this.move(sticker, 1),
+                },
+                { separator: true },
+                {
+                    icon: Trash2,
+                    label: 'Delete sticker',
+                    danger: true,
+                    disabled: busy,
+                    disabledReason: 'Saving…',
+                    action: () => void this.deleteSticker(sticker),
+                },
+            ];
+        };
     }
 
     async deleteSticker(sticker: Sticker): Promise<void> {

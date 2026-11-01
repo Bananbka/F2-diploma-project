@@ -12,6 +12,7 @@ import { DirectoryService } from './directory.service';
 import { DecryptedMessage, DecryptStatus, MessageService } from './message.service';
 import { PollStoreService } from './poll-store.service';
 import { SessionService } from './session.service';
+import { ToastService } from './toast.service';
 import { WebSocketService } from './websocket.service';
 
 const CHAT = 'a0000000-0000-4000-8000-000000000001';
@@ -95,6 +96,11 @@ describe('ChatStoreService', () => {
                         'getPinnedMessages',
                         'muteChat',
                         'getReadState',
+                        'pinChat',
+                        'markChatUnread',
+                        'clearHistory',
+                        'leaveChat',
+                        'deleteChat',
                     ]),
                 },
                 {
@@ -703,6 +709,164 @@ describe('ChatStoreService', () => {
 
             expect(store.chats()[0].is_muted).toBeTrue();
             expect(store.chats()[0].muted_until).toBe(future);
+        });
+    });
+
+    describe('chat list arrangement (pin, mark unread, clear history)', () => {
+        let chatApi: jasmine.SpyObj<ChatApiService>;
+        let toast: ToastService;
+
+        beforeEach(() => {
+            chatApi = TestBed.inject(ChatApiService) as jasmine.SpyObj<ChatApiService>;
+            toast = TestBed.inject(ToastService);
+            store.chats.set([chat()]);
+        });
+
+        it('pins optimistically and keeps the server pin time', async () => {
+            chatApi.pinChat.and.returnValue(of({ chat_id: CHAT, pinned_at: '2026-02-02T00:00:00Z' }));
+
+            const pending = store.setPinned(CHAT, true);
+            expect(store.chats()[0].is_pinned).toBeTrue();
+            await pending;
+
+            expect(chatApi.pinChat).toHaveBeenCalledWith(CHAT, true);
+            expect(store.chats()[0].pinned_at).toBe('2026-02-02T00:00:00Z');
+        });
+
+        it('rolls back a refused pin and explains the limit', async () => {
+            chatApi.pinChat.and.returnValue(
+                throwError(() => new HttpErrorResponse({ status: 409, error: { error_code: 'PINNED_CHAT_LIMIT' } }))
+            );
+
+            await store.setPinned(CHAT, true);
+
+            expect(store.chats()[0].is_pinned).toBeFalse();
+            expect(toast.toasts()[0].message).toContain('up to 5');
+        });
+
+        it('marks unread optimistically and rolls back on failure', async () => {
+            chatApi.markChatUnread.and.returnValue(throwError(() => new Error('boom')));
+
+            await store.setMarkedUnread(CHAT, true);
+
+            expect(store.chats()[0].marked_unread).toBeFalse();
+            expect(toast.toasts().length).toBe(1);
+        });
+
+        it('applies pin, unread and history-cleared echoes from another device without refetching', () => {
+            const ws = TestBed.inject(WebSocketService) as unknown as { messages: Subject<unknown> };
+            store.bindRealtime();
+            store.chats.set([chat({ unread_count: 3, last_message: messageResponse({ _id: 'aaa' }) })]);
+
+            ws.messages.next({
+                event_type: 'chat_updated',
+                chat_id: CHAT,
+                user_id: null,
+                payload: { pinned: true, pinned_at: '2026-03-03T00:00:00Z' },
+            });
+            ws.messages.next({
+                event_type: 'chat_updated',
+                chat_id: CHAT,
+                user_id: null,
+                payload: { marked_unread: true },
+            });
+            expect(store.chats()[0].is_pinned).toBeTrue();
+            expect(store.chats()[0].pinned_at).toBe('2026-03-03T00:00:00Z');
+            expect(store.chats()[0].marked_unread).toBeTrue();
+
+            ws.messages.next({
+                event_type: 'chat_updated',
+                chat_id: CHAT,
+                user_id: null,
+                payload: { history_cleared: true, floor: 'bbb' },
+            });
+            expect(store.chats()[0].last_message).toBeNull();
+            expect(store.chats()[0].unread_count).toBe(0);
+            expect(store.chats()[0].marked_unread).toBeFalse();
+            expect(chatApi.getChats).not.toHaveBeenCalled();
+        });
+
+        it('ignores a pin echo while our own request is in flight, then rolls back to the FIRST snapshot', async () => {
+            const ws = TestBed.inject(WebSocketService) as unknown as { messages: Subject<unknown> };
+            store.bindRealtime();
+            const first = new Subject<{ chat_id: string; pinned_at: string | null }>();
+            const second = new Subject<{ chat_id: string; pinned_at: string | null }>();
+            chatApi.pinChat.and.returnValues(first, second);
+
+            const a = store.setPinned(CHAT, true);
+            const b = store.setPinned(CHAT, false);
+
+            // An echo of the first toggle arrives while both are outstanding: it must not win.
+            ws.messages.next({
+                event_type: 'chat_updated',
+                chat_id: CHAT,
+                user_id: null,
+                payload: { pinned: true, pinned_at: '2026-04-01T00:00:00Z' },
+            });
+            expect(store.chats()[0].is_pinned).toBeFalse();
+
+            // The earlier request failing must not undo the later one; the later one failing
+            // restores the state from before the first toggle.
+            first.error(new Error('late failure'));
+            await a;
+            expect(store.chats()[0].is_pinned).toBeFalse();
+            second.error(new Error('boom'));
+            await b;
+            expect(store.chats()[0].is_pinned).toBeFalse();
+            expect(store.chats()[0].pinned_at ?? null).toBeNull();
+        });
+
+        it('lets the last writer win by pin time once nothing is in flight', () => {
+            const ws = TestBed.inject(WebSocketService) as unknown as { messages: Subject<unknown> };
+            store.bindRealtime();
+            store.chats.set([chat({ is_pinned: true, pinned_at: '2026-05-01T00:00:00Z' })]);
+
+            ws.messages.next({
+                event_type: 'chat_updated',
+                chat_id: CHAT,
+                user_id: null,
+                payload: { pinned: true, pinned_at: '2026-04-01T00:00:00Z' },
+            });
+            expect(store.chats()[0].pinned_at).toBe('2026-05-01T00:00:00Z');
+
+            ws.messages.next({
+                event_type: 'chat_updated',
+                chat_id: CHAT,
+                user_id: null,
+                payload: { pinned: true, pinned_at: '2026-06-01T00:00:00Z' },
+            });
+            expect(store.chats()[0].pinned_at).toBe('2026-06-01T00:00:00Z');
+        });
+
+        it('takes the manual-unread flag from the server answer, not from opening the chat', async () => {
+            chatApi.markChatUnread.and.returnValue(of({ chat_id: CHAT, marked_unread: false }));
+            store.chats.set([chat({ marked_unread: true })]);
+
+            await store['markRead'](CHAT, []);
+
+            expect(chatApi.markChatUnread).toHaveBeenCalledWith(CHAT, false);
+            expect(store.chats()[0].marked_unread).toBeFalse();
+        });
+
+        it('hides cleared messages from the open conversation', async () => {
+            chatApi.clearHistory.and.returnValue(of({ chat_id: CHAT, history_start_message_id: 'bbb' }));
+            store.activeChatId.set(CHAT);
+            store.messages.set([
+                { ...decrypted('aaa', 'ok'), id: 'aaa' },
+                { ...decrypted('ccc', 'ok'), id: 'ccc' },
+            ]);
+
+            await store.clearHistory(CHAT);
+
+            expect(store.messages().map((m) => m.id)).toEqual(['ccc']);
+        });
+
+        it('removes a chat from the list once it is left', async () => {
+            chatApi.leaveChat.and.returnValue(of({}));
+
+            expect(await store.leaveChat(CHAT)).toBeTrue();
+
+            expect(store.chats()).toEqual([]);
         });
     });
 

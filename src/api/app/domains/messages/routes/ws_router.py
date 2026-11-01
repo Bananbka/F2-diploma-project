@@ -15,7 +15,10 @@ from app.core.config import settings
 from app.core.exceptions import AppException
 from app.core.rate_limit import enforce_rate_limit
 from app.domains.chats.models import ChatParticipant
-from app.domains.chats.services.chat_services import update_participant_last_read
+from app.domains.chats.services.chat_services import (
+    clear_marked_unread,
+    update_participant_last_read,
+)
 from app.domains.messages.schemas.ws_schemas import WSEventType, WSMessageEnvelope
 from app.domains.messages.services import messages_service
 from app.domains.users.dependencies import (
@@ -491,6 +494,18 @@ async def websocket_endpoint(
                     advanced = await update_participant_last_read(
                         db, ws_event.chat_id, user.id, last_read_id
                     )
+
+                    # Reading resets the manual "mark as unread" flag even when the position did
+                    # not move; tell the user's other devices so their lists drop the dot too.
+                    if await clear_marked_unread(db, ws_event.chat_id, user.id):
+                        await publisher.publish_durable(
+                            WSMessageEnvelope(
+                                event_type=WSEventType.CHAT_UPDATED,
+                                chat_id=ws_event.chat_id,
+                                payload={"marked_unread": False},
+                            ),
+                            [user.id],
+                        )
 
                     # Still called for its (deprecated) side effect on the legacy shared `is_read`
                     # flag — see the note on `mark_messages_as_read`. Its modified count must not

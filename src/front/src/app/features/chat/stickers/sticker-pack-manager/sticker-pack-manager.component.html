@@ -114,7 +114,10 @@
 
                                 <ul class="stickers">
                                     @for (sticker of packDetail()!.stickers; track sticker.id; let i = $index) {
-                                        <li class="sticker-row">
+                                        <li
+                                            class="sticker-row"
+                                            [appContextMenu]="stickerMenu(sticker, i)"
+                                        >
                                             <img
                                                 [src]="sticker.image_url"
                                                 [alt]="sticker.emoji"

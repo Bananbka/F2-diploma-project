@@ -1,0 +1,68 @@
+<div
+    #menu
+    class="menu"
+    role="menu"
+    tabindex="-1"
+    [attr.aria-label]="label()"
+    [style.left.px]="position().x"
+    [style.top.px]="position().y"
+    (keydown)="onKeydown($event)"
+    (mouseenter)="pointerEntered.emit()"
+>
+    @for (row of rows(); track $index) {
+        @if (row.item; as item) {
+            <button
+                type="button"
+                class="item"
+                tabindex="-1"
+                [class.is-danger]="item.danger"
+                [class.is-disabled]="item.disabled"
+                [class.is-open]="openSub() === row.index"
+                [attr.role]="roleOf(item)"
+                [attr.data-index]="row.index"
+                [attr.aria-disabled]="item.disabled ? 'true' : null"
+                [attr.aria-checked]="item.checked === undefined ? null : item.checked"
+                [attr.aria-haspopup]="item.children ? 'menu' : null"
+                [attr.aria-expanded]="item.children ? openSub() === row.index : null"
+                [attr.title]="item.disabled ? (item.disabledReason ?? null) : null"
+                (mouseenter)="onHover(row.index, $event)"
+                (click)="activate(row.index, $event)"
+            >
+                <span class="item-icon">
+                    @if (item.icon) {
+                        <lucide-icon [img]="item.icon" />
+                    }
+                </span>
+                <span class="item-label">{{ item.label }}</span>
+                @if (item.children) {
+                    <lucide-icon
+                        class="item-trail"
+                        [img]="chevronIcon"
+                    />
+                } @else if (item.checked) {
+                    <lucide-icon
+                        class="item-trail"
+                        [img]="checkIcon"
+                    />
+                }
+            </button>
+            @if (item.children && openSub() === row.index && subRect(); as rect) {
+                <app-context-menu-panel
+                    [items]="item.children"
+                    [beside]="rect"
+                    [level]="level() + 1"
+                    [label]="item.label"
+                    [autoFocus]="subFocus()"
+                    (activated)="activated.emit($event)"
+                    (back)="closeSub()"
+                    (pointerEntered)="cancelPendingClose()"
+                />
+            }
+        } @else {
+            <div
+                class="separator"
+                role="separator"
+            ></div>
+        }
+    }
+</div>

@@ -38,9 +38,15 @@ import { CryptoApiService } from '../../../core/services/crypto-api.service';
 import { DirectoryService } from '../../../core/services/directory.service';
 import { SessionService } from '../../../core/services/session.service';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
+import { ConfirmRequest, ConfirmService } from '../../../shared/ui/confirm-dialog/confirm.service';
+import { ContextMenuDirective, ContextMenuProvider } from '../../../shared/ui/context-menu/context-menu.directive';
+import { ContextMenuEntry } from '../../../shared/ui/context-menu/context-menu.model';
 import { DELETED_USER_LABEL } from '../../../shared/utils/display';
 import { safetyNumberGroups } from '../../../shared/utils/display';
 import { ExportDialogComponent } from '../export-dialog/export-dialog.component';
+
+/** Mirrors the server's `ROLE_RANK`: removal needs a strictly higher rank than the target. */
+const MEMBER_RANK: Record<ParticipantRole, number> = { owner: 3, admin: 2, member: 1 };
 
 interface MemberRow {
     userId: string;
@@ -58,7 +64,7 @@ interface MemberRow {
 
 @Component({
     selector: 'app-chat-info',
-    imports: [RouterLink, LucideAngularModule, AvatarComponent, DatePipe, ExportDialogComponent],
+    imports: [RouterLink, LucideAngularModule, AvatarComponent, DatePipe, ExportDialogComponent, ContextMenuDirective],
     templateUrl: './chat-info.component.html',
     styleUrl: './chat-info.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
@@ -72,6 +78,7 @@ export class ChatInfoComponent {
     private readonly session = inject(SessionService);
     private readonly store = inject(ChatStoreService);
     private readonly router = inject(Router);
+    private readonly confirm = inject(ConfirmService);
 
     readonly chatId = input.required<string>();
     /** Shown inside the conversation's side panel (Profile tab) instead of as its own screen. */
@@ -460,7 +467,21 @@ export class ChatInfoComponent {
      * unreachable there by construction.
      */
     canChangeRole(member: MemberRow): boolean {
-        return this.canManage() && !member.isMe && member.role !== 'owner' && !this.isPrivate();
+        // The server's `change_role` is owner-only; an admin would be shown a control that always fails.
+        return this.isOwner() && !member.isMe && member.role !== 'owner' && !this.isPrivate();
+    }
+
+    /**
+     * Removal follows the server's rank rule: the actor must outrank the target strictly, so an
+     * owner can remove admins and members, an admin can remove members only, and nobody removes an
+     * equal or a superior.
+     */
+    canRemove(member: MemberRow): boolean {
+        const me = this.members().find((m) => m.isMe);
+        if (!me?.role || !member.role || member.isMe) {
+            return false;
+        }
+        return MEMBER_RANK[me.role] > MEMBER_RANK[member.role];
     }
 
     /** Only the owner, and only to someone who is not already the owner. */
@@ -592,6 +613,84 @@ export class ChatInfoComponent {
             this.error.set('Could not add that person.');
         } finally {
             this.busy.set(false);
+        }
+    }
+
+    /**
+     * Right-click menu for one roster row. Each entry reuses the predicate of the inline control it
+     * mirrors (`canChangeRole`, `canTransferTo`, `canRemove`), which in turn follow the server's
+     * rules; the server remains the enforcement, this only avoids offering what it would refuse. The
+     * destructive entries ask first, since a menu item is one stray click away.
+     */
+    memberMenu(member: MemberRow): ContextMenuProvider {
+        return () => {
+            const entries: ContextMenuEntry[] = [];
+
+            if (!member.isMe && !member.deleted && member.hasKeys && !this.isChannel()) {
+                entries.push({
+                    icon: ShieldCheck,
+                    label: 'Safety number',
+                    action: () => void this.router.navigate(['/chats', this.chatId(), 'safety', member.userId]),
+                });
+            }
+            if (!member.isMe && !member.deleted && !this.contacted().has(member.userId)) {
+                entries.push({
+                    icon: BookmarkPlus,
+                    label: 'Save as contact',
+                    action: () => void this.addContact(member),
+                });
+            }
+            if (this.canChangeRole(member)) {
+                const next: ParticipantRole = member.role === 'admin' ? 'member' : 'admin';
+                entries.push({
+                    icon: UserPlus,
+                    label: next === 'admin' ? 'Make admin' : 'Make member',
+                    action: () => void this.setRole(member.userId, next),
+                });
+            }
+            if (this.canTransferTo(member)) {
+                entries.push({
+                    icon: Crown,
+                    label: 'Make owner',
+                    action: () =>
+                        void this.confirmThen(
+                            {
+                                title: 'Make this member the owner?',
+                                message: `${member.name} becomes the owner and you become an admin. Only they can hand it back.`,
+                                confirmLabel: 'Make owner',
+                            },
+                            () => {
+                                this.confirming.set(`owner:${member.userId}`);
+                                return this.transferOwnership(member.userId);
+                            }
+                        ),
+                });
+            }
+            if (this.canRemove(member)) {
+                entries.push({ separator: true });
+                entries.push({
+                    icon: UserMinus,
+                    label: 'Remove from chat',
+                    danger: true,
+                    action: () =>
+                        void this.confirmThen(
+                            {
+                                title: 'Remove this member?',
+                                message: `${member.name} is removed and the chat rotates its keys, so they cannot read anything sent afterwards.`,
+                                confirmLabel: 'Remove',
+                                danger: true,
+                            },
+                            () => this.removeMember(member.userId)
+                        ),
+                });
+            }
+            return entries;
+        };
+    }
+
+    private async confirmThen(request: ConfirmRequest, run: () => Promise<void>): Promise<void> {
+        if (await this.confirm.ask(request)) {
+            await run();
         }
     }
 

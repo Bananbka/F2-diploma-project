@@ -240,7 +240,7 @@
                         (menuRequested)="openMessageMenu($event)"
                         (jumpRequested)="jumpToMessage($event)"
                         (reactionToggled)="react(item.message.id, $event)"
-                        (stickerPackRequested)="stickerPackUrl.set($event)"
+                        (stickerPackRequested)="stickerViewer.open($event)"
                     />
                 }
 
@@ -504,19 +504,4 @@
             }
         </div>
     </div>
-}
-
-@if (menuAnchor(); as anchor) {
-    <app-context-menu
-        [items]="menuItems()"
-        [anchor]="anchor"
-        (closed)="closeMenu()"
-    />
-}
-
-@if (stickerPackUrl(); as url) {
-    <app-sticker-pack-dialog
-        [stickerUrl]="url"
-        (closed)="stickerPackUrl.set(null)"
-    />
 }

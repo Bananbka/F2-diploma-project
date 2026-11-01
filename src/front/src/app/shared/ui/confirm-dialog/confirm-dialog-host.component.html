@@ -1,0 +1,43 @@
+<div
+    class="backdrop"
+    aria-hidden="true"
+    (click)="answered.emit(false)"
+></div>
+<div
+    class="dialog"
+    role="alertdialog"
+    aria-modal="true"
+    aria-labelledby="confirm-title"
+    aria-describedby="confirm-message"
+>
+    <h2
+        id="confirm-title"
+        class="title"
+    >
+        {{ request().title }}
+    </h2>
+    <p
+        id="confirm-message"
+        class="message"
+    >
+        {{ request().message }}
+    </p>
+    <div class="actions">
+        <button
+            #cancel
+            type="button"
+            class="btn"
+            (click)="answered.emit(false)"
+        >
+            Cancel
+        </button>
+        <button
+            type="button"
+            class="btn is-confirm"
+            [class.is-danger]="request().danger"
+            (click)="answered.emit(true)"
+        >
+            {{ request().confirmLabel }}
+        </button>
+    </div>
+</div>

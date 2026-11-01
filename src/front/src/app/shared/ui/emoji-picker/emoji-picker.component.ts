@@ -9,9 +9,10 @@ import {
     output,
     signal,
 } from '@angular/core';
-import { Clock, LucideAngularModule, Search } from 'lucide-angular';
+import { Clock, LucideAngularModule, Search, X } from 'lucide-angular';
 
 import { TwemojiPipe } from '../../emoji/twemoji.pipe';
+import { ContextMenuDirective, ContextMenuProvider } from '../context-menu/context-menu.directive';
 import { activeSectionKey, JUMP_SETTLE_MS, scrollToSection } from '../section-scroll';
 import { EMOJI_CATEGORIES } from './emoji-data';
 
@@ -31,7 +32,7 @@ import { EMOJI_CATEGORIES } from './emoji-data';
  */
 @Component({
     selector: 'app-emoji-picker',
-    imports: [TwemojiPipe, LucideAngularModule],
+    imports: [TwemojiPipe, LucideAngularModule, ContextMenuDirective],
     templateUrl: './emoji-picker.component.html',
     styleUrl: './emoji-picker.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
@@ -52,6 +53,8 @@ export class EmojiPickerComponent {
 
     readonly pick = output<string>();
     readonly closeRequested = output<void>();
+    /** "Remove from Recent" was chosen for this emoji; the host owns the list. */
+    readonly recentRemoved = output<string>();
 
     readonly categories = EMOJI_CATEGORIES;
     readonly activeCategory = signal(0);
@@ -141,6 +144,11 @@ export class EmojiPickerComponent {
 
     private scroller(): HTMLElement | null {
         return this.elementRef.nativeElement.querySelector<HTMLElement>('.scroll');
+    }
+
+    /** Menu for an entry in "Recently used". Other emoji have no custom actions, so keep the native menu. */
+    recentMenu(emoji: string): ContextMenuProvider {
+        return () => [{ icon: X, label: 'Remove from Recent', action: () => this.recentRemoved.emit(emoji) }];
     }
 
     choose(emoji: string): void {
