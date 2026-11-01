@@ -229,4 +229,8 @@ export interface MessageResponse {
     /** Sender-chosen idempotency key echoed back by the server; absent on older messages. */
     client_message_id?: string | null;
     is_encrypted: boolean;
+    /** Poll vote / close. Excluded from history, unread counts and previews by the server. */
+    is_control?: boolean;
+    /** The poll a control message belongs to (24-hex ObjectId); set exactly when `is_control`. */
+    poll_message_id?: string | null;
 }

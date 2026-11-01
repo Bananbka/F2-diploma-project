@@ -22,6 +22,43 @@ below needs its own visual treatment.
 Messages also carry `senderVerified`. Show the verified indicator only when a signature was
 actually checked and passed — never as a default.
 
+### Structured messages (polls, locations)
+
+The sealed payload can also be a *poll*, a *location*, or something this version cannot interpret
+(`docs/crypto-spec-v1.md` §4.7). These are properties of an **opened** message (`status: ok`); a
+message that did not open keeps its `DecryptStatus` treatment above and never shows poll or
+location content.
+
+| Content | Must |
+|---|---|
+| Poll | Show the question, options, counts and percentages derived from the votes (never stored), the user's own choice, and a closed state ("Closed" / "time is up"). Voter names appear only in a public poll; an anonymous poll shows counts only and says, next to the "Anonymous" label: "Anonymous only in the interface: the server knows who voted, and other members' browsers can see it too. This app merely hides it." Votes loading, a failed load (with a Retry button), votes that could not be read ("N votes could not be read") and a truncated list ("Result may be incomplete") are shown as warnings, not footnotes. An edited poll says the author edited it and that earlier votes are not counted. |
+| Poll, own vote | Not counted locally until the server accepted the control message; a failure is shown on the card. |
+| Poll, closing | Offered only to the poll's author, with a confirmation. |
+| Location | A card with rounded coordinates (full precision is kept), optional label and accuracy, and an "Open in map" link (new tab, `noopener noreferrer`). No map tiles, no request to a map provider until the user follows the link. Out-of-range coordinates show "Invalid location". |
+| Unsupported | "Unsupported message" with the reason (unknown type, newer format, malformed contents, misplaced). **Not** shown as text, and not hidden. |
+| Vote / close | Control messages are **never** a row in the conversation, a preview, an unread count, a forward, or a plain-message export entry. |
+
+Entry points (poll, location) go through the same guard as the other composer triggers:
+`unavailableReason()` covers an unverified member set, a read-only conversation, editing, and a
+voice recording, and each submit re-checks it. They are absent in channels (signed posts cannot
+carry a sealed payload). The UI offers no edit or forward for a poll or location (the server would still
+accept an edit from a modified client; see `docs/tech-debt.md` section 11), and the selection bar
+explains why the forward count can be lower than the selection.
+
+The location dialog asks for the position only after an explicit button press, explains denied /
+unavailable / timeout / unsupported outcomes, never retries on its own, and previews the
+coordinates before anything is sent.
+
+### Export
+
+"Export chat history" (chat info) states that the file will contain **decrypted** content, shows
+progress (indeterminate while the history length is unknown) and can be cancelled. The file lists a
+message that could not be decrypted with its `DecryptStatus` instead of dropping it; contains no keys,
+ciphertext or attachment URLs; and lists poll voters only for a public poll. A poll whose votes could not
+all be fetched or read is marked `votes_complete: false` (with `votes_fetch_failed`, `votes_truncated`
+and `votes_unreadable`) rather than written as if the counts were final, and the done state says how
+many messages could not be read.
+
 ## Conversation-level states
 
 - **History floor** — "Messages before you joined are unavailable." Permanent, not loading. The

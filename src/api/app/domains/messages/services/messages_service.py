@@ -34,6 +34,13 @@ from app.infrastructure.minio import minio_manager
 # small cap keeps the pinned list actually skimmable and bounds the size of the listing query.
 MAX_PINNED_MESSAGES_PER_CHAT = 5
 
+# Poll control messages. A real vote is well under 1 KB sealed; the cap only has to stop the
+# envelope's 256 KB ceiling being used as free storage through a flag the server cannot look behind.
+CONTROL_MAX_CT_CHARS = 4096
+# Per (chat, poll, sender). Votes replace each other and a close is one message, so this is generous.
+# The count-then-insert is not atomic; a concurrent burst can overshoot by a few, which is fine.
+CONTROL_MAX_PER_POLL_PER_SENDER = 50
+
 
 async def is_user_in_chat(
     db: AsyncSession,
@@ -145,6 +152,12 @@ async def get_message_for_participant(
     msg = await get_message_by_id(collection, obj_id)
 
     chat = await get_chat_or_403(db, msg["chat_id"], user_id)
+    if msg.get("is_control"):
+        raise AppException(
+            409,
+            "CONTROL_MESSAGE_NOT_ALLOWED",
+            "Poll control messages cannot be reacted to or pinned.",
+        )
     return msg, chat
 
 
@@ -441,6 +454,65 @@ async def _authorize_attachments(
             )
 
 
+async def _validate_control_target(
+    collection,
+    chat: Chat,
+    user_id: uuid.UUID,
+    message_in: MessageCreateRequest,
+    is_encrypted_chat: bool,
+) -> None:
+    """Gate a control message on where it may live, how big it is and what it may point at.
+
+    Error codes: `CONTROL_MESSAGE_NOT_ALLOWED` is 422 here (this chat or this shape can never carry
+    a control message) and 409 where an operation is attempted on an existing one (react, pin,
+    delete). `CONTROL_MESSAGE_TOO_LARGE` is 422; `CONTROL_MESSAGE_LIMIT` is 409.
+
+    Called after `get_chat_or_403`, so the caller is already known to be a member of `chat`. A poll
+    id that does not exist and one that belongs to another chat answer identically (404), so the
+    response never confirms that a message exists in a chat the caller is not in.
+    """
+    if chat.chat_type == ChatType.CHANNEL or not is_encrypted_chat:
+        raise AppException(
+            422,
+            "CONTROL_MESSAGE_NOT_ALLOWED",
+            "Poll control messages are only allowed in end-to-end encrypted private and group chats.",
+        )
+
+    if message_in.envelope is not None and len(message_in.envelope.ct) > CONTROL_MAX_CT_CHARS:
+        raise AppException(
+            422,
+            "CONTROL_MESSAGE_TOO_LARGE",
+            f"A poll control message may not exceed {CONTROL_MAX_CT_CHARS} characters of ciphertext.",
+        )
+
+    poll_message_id = message_in.poll_message_id
+    target = await collection.find_one({"_id": objectify_id(poll_message_id)})
+    if target is None or target.get("chat_id") != chat.id:
+        raise AppException(404, "POLL_NOT_FOUND", "That poll does not exist in this chat.")
+
+    if target.get("is_control"):
+        raise AppException(
+            422,
+            "POLL_TARGET_IS_CONTROL",
+            "A control message cannot refer to another control message.",
+        )
+
+    sent = await collection.count_documents(
+        {
+            "chat_id": chat.id,
+            "is_control": True,
+            "poll_message_id": poll_message_id,
+            "sender_id": user_id,
+        }
+    )
+    if sent >= CONTROL_MAX_PER_POLL_PER_SENDER:
+        raise AppException(
+            409,
+            "CONTROL_MESSAGE_LIMIT",
+            f"You have already sent {CONTROL_MAX_PER_POLL_PER_SENDER} votes for this poll.",
+        )
+
+
 async def _find_by_client_message_id(
     collection, chat_id: uuid.UUID, sender_id: uuid.UUID, client_message_id: uuid.UUID
 ) -> dict | None:
@@ -479,6 +551,10 @@ def _request_fingerprint(message_in: MessageCreateRequest) -> str:
         "attachments": sorted(a.url for a in message_in.attachments or []),
         "forwarded_from": forwarded,
     }
+    if message_in.is_control:
+        # Added only for control messages so fingerprints stored before polls still compare equal.
+        canonical["is_control"] = True
+        canonical["poll_message_id"] = message_in.poll_message_id
     return hashlib.sha256(
         json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -497,7 +573,8 @@ async def _replay(
 
     # Touched again so a crash between the original insert and its commit or broadcast cannot
     # leave the chat unmoved; the route re-broadcasts too, and clients dedup by message id.
-    await chat_services.touch_chat(db, message_in.chat_id)
+    if not existing.get("is_control"):
+        await chat_services.touch_chat(db, message_in.chat_id)
     await db.commit()
 
     return _to_response(existing, chat), False
@@ -542,6 +619,11 @@ async def send_message(
     is_encrypted_chat = (
         settings is not None and settings.crypto_mode is CryptoMode.SENDER_KEYS_V1
     )
+
+    if message_in.is_control:
+        await _validate_control_target(
+            collection, chat, user_id, message_in, is_encrypted_chat
+        )
 
     if chat.chat_type == ChatType.CHANNEL:
         await _validate_channel_post(db, chat, user_id, message_in.channel_post)
@@ -592,8 +674,10 @@ async def send_message(
         return await _replay(db, existing, chat, message_in)
 
     # Move the chat to the top of the sender's and every recipient's list. `get_user_chats` has
-    # always ordered by this column and nothing ever wrote to it.
-    await chat_services.touch_chat(db, message_in.chat_id)
+    # always ordered by this column and nothing ever wrote to it. A control message (a poll vote)
+    # is not conversation activity, so it must not reorder the list.
+    if not message_in.is_control:
+        await chat_services.touch_chat(db, message_in.chat_id)
     await db.commit()
 
     message_dict["_id"] = str(res.inserted_id)
@@ -611,7 +695,8 @@ async def get_chat_messages(
     chat = await get_chat_or_403(db, chat_id, user_id)
 
     collection = mongo_db["messages"]
-    query = {"chat_id": chat_id}
+    # Control messages (poll votes) are not part of the conversation; they have their own listing.
+    query = {"chat_id": chat_id, "is_control": {"$ne": True}}
 
     if before_id:
         message_id = objectify_id(before_id)
@@ -637,6 +722,50 @@ async def get_chat_messages(
     return res
 
 
+async def get_poll_votes(
+    db: AsyncSession,
+    mongo_db: AsyncIOMotorDatabase,
+    user_id: uuid.UUID,
+    chat_id: uuid.UUID,
+    poll_message_id: str,
+    limit: int = 100,
+    before_id: str | None = None,
+) -> list[MessageResponse]:
+    """Control messages (votes, close) of one poll, newest first, with the same history floor."""
+    # One query for both the authorisation and the history floor.
+    row = (
+        await db.execute(
+            select(ChatParticipant, Chat)
+            .join(Chat, Chat.id == ChatParticipant.chat_id)
+            .where(ChatParticipant.user_id == user_id, ChatParticipant.chat_id == chat_id)
+        )
+    ).first()
+    if not row:
+        raise AppException(403, "FORBIDDEN", "You are not a participant of this chat.")
+    participant, chat = row.ChatParticipant, row.Chat
+    objectify_id(poll_message_id)
+
+    id_filter: dict = {}
+    if before_id:
+        id_filter["$lt"] = objectify_id(before_id)
+
+    if participant.history_start_message_id:
+        id_filter["$gt"] = objectify_id(participant.history_start_message_id)
+
+    query: dict = {
+        "chat_id": chat_id,
+        "is_control": True,
+        "poll_message_id": poll_message_id,
+    }
+    if id_filter:
+        query["_id"] = id_filter
+
+    docs = await (
+        mongo_db["messages"].find(query).sort("_id", -1).limit(limit).to_list(length=limit)
+    )
+    return [_to_response(doc, chat) for doc in docs]
+
+
 async def update_message(
     db: AsyncSession,
     mongo_db: AsyncIOMotorDatabase,
@@ -652,6 +781,13 @@ async def update_message(
     chat_id = msg.get("chat_id")
     chat = await get_chat_or_403(db, chat_id, user_id)
     await ensure_peer_not_deleted(db, chat, user_id)
+
+    # A vote is replaced by sending a newer one, never by editing; is_control / poll_message_id
+    # are immutable because the update below touches neither.
+    if msg.get("is_control"):
+        raise AppException(
+            409, "CONTROL_MESSAGE_NOT_EDITABLE", "Poll control messages cannot be edited."
+        )
 
     # A channel post is signed over its own content, so replacing that content through the edit
     # path would leave a document whose stored signature covers something else entirely — an
@@ -762,7 +898,26 @@ async def delete_message(
     collection = mongo_db["messages"]
     msg = await get_and_validate_message(db, collection, msg_id, user_id)
 
+    # A voter retracts by voting again; deleting a close marker would reopen a poll. The poll's own
+    # cascade below deletes control messages directly and is unaffected.
+    if msg.get("is_control"):
+        raise AppException(
+            409,
+            "CONTROL_MESSAGE_NOT_ALLOWED",
+            "Poll control messages cannot be deleted; vote again to change a vote.",
+        )
+
     await collection.delete_one({"_id": msg["_id"]})
+
+    # Votes and the close marker are meaningless without their poll.
+    if not msg.get("is_control"):
+        await collection.delete_many(
+            {
+                "chat_id": msg["chat_id"],
+                "is_control": True,
+                "poll_message_id": str(msg["_id"]),
+            }
+        )
 
     # Only reap a blob once no surviving message references it. A user can name any url in their
     # own message's attachments, so deleting purely on the strength of this document would let

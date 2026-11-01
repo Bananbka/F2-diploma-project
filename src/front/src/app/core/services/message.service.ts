@@ -14,6 +14,14 @@ import {
     MessageResponse,
     PublicKey,
 } from '../models/crypto.model';
+import {
+    classifyPlaintext,
+    encodeTypedPayload,
+    isControlContent,
+    MessageContent,
+    TEXT_CONTENT,
+    TypedContent,
+} from '../models/message-payload';
 import { ChatApiService } from './chat-api.service';
 import { CryptoApiService } from './crypto-api.service';
 import { httpErrorCode, isCryptoNotEnabled, RetryLimitExceededError } from './crypto-errors';
@@ -49,6 +57,19 @@ export interface DecryptedMessage {
      */
     reactions: MessageReaction[];
     isPinned: boolean;
+    /**
+     * What the sealed payload actually is. Absent means plain text, which is what every message
+     * built before typed payloads existed (and every test literal) is.
+     */
+    content?: MessageContent;
+    /** The server flagged this as a poll vote/close. Such messages never belong in the conversation. */
+    isControl?: boolean;
+    editedAt?: string | null;
+}
+
+/** The kind of content a message carries, defaulting to text. */
+export function contentOf(message: DecryptedMessage): MessageContent {
+    return message.content ?? TEXT_CONTENT;
 }
 
 /** A page of history, ciphertext included so undecryptable entries can be retried in place. */
@@ -71,7 +92,11 @@ interface MessagePlaintext {
 }
 
 /** Build the JSON plaintext payload sealed inside a message envelope. */
-function buildPlaintext(text: string, attachments: MessageAttachment[] | undefined): Uint8Array {
+function buildPlaintext(text: string, attachments: MessageAttachment[] | undefined, typed?: TypedContent): Uint8Array {
+    if (typed) {
+        return utf8(JSON.stringify(encodeTypedPayload(typed)));
+    }
+
     const attachmentKeys = (attachments ?? [])
         .filter((file): file is MessageAttachment & { decryptionKey: Uint8Array } => file.decryptionKey !== undefined)
         .map((file) => ({ url: file.url, key: b64uEncode(file.decryptionKey) }));
@@ -88,24 +113,33 @@ function buildPlaintext(text: string, attachments: MessageAttachment[] | undefin
  * boolean) succeeds as the wrong shape. Either case falls back to treating the bytes as legacy
  * plain text with no attachment keys, so old history keeps decrypting exactly as it always has.
  */
-function parsePlaintext(plaintext: Uint8Array): MessagePlaintext {
+function parsePlaintext(plaintext: Uint8Array, isControl = false): MessagePlaintext & { content: MessageContent } {
     const raw = fromUtf8(plaintext);
 
     try {
         const parsed = JSON.parse(raw);
+        const classified = classifyPlaintext(parsed, isControl);
+        if (classified.content.kind !== 'text') {
+            // Typed (or unsupported): the fallback text inside is for older clients, never shown here.
+            return { text: '', attachmentKeys: [], content: classified.content };
+        }
         if (
             parsed &&
             typeof parsed === 'object' &&
             typeof parsed.text === 'string' &&
             Array.isArray(parsed.attachmentKeys)
         ) {
-            return parsed as MessagePlaintext;
+            return { ...(parsed as MessagePlaintext), content: TEXT_CONTENT };
         }
     } catch {
         // Not JSON at all — legacy plaintext. Fall through.
     }
 
-    return { text: raw, attachmentKeys: [] };
+    return {
+        text: raw,
+        attachmentKeys: [],
+        content: isControl ? classifyPlaintext(null, true).content : TEXT_CONTENT,
+    };
 }
 
 /**
@@ -205,7 +239,8 @@ export class MessageService {
         replyTo?: string,
         attachments?: MessageAttachment[],
         forwardedFrom?: ForwardOrigin,
-        clientMessageId: string = uuidv4()
+        clientMessageId: string = uuidv4(),
+        typed?: TypedContent
     ): Promise<MessageResponse> {
         // Minted before any encryption and reused by every retry of this logical message — the
         // EPOCH_STALE re-seal below produces different ciphertext, but it is still the same send,
@@ -220,7 +255,8 @@ export class MessageService {
                 clientMessageId,
                 replyTo,
                 attachments,
-                forwardedFrom
+                forwardedFrom,
+                typed
             );
         } catch (error) {
             if (!this.isEpochStale(error)) {
@@ -231,8 +267,47 @@ export class MessageService {
                 this.epochFromError(error) ?? (await firstValueFrom(this.cryptoApi.getChatKeys(chatId))).current_epoch;
 
             this.keyStore.invalidateSenderChain(chatId, keys.current_epoch);
-            return this.sealAndSend(chatId, currentEpoch, text, clientMessageId, replyTo, attachments, forwardedFrom);
+            return this.sealAndSend(
+                chatId,
+                currentEpoch,
+                text,
+                clientMessageId,
+                replyTo,
+                attachments,
+                forwardedFrom,
+                typed
+            );
         }
+    }
+
+    /** Send a poll or a location: a typed payload sealed exactly like text. */
+    sendTyped(
+        chatId: string,
+        content: TypedContent,
+        replyTo?: string,
+        clientMessageId: string = uuidv4()
+    ): Promise<MessageResponse> {
+        if (isControlContent(content)) {
+            throw new Error('control messages are sent with sendControl');
+        }
+        return this.sendText(chatId, '', replyTo, undefined, undefined, clientMessageId, content);
+    }
+
+    /**
+     * Send a vote or a close. The poll id travels twice: sealed inside the payload (signed) and as
+     * the server-visible `poll_message_id` (so the server can keep it out of history and index it).
+     */
+    async sendControl(
+        chatId: string,
+        content: TypedContent
+    ): Promise<{ sent: MessageResponse; message: DecryptedMessage }> {
+        if (!isControlContent(content)) {
+            throw new Error('not a control payload');
+        }
+        const sent = await this.sendText(chatId, '', undefined, undefined, undefined, uuidv4(), content);
+        // Remember our own plaintext so the echo (socket or endpoint) is never run through the ratchet.
+        const message = this.recordOutgoing({ ...sent, is_control: true }, '', undefined, content);
+        return { sent, message };
     }
 
     private async sealAndSend(
@@ -242,7 +317,8 @@ export class MessageService {
         clientMessageId: string,
         replyTo?: string,
         attachments?: MessageAttachment[],
-        forwardedFrom?: ForwardOrigin
+        forwardedFrom?: ForwardOrigin,
+        typed?: TypedContent
     ): Promise<MessageResponse> {
         const identity = this.keyStore.currentIdentity;
         if (!identity) {
@@ -261,14 +337,28 @@ export class MessageService {
             senderId: identity.userId,
             senderKeyId: own.senderKeyId,
             chainIndex: index,
-            plaintext: buildPlaintext(text, attachments),
+            plaintext: buildPlaintext(text, attachments, typed),
         });
 
         // The key only ever belongs inside the sealed plaintext above — it must never reach the
         // wire as part of the ordinary HTTP attachment metadata.
         const wireAttachments = attachments ? stripDecryptionKeys(attachments) : undefined;
+        const pollId =
+            typed?.kind === 'poll_vote' ? typed.vote.pollId : typed?.kind === 'poll_close' ? typed.close.pollId : null;
         return firstValueFrom(
-            this.chatApi.sendEnvelope(chatId, envelope, replyTo, wireAttachments, forwardedFrom, clientMessageId)
+            pollId
+                ? this.chatApi.sendEnvelope(
+                      chatId,
+                      envelope,
+                      replyTo,
+                      wireAttachments,
+                      forwardedFrom,
+                      clientMessageId,
+                      {
+                          pollMessageId: pollId,
+                      }
+                  )
+                : this.chatApi.sendEnvelope(chatId, envelope, replyTo, wireAttachments, forwardedFrom, clientMessageId)
         );
     }
 
@@ -607,7 +697,12 @@ export class MessageService {
      * back onto the server's copy by URL so the rendered attachments carry the fields the server
      * knows (size, kind, etc.) *and* the key only this process ever held.
      */
-    recordOutgoing(sent: MessageResponse, plaintext: string, sentAttachments?: MessageAttachment[]): DecryptedMessage {
+    recordOutgoing(
+        sent: MessageResponse,
+        plaintext: string,
+        sentAttachments?: MessageAttachment[],
+        content?: TypedContent
+    ): DecryptedMessage {
         const keysByUrl = new Map(
             (sentAttachments ?? [])
                 .filter((f): f is MessageAttachment & { decryptionKey: Uint8Array } => f.decryptionKey !== undefined)
@@ -627,7 +722,10 @@ export class MessageService {
             replyToId: sent.reply_to_message_id,
             forwardedFrom: sent.forwarded_from,
             attachments,
-            text: plaintext,
+            text: content ? null : plaintext,
+            content: content ?? TEXT_CONTENT,
+            isControl: sent.is_control === true || (content ? isControlContent(content) : false),
+            editedAt: sent.edited_at ?? null,
             status: sent.content_format === 'channel_signed_v1' ? 'plaintext' : 'ok',
             // We signed it ourselves, so authorship is known rather than merely checked.
             senderVerified: true,
@@ -658,6 +756,8 @@ export class MessageService {
             attachments: message.attachments ?? [],
             reactions: message.reactions ?? [],
             isPinned: message.is_pinned,
+            isControl: message.is_control === true,
+            editedAt: message.edited_at ?? null,
         };
 
         if (message.content_format === 'channel_signed_v1' && message.channel_post) {
@@ -708,7 +808,16 @@ export class MessageService {
             return { ...base, text: null, status: 'no_key', senderVerified: false };
         }
 
-        const signingPublic = this.keyStore.getChainSigningKey(envelope.skid);
+        const signingPublic = this.keyStore.getChainSigningKey(chatId, envelope.epoch, envelope.skid);
+
+        // The chain must belong to the user the message claims to be from. Without this, any member
+        // who holds a chain can seal a message naming someone else as sender: the signature checks
+        // out against their own chain key. Refused before the ratchet is touched, so a forged
+        // message does not consume an index the real sender's later messages need.
+        const owner = this.keyStore.getChainOwner(chatId, envelope.epoch, envelope.skid);
+        if (owner !== message.sender_id) {
+            return { ...base, text: null, status: 'failed', senderVerified: false };
+        }
 
         try {
             const messageKey = chain.messageKeyFor(envelope.idx);
@@ -720,11 +829,13 @@ export class MessageService {
                 signingPublic,
             });
 
-            const parsed = parsePlaintext(plaintext);
+            const parsed = parsePlaintext(plaintext, message.is_control === true);
+            const typed = parsed.content.kind !== 'text';
             return {
                 ...base,
-                attachments: withAttachmentKeys(base.attachments, parsed.attachmentKeys),
-                text: parsed.text,
+                attachments: typed ? [] : withAttachmentKeys(base.attachments, parsed.attachmentKeys),
+                text: typed ? null : parsed.text,
+                content: parsed.content,
                 status: 'ok',
                 senderVerified: Boolean(signingPublic),
             };

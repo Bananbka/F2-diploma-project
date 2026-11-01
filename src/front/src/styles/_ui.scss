@@ -604,3 +604,33 @@
         }
     }
 }
+
+/*
+ * Centred modal dialog over a dimmed backdrop. Apply `modal-backdrop` to the scrim and
+ * `modal-card` to the dialog element; the dialogs for polls, locations and export share it.
+ */
+@mixin modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 70;
+    background: rgb(0 0 0 / 55%);
+}
+
+@mixin modal-card($width: 26rem) {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    z-index: 71;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    width: min($width, calc(100vw - 2rem));
+    max-height: min(40rem, calc(100vh - 4rem));
+    padding: 1rem;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-2xl);
+    box-shadow: 0 24px 60px rgb(0 0 0 / 60%);
+    transform: translate(-50%, -50%);
+    overflow-y: auto;
+}

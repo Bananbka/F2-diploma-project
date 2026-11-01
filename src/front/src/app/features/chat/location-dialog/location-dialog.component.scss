@@ -1,0 +1,107 @@
+@use 'ui';
+
+.backdrop {
+    @include ui.modal-backdrop;
+}
+
+.dialog {
+    @include ui.modal-card(24rem);
+}
+
+.head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+
+    h2 {
+        margin: 0;
+        font-size: 1rem;
+    }
+}
+
+.close {
+    display: inline-flex;
+    padding: 0.25rem;
+    background: none;
+    border: none;
+    color: var(--muted-foreground);
+
+    lucide-icon {
+        width: 1rem;
+        height: 1rem;
+    }
+}
+
+.muted {
+    margin: 0;
+    color: var(--muted-foreground);
+    font-size: 0.8125rem;
+    line-height: 1.5;
+}
+
+.error {
+    margin: 0;
+    color: var(--danger);
+    font-size: 0.8125rem;
+}
+
+.preview {
+    display: flex;
+    gap: 0.625rem;
+    align-items: center;
+    padding: 0.625rem;
+    background: var(--surface);
+    border-radius: var(--radius-lg);
+
+    lucide-icon {
+        width: 1.25rem;
+        height: 1.25rem;
+        color: var(--primary);
+    }
+
+    p {
+        margin: 0;
+    }
+}
+
+.coords {
+    font-family: var(--font-mono);
+    font-size: 0.875rem;
+}
+
+.field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+
+    input {
+        @include ui.field;
+    }
+}
+
+.actions {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: flex-end;
+}
+
+.btn {
+    padding: 0.5rem 0.875rem;
+    background: var(--surface-raised);
+    border: none;
+    border-radius: var(--radius-lg);
+    color: var(--foreground);
+    font-size: 0.8125rem;
+    font-weight: 600;
+
+    &.is-primary {
+        background: var(--primary);
+        color: var(--primary-foreground);
+    }
+
+    &:disabled {
+        opacity: 0.5;
+    }
+}

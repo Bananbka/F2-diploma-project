@@ -333,3 +333,49 @@ Origin поза списком `ALLOWED_ORIGINS`; події `typing` і `messag
 `/docs` повертає 404. `ALLOWED_ORIGINS` задається JSON-списком і керує також HTTP-записами:
 у виробничому середовищі там має бути справжній origin, інакше записи з браузера отримають
 403. Старе ім'я `ALLOWED_WS_ORIGINS` працює як запасне.
+
+## 11. Polls, location and export - accepted limits
+
+- **Poll anonymity is interface-level only.** The server knows who sent every vote, votes are signed
+  by the voter's chain key, and every member's client can decrypt them. `anonymous` only makes an
+  honest client (and the export) hide it; the UI says "the server knows who voted, and other members'
+  browsers can see it too. This app merely hides it." Real anonymity needs blind or ring signatures over a
+  sender-unlinked channel, which this protocol lacks. The UI and `docs/crypto-spec-v1.md` §4.7 say so.
+- **Votes are tallied by the client, from the full control-message list.** Opening a poll fetches
+  every vote (100 per page, capped at 50 pages) and decrypts them; a very busy poll costs one
+  decrypt per vote and the oldest votes are missing, with a visible warning, past the cap. A
+  voter who leaves the chat stops counting. The server cannot check poll rules, so a modified client
+  can send invalid votes; honest clients ignore them.
+- **Control messages share the sender's ratchet.** A vote consumes a chain index like any message,
+  so a chat with many votes advances chains faster, and decrypting votes after the history relies on
+  retained skipped keys (bounded by `MAX_RETAINED_SKIPPED`).
+- **Polls are not editable in the UI only.** The server accepts a `PUT` re-seal from a poll's
+  author (a modified client can change the question under existing votes); an honest client counts
+  only votes from after `edited_at` and labels the poll edited. Polls are not forwardable and not
+  available in channels.
+- **The tally is only as trustworthy as the server.** It is built from the control messages the server
+  returns, in the server's ObjectId order. Messages are authenticated, so votes cannot be forged, but
+  a malicious server can omit, delay or reorder them and so bias a result (or show members different
+  results). Clients flag truncated and unreadable votes, not omission. A removed member's votes
+  disappear. Voting is capped server-side (50 control messages per voter per poll, 4 KB each), so a
+  voter can change their mind a limited number of times; deleting a vote is refused.
+- **Clock skew affects only the "closed" display.** Which votes count uses server timestamps; the
+  closed indicator uses the device clock floored at the newest server timestamp seen.
+- **Message authorship is bound to the chain owner.** A chain's owner is recorded when its
+  distribution is ingested (the sender's identity key vouches for it), and a message whose
+  `sender_id` is not that owner is refused as failed before the ratchet is touched. Without this a
+  member could seal a message naming another member as the sender.
+- **No live location.** A location is a one-off snapshot sent after an explicit action. Sharing it
+  reveals it to every current member (and any member added later who can read it), and it cannot be
+  recalled except by deleting the message. The "Open in map" link discloses the coordinates to
+  OpenStreetMap when followed; nothing is requested otherwise.
+- **Export memory use.** The export decrypts the whole accessible history into memory and builds one
+  JSON string before handing it to the browser; a chat with hundreds of thousands of messages can
+  exhaust memory. It is JSON only, not streamed, and the file is plaintext: protecting it is the
+  user's job (the dialog warns). The decrypted-plaintext cache is not cleared afterwards.
+- **Export is point-in-time and local.** Names are those known at export time; poll tallies use the
+  votes the server returned at that moment. Messages the account could not read are listed with their
+  status.
+- **Microphone and geolocation need a secure context.** The gateway now allows both for its own origin (`Permissions-Policy: geolocation=(self), microphone=(self)`; camera and payment stay denied). Browsers only expose `getUserMedia` and `navigator.geolocation` on HTTPS or `localhost`, so voice messages and location sharing work on `localhost` but not over plain HTTP on any other host until TLS exists (§1).
+- **Poll control messages cannot be deleted by users.** A voter changes a vote by voting again and the author cannot delete their own close message (`409 CONTROL_MESSAGE_NOT_ALLOWED`); only deleting the poll removes them. Each sender is capped at 50 control messages per poll and 4096 characters of ciphertext each; the cap is checked without a lock and can be overshot by a concurrent burst. ObjectId order across API workers is not a reliable chronology within one second.
+- **The server cannot tell a poll from a message.** Editing a poll with `PUT` is accepted and keeps `is_control` false, because `is_control` is only set on votes.

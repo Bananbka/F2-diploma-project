@@ -1,0 +1,131 @@
+@use 'ui';
+
+.backdrop {
+    @include ui.modal-backdrop;
+}
+
+.dialog {
+    @include ui.modal-card(26rem);
+}
+
+.head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+
+    h2 {
+        margin: 0;
+        font-size: 1rem;
+    }
+}
+
+.close,
+.icon {
+    display: inline-flex;
+    padding: 0.25rem;
+    background: none;
+    border: none;
+    color: var(--muted-foreground);
+
+    lucide-icon {
+        width: 1rem;
+        height: 1rem;
+    }
+
+    &:disabled {
+        opacity: 0.4;
+    }
+}
+
+.field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+}
+
+.input {
+    @include ui.field;
+
+    padding: 0.5rem 0.75rem;
+}
+
+.option-row {
+    display: flex;
+    gap: 0.25rem;
+    align-items: center;
+}
+
+.add {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    align-self: flex-start;
+    padding: 0.25rem 0;
+    background: none;
+    border: none;
+    color: var(--primary);
+    font-size: 0.8125rem;
+
+    lucide-icon {
+        width: 0.875rem;
+        height: 0.875rem;
+    }
+
+    &:disabled {
+        opacity: 0.4;
+    }
+}
+
+.check {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    font-size: 0.8125rem;
+}
+
+.check-block {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.muted,
+.hint {
+    margin: 0;
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+    line-height: 1.5;
+}
+
+.error {
+    margin: 0;
+    color: var(--danger);
+    font-size: 0.8125rem;
+}
+
+.actions {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: flex-end;
+}
+
+.btn {
+    padding: 0.5rem 0.875rem;
+    background: var(--surface-raised);
+    border: none;
+    border-radius: var(--radius-lg);
+    color: var(--foreground);
+    font-size: 0.8125rem;
+    font-weight: 600;
+
+    &.is-primary {
+        background: var(--primary);
+        color: var(--primary-foreground);
+    }
+
+    &:disabled {
+        opacity: 0.5;
+    }
+}

@@ -40,15 +40,18 @@ import {
 
 import { decryptAttachment } from '../../../core/crypto/attachment-crypto';
 import { MessageAttachment } from '../../../core/models/crypto.model';
+import { UnsupportedReason } from '../../../core/models/message-payload';
 import { AttachmentBatchService } from '../../../core/services/attachment-batch.service';
 import { ChatApiService } from '../../../core/services/chat-api.service';
-import { MessageReadReceipt } from '../../../core/services/chat-store.service';
+import { MessageReadReceipt, readablePreviewText } from '../../../core/services/chat-store.service';
 import { DirectoryService } from '../../../core/services/directory.service';
-import { DecryptedMessage, DecryptStatus } from '../../../core/services/message.service';
+import { contentOf, DecryptedMessage, DecryptStatus } from '../../../core/services/message.service';
 import { VisibleOnceDirective } from '../../../shared/directives/visible-once.directive';
 import { TwemojiPipe } from '../../../shared/emoji/twemoji.pipe';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
 import { messageTime } from '../../../shared/utils/display';
+import { LocationCardComponent } from '../location-card/location-card.component';
+import { PollCardComponent } from '../poll-card/poll-card.component';
 
 /** Where a media attachment is in its own, separate (lazier) decrypt lifecycle. */
 type MediaStatus = 'idle' | 'decrypting' | 'ready' | 'error';
@@ -116,6 +119,14 @@ const SETTLING_VIEW: StatusView = {
     icon: null,
 };
 
+/** Why a sealed payload is shown as unsupported - never as text, and never silently dropped. */
+const UNSUPPORTED_DETAILS: Record<UnsupportedReason, string> = {
+    unknown_type: 'This message is of a type this version of the app does not understand.',
+    newer_version: 'This message uses a newer format than this version of the app understands.',
+    malformed: 'This message claims to be a structured message but its contents are not valid.',
+    misplaced: 'This message was filed in a way that does not match its contents, so it is not shown.',
+};
+
 const STATUS_VIEWS: Record<DecryptStatus, StatusView> = {
     ok: { placeholder: null, detail: null, tone: 'normal', icon: null },
     plaintext: { placeholder: null, detail: null, tone: 'normal', icon: null },
@@ -147,7 +158,14 @@ const STATUS_VIEWS: Record<DecryptStatus, StatusView> = {
 
 @Component({
     selector: 'app-message-bubble',
-    imports: [LucideAngularModule, AvatarComponent, VisibleOnceDirective, TwemojiPipe],
+    imports: [
+        LucideAngularModule,
+        AvatarComponent,
+        VisibleOnceDirective,
+        TwemojiPipe,
+        PollCardComponent,
+        LocationCardComponent,
+    ],
     templateUrl: './message-bubble.component.html',
     styleUrl: './message-bubble.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
@@ -225,7 +243,25 @@ export class MessageBubbleComponent {
      * An edit re-seals the content under a fresh chain index, which means composing new ciphertext —
      * impossible for a message we could not open, and meaningless for a channel post or a legacy one.
      */
-    readonly canEdit = computed(() => this.isOwn() && this.message().status === 'ok');
+    readonly canEdit = computed(() => this.isOwn() && this.message().status === 'ok' && this.contentKind() === 'text');
+
+    /** What the sealed payload is. A message we could not open has no payload, so it reads as text. */
+    readonly contentKind = computed(() => contentOf(this.message()).kind);
+
+    readonly locationContent = computed(() => {
+        const content = contentOf(this.message());
+        return content.kind === 'location' ? content.location : null;
+    });
+
+    readonly unsupportedDetail = computed(() => {
+        const content = contentOf(this.message());
+        return content.kind === 'unsupported' ? UNSUPPORTED_DETAILS[content.reason] : null;
+    });
+
+    /** One line for a quote of another message: typed content and attachment-only messages included. */
+    quotePreview(quoted: DecryptedMessage): string {
+        return readablePreviewText(quoted) ?? 'Unreadable message';
+    }
 
     /** True while a freshly seen `no_key` is still within its grace period. */
     private readonly settling = signal(false);

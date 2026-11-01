@@ -1,0 +1,180 @@
+<div
+    class="backdrop"
+    (click)="close()"
+></div>
+<div
+    class="dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Export chat history"
+>
+    <div class="head">
+        <h2>Export chat history</h2>
+        <button
+            type="button"
+            class="close"
+            aria-label="Close"
+            (click)="close()"
+        >
+            <lucide-icon [img]="closeIcon" />
+        </button>
+    </div>
+
+    @switch (phase()) {
+        @case ('confirm') {
+            <div
+                class="warning"
+                role="note"
+            >
+                <lucide-icon [img]="warnIcon" />
+                <p>
+                    The file will contain the <strong>decrypted</strong> messages of this chat as plain JSON, readable
+                    by anyone who gets the file. Keys and ciphertext are not included. Attachments are listed by name,
+                    type and size only.
+                </p>
+            </div>
+            <p class="muted">
+                Only history your account can read is exported. Messages that could not be decrypted are listed with the
+                reason instead of being skipped.
+            </p>
+            <div class="actions">
+                <button
+                    type="button"
+                    class="btn"
+                    (click)="close()"
+                >
+                    Cancel
+                </button>
+                <button
+                    type="button"
+                    class="btn is-primary"
+                    (click)="start()"
+                >
+                    Export as JSON
+                </button>
+            </div>
+        }
+        @case ('running') {
+            <p
+                class="muted"
+                role="status"
+            >
+                @if (progress(); as p) {
+                    @switch (p.phase) {
+                        @case ('messages') {
+                            Decrypting history… {{ p.done }} messages so far
+                        }
+                        @case ('polls') {
+                            Counting poll votes… {{ p.done }} of {{ p.total }}
+                        }
+                        @default {
+                            Building the file…
+                        }
+                    }
+                }
+            </p>
+            @if (progress(); as p) {
+                @if (p.phase === 'polls' && p.total) {
+                    <progress
+                        class="bar"
+                        [value]="p.done"
+                        [max]="p.total"
+                        aria-label="Export progress"
+                    ></progress>
+                } @else {
+                    <!-- The history length is not known until the last page: an honest indeterminate bar. -->
+                    <progress
+                        class="bar"
+                        aria-label="Export progress"
+                    ></progress>
+                }
+            }
+            <div class="actions">
+                <button
+                    type="button"
+                    class="btn"
+                    (click)="cancel()"
+                >
+                    Cancel
+                </button>
+            </div>
+        }
+        @case ('done') {
+            <p
+                class="muted"
+                role="status"
+            >
+                Saved {{ savedCount() }} messages. The file is on your device only; this app does not upload it.
+            </p>
+            @if (unreadableCount() > 0) {
+                <p
+                    class="muted unreadable"
+                    role="status"
+                >
+                    {{ unreadableCount() }}
+                    {{ unreadableCount() === 1 ? 'message' : 'messages' }} could not be read and
+                    {{ unreadableCount() === 1 ? 'is' : 'are' }} listed with the reason instead of their content.
+                </p>
+            }
+            @if (incompletePolls() > 0) {
+                <p
+                    class="muted incomplete"
+                    role="status"
+                >
+                    {{ incompletePolls() }} {{ incompletePolls() === 1 ? 'poll' : 'polls' }} may have incomplete vote
+                    counts; they are marked in the file.
+                </p>
+            }
+            <div class="actions">
+                <button
+                    type="button"
+                    class="btn is-primary"
+                    (click)="close()"
+                >
+                    Done
+                </button>
+            </div>
+        }
+        @case ('cancelled') {
+            <p
+                class="muted"
+                role="status"
+            >
+                Export cancelled. Nothing was saved.
+            </p>
+            <div class="actions">
+                <button
+                    type="button"
+                    class="btn"
+                    (click)="close()"
+                >
+                    Close
+                </button>
+            </div>
+        }
+        @case ('error') {
+            <p
+                class="error"
+                role="alert"
+            >
+                {{ error() }}
+            </p>
+            <div class="actions">
+                <button
+                    type="button"
+                    class="btn"
+                    (click)="close()"
+                >
+                    Close
+                </button>
+                <button
+                    type="button"
+                    class="btn is-primary"
+                    (click)="start()"
+                >
+                    Try again
+                </button>
+            </div>
+        }
+    }
+</div>

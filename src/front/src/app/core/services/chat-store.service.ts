@@ -6,7 +6,15 @@ import { v4 as uuidv4 } from 'uuid';
 
 import { Chat, ParticipantReadState } from '../models/chat.model';
 import { ChatKeys, MessageAttachment, MessageResponse } from '../models/crypto.model';
+import {
+    LocationPayload,
+    MessageContent,
+    PollPayload,
+    summarizeContent,
+    TypedContent,
+} from '../models/message-payload';
 import { ChatApiService } from './chat-api.service';
+import { mergeChatDetail } from './chat-merge';
 import { CryptoApiService } from './crypto-api.service';
 import {
     isAlreadyEnabled,
@@ -19,7 +27,8 @@ import {
     RosterVerificationError,
 } from './crypto-errors';
 import { DirectoryService } from './directory.service';
-import { DecryptedMessage, MessageService } from './message.service';
+import { contentOf, DecryptedMessage, MessageService } from './message.service';
+import { PollStoreService } from './poll-store.service';
 import { SessionService } from './session.service';
 import { WebSocketService } from './websocket.service';
 
@@ -60,6 +69,40 @@ export interface PendingMessage {
     /** Kept so a manual retry re-sends the same message, not a stripped-down copy of it. */
     replyTo?: string;
     attachments?: MessageAttachment[];
+    /** A poll or location being sent. Present instead of `text`. */
+    content?: TypedContent;
+}
+
+/** What the sidebar says about a message we could read, or null when it has no readable summary. */
+export function readablePreviewText(message: DecryptedMessage): string | null {
+    const content: MessageContent = contentOf(message);
+    const summary = summarizeContent(content);
+    if (summary !== null) {
+        return summary;
+    }
+    if (message.text === null) {
+        return null;
+    }
+    if (message.text.trim().length > 0) {
+        return message.text;
+    }
+    // Attachment-only messages (a sticker, a voice note) have an empty text. Rendering that as the
+    // preview made the row's second line vanish the moment the chat was opened.
+    const first = message.attachments[0];
+    switch (first?.kind) {
+        case 'sticker':
+            return 'Sticker';
+        case 'audio':
+            return 'Voice message';
+        case 'image':
+            return 'Photo';
+        case 'video':
+            return 'Video';
+        case 'gif':
+            return 'GIF';
+        default:
+            return first ? first.name || 'File' : '';
+    }
 }
 
 /**
@@ -109,6 +152,7 @@ export class ChatStoreService {
     private readonly session = inject(SessionService);
     private readonly ws = inject(WebSocketService);
     private readonly router = inject(Router);
+    private readonly polls = inject(PollStoreService);
 
     readonly chats = signal<Chat[]>([]);
     readonly chatsLoading = signal(false);
@@ -306,6 +350,7 @@ export class ChatStoreService {
                     this.deletedIds.clear();
                     this.chatQueues.clear();
                     this.countedUnread.clear();
+                    this.polls.clear();
                 });
             }
         });
@@ -452,7 +497,7 @@ export class ChatStoreService {
             if (this.activeChatId() !== chatId) {
                 return;
             }
-            const fresh = loaded.filter((m) => !this.deletedIds.has(m.id));
+            const fresh = loaded.filter((m) => !this.deletedIds.has(m.id) && !m.isControl);
             raw.forEach((message) => this.rawMessages.set(message._id, message));
             await this.directory.resolveMissing(fresh.map((m) => m.senderId));
 
@@ -464,6 +509,13 @@ export class ChatStoreService {
             this.scheduleGrantRetry(chatId);
             void this.loadPinned(chatId);
             void this.loadReadState(chatId);
+            // Votes may have been cast while the socket was down.
+            void this.polls.reloadRequested(
+                chatId,
+                this.messages()
+                    .filter((m) => contentOf(m).kind === 'poll')
+                    .map((m) => m.id)
+            );
         } catch {
             // The list is still what it was; the next event or reconnect tries again.
         }
@@ -580,6 +632,9 @@ export class ChatStoreService {
         }
 
         this.rawMessages.clear();
+        // Votes cast while this conversation was not open were never decrypted; poll cards reload
+        // them when they render again.
+        this.polls.markAllStale();
         this.messages.set([]);
         this.pending.set([]);
         this.pinnedMessages.set([]);
@@ -619,20 +674,18 @@ export class ChatStoreService {
             // Pass through what `ensureEncryptionEnabled` just fetched instead of asking
             // `loadMessages` to fetch the same chat's keys again — this used to fire the identical
             // `GET /crypto/chats/{id}/keys` request twice on every chat open.
-            const { raw, messages: decrypted } = await this.messages_.loadMessages(
-                chatId,
-                PAGE_SIZE,
-                undefined,
-                knownKeys
-            );
+            const { raw, messages: page } = await this.messages_.loadMessages(chatId, PAGE_SIZE, undefined, knownKeys);
             raw.forEach((message) => this.rawMessages.set(message._id, message));
+            // The server never returns control messages here; a vote that slipped through is dropped
+            // rather than shown as a message.
+            const decrypted = page.filter((m) => !m.isControl);
 
             // Authors who have since left (or deleted their account) are no longer participants, so
             // the roster lookup in `hydrateChat` never named them.
             await this.directory.resolveMissing(decrypted.map((m) => m.senderId));
 
             this.messages.set(decrypted);
-            this.hasMoreHistory.set(decrypted.length === PAGE_SIZE);
+            this.hasMoreHistory.set(page.length === PAGE_SIZE);
             this.cachePreview(chatId, decrypted);
             this.scheduleGrantRetry(chatId);
             void this.loadPinned(chatId);
@@ -667,13 +720,8 @@ export class ChatStoreService {
                     return [...list, detail];
                 }
 
-                // The list's title wins: it is the resolved counterpart name, and the detail's is null.
-                const merged: Chat = {
-                    ...detail,
-                    title: list[index].title ?? detail.title,
-                    unread_count: list[index].unread_count,
-                    last_message: list[index].last_message ?? detail.last_message,
-                };
+                // The list's resolved values win (title, avatar, preview, unread); the detail adds the roster.
+                const merged = mergeChatDetail(list[index], detail);
                 return [...list.slice(0, index), merged, ...list.slice(index + 1)];
             });
 
@@ -745,12 +793,13 @@ export class ChatStoreService {
 
         this.messagesLoading.set(true);
         try {
-            const { raw, messages: older } = await this.messages_.loadMessages(chatId, PAGE_SIZE, oldest.id);
+            const { raw, messages: page } = await this.messages_.loadMessages(chatId, PAGE_SIZE, oldest.id);
             raw.forEach((message) => this.rawMessages.set(message._id, message));
+            const older = page.filter((m) => !m.isControl);
             await this.directory.resolveMissing(older.map((m) => m.senderId));
 
             this.messages.update((current) => [...older, ...current]);
-            this.hasMoreHistory.set(older.length === PAGE_SIZE);
+            this.hasMoreHistory.set(page.length === PAGE_SIZE);
             this.scheduleGrantRetry(chatId);
         } finally {
             this.messagesLoading.set(false);
@@ -768,11 +817,16 @@ export class ChatStoreService {
         text: string,
         replyTo?: string,
         attachments?: MessageAttachment[],
-        clientMessageId: string = uuidv4()
+        clientMessageId: string = uuidv4(),
+        content?: TypedContent
     ): Promise<void> {
         const chatId = this.activeChatId();
         const chat = this.activeChat();
-        if (!chatId || !chat || (!text.trim() && !attachments?.length) || this.peerDeleted()) {
+        if (!chatId || !chat || (!content && !text.trim() && !attachments?.length) || this.peerDeleted()) {
+            return;
+        }
+        // Channel posts are signed text; there is no sealed payload to carry a poll or a location.
+        if (content && chat.chat_type === 'channel') {
             return;
         }
 
@@ -788,6 +842,7 @@ export class ChatStoreService {
                 clientMessageId,
                 replyTo,
                 attachments,
+                content,
             },
         ]);
 
@@ -795,7 +850,15 @@ export class ChatStoreService {
             const sent =
                 chat.chat_type === 'channel'
                     ? await this.messages_.sendChannelPost(chatId, text, clientMessageId)
-                    : await this.messages_.sendText(chatId, text, replyTo, attachments, undefined, clientMessageId);
+                    : await this.messages_.sendText(
+                          chatId,
+                          text,
+                          replyTo,
+                          attachments,
+                          undefined,
+                          clientMessageId,
+                          content
+                      );
 
             this.pending.update((p) => p.filter((item) => item.localId !== localId));
             this.rawMessages.set(sent._id, sent);
@@ -803,7 +866,7 @@ export class ChatStoreService {
             // Bump before recording: bumping clears the preview override, and our own message is one
             // we can always read, so it should end up as the override rather than be wiped by it.
             this.bumpChatPreview(chatId, sent);
-            this.appendDecrypted(this.messages_.recordOutgoing(sent, text, attachments));
+            this.appendDecrypted(this.messages_.recordOutgoing(sent, text, attachments, content));
         } catch (error) {
             if (this.isPeerDeleted(error)) {
                 // Not a failed send to retry: the conversation has become read-only. The draft is
@@ -847,7 +910,39 @@ export class ChatStoreService {
         }
 
         this.pending.update((p) => p.filter((entry) => entry.localId !== localId));
-        await this.send(item.text, item.replyTo, item.attachments, item.clientMessageId);
+        await this.send(item.text, item.replyTo, item.attachments, item.clientMessageId, item.content);
+    }
+
+    /** Send a poll the user composed. */
+    async sendPoll(poll: PollPayload): Promise<void> {
+        await this.send('', undefined, undefined, uuidv4(), { kind: 'poll', poll });
+    }
+
+    /** Send a location the user confirmed. */
+    async sendLocation(location: LocationPayload): Promise<void> {
+        await this.send('', undefined, undefined, uuidv4(), { kind: 'location', location });
+    }
+
+    /**
+     * Cast (or replace) our vote. Throws on failure so the poll card can say so; nothing is
+     * counted locally until the server has accepted the control message.
+     */
+    async votePoll(pollId: string, options: number[]): Promise<void> {
+        await this.sendControlMessage({ kind: 'poll_vote', vote: { pollId, options } });
+    }
+
+    /** Close a poll. The tally ignores this unless we are its author, so the UI offers it only to them. */
+    async closePoll(pollId: string): Promise<void> {
+        await this.sendControlMessage({ kind: 'poll_close', close: { pollId } });
+    }
+
+    private async sendControlMessage(content: TypedContent): Promise<void> {
+        const chatId = this.activeChatId();
+        if (!chatId || !this.canSend()) {
+            throw new Error('sending is blocked');
+        }
+        const { sent, message } = await this.messages_.sendControl(chatId, content);
+        this.polls.ingestSent(sent, message);
     }
 
     discardPending(localId: string): void {
@@ -964,6 +1059,11 @@ export class ChatStoreService {
         }
 
         const existing = this.messages().find((m) => m.id === messageId);
+        // Only text can be re-sealed from the composer. A poll or location edited this way would
+        // silently turn into a text message.
+        if (existing && contentOf(existing).kind !== 'text') {
+            return;
+        }
         const edited = await this.messages_.editText(
             chatId,
             messageId,
@@ -977,6 +1077,8 @@ export class ChatStoreService {
     async deleteMessage(messageId: string): Promise<void> {
         await firstValueFrom(this.chatApi.deleteMessage(messageId));
         this.rememberDeleted(messageId);
+        this.polls.forget(messageId);
+        this.polls.removeControl(messageId);
         this.messages.update((list) => list.filter((m) => m.id !== messageId));
     }
 
@@ -1286,9 +1388,10 @@ export class ChatStoreService {
 
         this.previewOverrides.update((map) => {
             const next = new Map(map);
+            const readable = readablePreviewText(newest);
             next.set(chatId, {
-                text: newest.text ?? this.unreadableLabel(newest),
-                readable: newest.text !== null,
+                text: readable ?? this.unreadableLabel(newest),
+                readable: readable !== null,
             });
             return next;
         });
@@ -1327,6 +1430,15 @@ export class ChatStoreService {
     private async onIncomingMessage(chatId: string | null, payload: Record<string, unknown>): Promise<void> {
         const raw = payload as unknown as MessageResponse;
         if (!chatId || !raw?._id || this.deletedIds.has(raw._id)) {
+            return;
+        }
+
+        // A vote or close is bookkeeping, not conversation: it must never reach the message list,
+        // the sidebar preview, or the unread badge. Only the open chat's polls care about it.
+        if (raw.is_control) {
+            if (chatId === this.activeChatId()) {
+                await this.polls.ingest(chatId, raw);
+            }
             return;
         }
 
@@ -1399,7 +1511,7 @@ export class ChatStoreService {
      */
     private async onMessageEdited(chatId: string | null, payload: Record<string, unknown>): Promise<void> {
         const raw = payload as unknown as MessageResponse;
-        if (!chatId || !raw?._id || chatId !== this.activeChatId() || this.deletedIds.has(raw._id)) {
+        if (!chatId || !raw?._id || raw.is_control || chatId !== this.activeChatId() || this.deletedIds.has(raw._id)) {
             return;
         }
 
@@ -1427,6 +1539,8 @@ export class ChatStoreService {
         const id = payload['message_id'];
         if (typeof id === 'string') {
             this.rememberDeleted(id);
+            this.polls.forget(id);
+            this.polls.removeControl(id);
             this.messages.update((list) => list.filter((m) => m.id !== id));
         }
     }
