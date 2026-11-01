@@ -19,6 +19,7 @@ import {
     Clock,
     Film,
     Forward,
+    Layers,
     Lock,
     LucideAngularModule,
     LucideIconData,
@@ -49,6 +50,7 @@ import { contentOf, DecryptedMessage, DecryptStatus } from '../../../core/servic
 import { VisibleOnceDirective } from '../../../shared/directives/visible-once.directive';
 import { TwemojiPipe } from '../../../shared/emoji/twemoji.pipe';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
+import { ContextMenuEntry, MenuSource } from '../../../shared/ui/context-menu/context-menu.model';
 import { messageTime } from '../../../shared/utils/display';
 import { LocationCardComponent } from '../location-card/location-card.component';
 import { PollCardComponent } from '../poll-card/poll-card.component';
@@ -68,6 +70,18 @@ interface MediaEntry {
  * plus a text input for anything else. The server accepts any non-ASCII emoji
  * (`validate_emoji`), so "other" is not artificially restricted to this set.
  */
+/** A request for the message's actions menu, from a right-click, the Menu key or the overflow button. */
+export interface MessageMenuRequest {
+    message: DecryptedMessage;
+    x: number;
+    y: number;
+    source?: MenuSource;
+    /** Where focus returns when the menu closes. */
+    trigger?: HTMLElement;
+    /** Entries for whatever was under the pointer (a sticker), shown above the message actions. */
+    extra?: ContextMenuEntry[];
+}
+
 export const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 
 /** One emoji, grouped, for rendering as a pill. */
@@ -218,7 +232,7 @@ export class MessageBubbleComponent {
     readonly editRequested = output<DecryptedMessage>();
     readonly replyRequested = output<DecryptedMessage>();
     /** Right-click, the Menu key, or the overflow button — all ask for the same menu. */
-    readonly menuRequested = output<{ message: DecryptedMessage; x: number; y: number }>();
+    readonly menuRequested = output<MessageMenuRequest>();
     /** Tapping a quote asks to be taken to the message it quotes. */
     readonly jumpRequested = output<string>();
     readonly selectionToggled = output<string>();
@@ -486,8 +500,52 @@ export class MessageBubbleComponent {
      * and Shift+F10 raise this same event, so the keyboard path comes free.
      */
     onContextMenu(event: MouseEvent): void {
+        // Links and selected text keep the browser's menu (copy, open link, save as): those are
+        // the useful actions there, and none of them is something this menu could do.
+        if (event.defaultPrevented || this.wantsNativeMenu(event.target)) {
+            return;
+        }
         event.preventDefault();
-        this.menuRequested.emit({ message: this.message(), x: event.clientX, y: event.clientY });
+
+        // The Menu key and Shift+F10 raise this event with no pointer position.
+        const fromKeyboard = event.clientX === 0 && event.clientY === 0 && event.detail === 0;
+        const host = this.elementRef.nativeElement;
+        const rect = host.getBoundingClientRect();
+        const sticker = (event.target as Element | null)?.closest<HTMLElement>('[data-sticker-url]');
+        const stickerUrl = sticker?.dataset['stickerUrl'];
+
+        this.menuRequested.emit({
+            message: this.message(),
+            x: fromKeyboard ? rect.left + Math.min(rect.width / 2, 120) : event.clientX,
+            y: fromKeyboard ? rect.top + Math.min(rect.height / 2, 24) : event.clientY,
+            source: fromKeyboard ? 'keyboard' : (event as PointerEvent).pointerType === 'touch' ? 'touch' : 'mouse',
+            trigger: host,
+            extra: stickerUrl && this.canOpenStickerPack() ? this.stickerEntries(stickerUrl) : undefined,
+        });
+    }
+
+    private wantsNativeMenu(target: EventTarget | null): boolean {
+        if (!(target instanceof Element)) {
+            return false;
+        }
+        if (target.closest('a[href]')) {
+            return true;
+        }
+        const selection = window.getSelection();
+        return (
+            !!selection &&
+            !selection.isCollapsed &&
+            selection.toString().length > 0 &&
+            selection.containsNode(target, true)
+        );
+    }
+
+    /** What a sticker adds to the message menu: a way to see the pack it came from. */
+    private stickerEntries(url: string): ContextMenuEntry[] {
+        return [
+            { icon: Layers, label: 'View Sticker Set', action: () => this.stickerPackRequested.emit(url) },
+            { separator: true },
+        ];
     }
 
     /**
@@ -527,8 +585,15 @@ export class MessageBubbleComponent {
     /** Touch and trackpad users who have no right button still need a way in. */
     openMenuFromButton(event: MouseEvent): void {
         event.stopPropagation();
-        const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
-        this.menuRequested.emit({ message: this.message(), x: rect.left, y: rect.bottom + 4 });
+        const button = event.currentTarget as HTMLElement;
+        const rect = button.getBoundingClientRect();
+        this.menuRequested.emit({
+            message: this.message(),
+            x: rect.left,
+            y: rect.bottom + 4,
+            source: event.detail === 0 ? 'keyboard' : 'mouse',
+            trigger: button,
+        });
     }
 
     downloadUrl(file: MessageAttachment): string {

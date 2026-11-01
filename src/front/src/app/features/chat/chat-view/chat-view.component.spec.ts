@@ -329,49 +329,33 @@ describe('ChatViewComponent', () => {
     describe('openMessageMenu — only offers actions that are actually possible', () => {
         it('offers Edit only for our own message that decrypted ok', () => {
             create();
-            fixture.componentInstance.openMessageMenu({
-                message: buildMessage({ senderId: ME, status: 'ok' }),
-                x: 0,
-                y: 0,
-            });
-
-            const labels = fixture.componentInstance.menuItems().map((item) => item.label);
+            const labels = fixture.componentInstance
+                .buildMessageMenu(buildMessage({ senderId: ME, status: 'ok' }))
+                .map((item) => item.label);
             expect(labels).toContain('Edit');
         });
 
         it('never offers Edit for someone else’s message', () => {
             create();
-            fixture.componentInstance.openMessageMenu({
-                message: buildMessage({ senderId: OTHER, status: 'ok' }),
-                x: 0,
-                y: 0,
-            });
-
-            const labels = fixture.componentInstance.menuItems().map((item) => item.label);
+            const labels = fixture.componentInstance
+                .buildMessageMenu(buildMessage({ senderId: OTHER, status: 'ok' }))
+                .map((item) => item.label);
             expect(labels).not.toContain('Edit');
         });
 
         it('never offers Edit for our own message we could not decrypt', () => {
             create();
-            fixture.componentInstance.openMessageMenu({
-                message: buildMessage({ senderId: ME, status: 'failed', text: null }),
-                x: 0,
-                y: 0,
-            });
-
-            const labels = fixture.componentInstance.menuItems().map((item) => item.label);
+            const labels = fixture.componentInstance
+                .buildMessageMenu(buildMessage({ senderId: ME, status: 'failed', text: null }))
+                .map((item) => item.label);
             expect(labels).not.toContain('Edit');
         });
 
         it('only offers Copy text when there is readable text', () => {
             create();
-            fixture.componentInstance.openMessageMenu({
-                message: buildMessage({ status: 'no_key', text: null }),
-                x: 0,
-                y: 0,
-            });
-
-            const labels = fixture.componentInstance.menuItems().map((item) => item.label);
+            const labels = fixture.componentInstance
+                .buildMessageMenu(buildMessage({ status: 'no_key', text: null }))
+                .map((item) => item.label);
             expect(labels).not.toContain('Copy text');
         });
     });

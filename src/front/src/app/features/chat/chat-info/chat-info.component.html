@@ -308,7 +308,10 @@
 
             <ul class="members">
                 @for (member of members(); track member.userId) {
-                    <li class="member">
+                    <li
+                        class="member"
+                        [appContextMenu]="memberMenu(member)"
+                    >
                         <app-avatar
                             size="sm"
                             [name]="member.name"
@@ -432,7 +435,7 @@
                             </select>
                         }
 
-                        @if (canManage() && !member.isMe && member.role !== 'owner') {
+                        @if (canRemove(member)) {
                             <button
                                 type="button"
                                 class="member-action"

@@ -321,6 +321,37 @@ export class ChatApiService {
             .pipe(map((r) => r.data));
     }
 
+    /** Pin or unpin in the caller's own list. 409 `PINNED_CHAT_LIMIT` at five. Idempotent. */
+    pinChat(chatId: string, pinned: boolean): Observable<{ chat_id: string; pinned_at: string | null }> {
+        return this.http
+            .patch<SuccessResponse<{ chat_id: string; pinned_at: string | null }>>(`${this.chatsUrl}${chatId}/pin`, {
+                pinned,
+            })
+            .pipe(map((r) => r.data));
+    }
+
+    /** Set or clear the manual "unread" flag. Does not move any read position. */
+    markChatUnread(chatId: string, marked: boolean): Observable<{ chat_id: string; marked_unread: boolean }> {
+        return this.http
+            .patch<SuccessResponse<{ chat_id: string; marked_unread: boolean }>>(`${this.chatsUrl}${chatId}/unread`, {
+                marked,
+            })
+            .pipe(map((r) => r.data));
+    }
+
+    /**
+     * Clear the history for the caller only: the server records a floor at the newest message, and
+     * every other member keeps the whole conversation.
+     */
+    clearHistory(chatId: string): Observable<{ chat_id: string; history_start_message_id: string | null }> {
+        return this.http
+            .post<SuccessResponse<{ chat_id: string; history_start_message_id: string | null }>>(
+                `${this.chatsUrl}${chatId}/clear-history`,
+                {}
+            )
+            .pipe(map((r) => r.data));
+    }
+
     /** ADMIN/OWNER only, rejected server-side for PRIVATE chats. Omit both bounds for no limit. */
     createInviteLink(chatId: string, expiresAt?: string, maxUses?: number): Observable<InviteLink> {
         return this.http

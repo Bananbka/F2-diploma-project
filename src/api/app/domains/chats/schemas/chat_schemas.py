@@ -77,6 +77,14 @@ class ChatResponse(BaseModel):
     # explicitly by the single-chat `get_chat` route — it is not a property of the chat itself.
     muted_until: datetime | None = None
 
+    # Per-user pin and manual-unread state, from the caller's own participant row. Same plumbing
+    # as `muted_until`. `is_pinned` is derived from `pinned_at` so the two can never disagree.
+    pinned_at: datetime | None = None
+    marked_unread: bool = False
+    # The caller's own role in this chat, so a client knows whether to offer Leave (non-owner) or
+    # Delete (owner). Null only where no caller context exists (e.g. a broadcast chat payload).
+    my_role: ParticipantRole | None = None
+
     # Private chats only: the other party deleted their account. The history stays readable but
     # sending is refused with 409 PEER_DELETED.
     peer_is_deleted: bool = False
@@ -92,6 +100,11 @@ class ChatResponse(BaseModel):
     @property
     def is_muted(self) -> bool:
         return self.muted_until is not None and self.muted_until > datetime.now(timezone.utc)
+
+    @computed_field
+    @property
+    def is_pinned(self) -> bool:
+        return self.pinned_at is not None
 
 
 class ChannelCreateRequest(BaseModel):
@@ -180,3 +193,46 @@ class MuteChatResponse(BaseModel):
     @property
     def is_muted(self) -> bool:
         return self.muted_until is not None and self.muted_until > datetime.now(timezone.utc)
+
+
+class PinChatRequest(BaseModel):
+    """Pin or unpin this chat in the calling user's own list. Idempotent in both directions."""
+    model_config = ConfigDict(extra="forbid")
+
+    pinned: bool
+
+
+class PinChatResponse(BaseModel):
+    chat_id: uuid.UUID
+    pinned_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+    @computed_field
+    @property
+    def is_pinned(self) -> bool:
+        return self.pinned_at is not None
+
+
+class MarkUnreadRequest(BaseModel):
+    """Set or clear the caller's manual "unread" flag. Does not move any read position."""
+    model_config = ConfigDict(extra="forbid")
+
+    marked: bool
+
+
+class MarkUnreadResponse(BaseModel):
+    chat_id: uuid.UUID
+    marked_unread: bool
+
+
+class ClearHistoryRequest(BaseModel):
+    """Takes no fields; the strict model only exists so a stray body is rejected, not ignored."""
+    model_config = ConfigDict(extra="forbid")
+
+
+class ClearHistoryResponse(BaseModel):
+    chat_id: uuid.UUID
+    # The caller's new history floor: the newest message id at the moment of clearing. `None` only
+    # when the chat had no messages at all and nothing was cleared.
+    history_start_message_id: str | None = None

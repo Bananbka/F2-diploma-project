@@ -50,6 +50,20 @@ export interface Chat {
     muted_until: string | null;
     is_muted: boolean;
     /**
+     * Per-user list arrangement, from the caller's own participant row; never visible to other
+     * members. `pinned_at` doubles as pin order (newest pin first). `marked_unread` is a manual
+     * "come back to this" flag that does not move the read position. Optional so a response from a
+     * server that predates them reads as "not pinned, not flagged".
+     */
+    /**
+     * The caller's role in this chat, from the chat list itself (the list carries no roster).
+     * Absent or null means unknown, and callers must not guess a role from that.
+     */
+    my_role?: ParticipantRole | null;
+    is_pinned?: boolean;
+    pinned_at?: string | null;
+    marked_unread?: boolean;
+    /**
      * Private chats only: the other party deleted their account. The history stays readable and
      * verifiable, but the server refuses new messages (409 `PEER_DELETED`), so the chat is
      * read-only. Absent means false.

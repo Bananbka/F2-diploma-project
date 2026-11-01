@@ -78,4 +78,28 @@ describe('mergeChatDetail', () => {
         const detail = chat({ title: 'T' });
         expect(mergeChatDetail(undefined, detail)).toBe(detail);
     });
+
+    it('keeps the list values for pin and manual-unread over an older detail', () => {
+        const list = chat({
+            is_pinned: true,
+            pinned_at: '2026-02-02T00:00:00Z',
+            marked_unread: true,
+            my_role: 'owner',
+        });
+        const detail = chat({ is_pinned: false, pinned_at: null, marked_unread: false, my_role: null });
+
+        const merged = mergeChatDetail(list, detail);
+
+        expect(merged.is_pinned).toBeTrue();
+        expect(merged.pinned_at).toBe('2026-02-02T00:00:00Z');
+        expect(merged.marked_unread).toBeTrue();
+        expect(merged.my_role).toBe('owner');
+    });
+
+    it('falls back to the detail when the list predates these fields', () => {
+        const merged = mergeChatDetail(chat({}), chat({ is_pinned: true, pinned_at: 'x', marked_unread: true }));
+
+        expect(merged.is_pinned).toBeTrue();
+        expect(merged.marked_unread).toBeTrue();
+    });
 });

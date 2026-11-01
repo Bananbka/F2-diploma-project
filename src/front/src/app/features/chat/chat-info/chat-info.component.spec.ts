@@ -115,6 +115,44 @@ describe('ChatInfoComponent', () => {
      * arm/confirm signal as transferring ownership and deleting the chat, rather than firing on the
      * first click.
      */
+    describe('member gates mirror the server', () => {
+        const row = (role: 'owner' | 'admin' | 'member', isMe = false) =>
+            ({ userId: role + isMe, name: 'x', role, isMe, hasKeys: true, deleted: false }) as never;
+
+        it('lets only the owner change roles', () => {
+            const component = fixture.componentInstance;
+            spyOn(component, 'isOwner').and.returnValue(false);
+            expect(component.canChangeRole(row('member'))).toBeFalse();
+
+            (component.isOwner as unknown as jasmine.Spy).and.returnValue(true);
+            expect(component.canChangeRole(row('member'))).toBeTrue();
+            expect(component.canChangeRole(row('owner'))).toBeFalse();
+        });
+
+        it('removes only strictly lower ranks', () => {
+            const component = fixture.componentInstance;
+            const roster = (mine: 'owner' | 'admin' | 'member') => [
+                row(mine, true),
+                row('owner'),
+                row('admin'),
+                row('member'),
+            ];
+
+            spyOn(component, 'members').and.returnValue(roster('admin'));
+            expect(component.canRemove(row('member'))).toBeTrue();
+            expect(component.canRemove(row('admin'))).toBeFalse();
+            expect(component.canRemove(row('owner'))).toBeFalse();
+
+            (component.members as unknown as jasmine.Spy).and.returnValue(roster('owner'));
+            expect(component.canRemove(row('admin'))).toBeTrue();
+            expect(component.canRemove(row('member'))).toBeTrue();
+            expect(component.canRemove(row('owner', true))).toBeFalse();
+
+            (component.members as unknown as jasmine.Spy).and.returnValue(roster('member'));
+            expect(component.canRemove(row('member'))).toBeFalse();
+        });
+    });
+
     it('arms revoke on the first click without calling the API', async () => {
         fixture.componentInstance.revokeInviteLink(linkA);
         fixture.detectChanges();

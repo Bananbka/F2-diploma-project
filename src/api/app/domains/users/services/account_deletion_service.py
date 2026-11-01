@@ -287,7 +287,9 @@ async def _delete_account_once(
     await db.execute(
         update(ChatParticipant)
         .where(ChatParticipant.user_id == user_id)
-        .values(last_read_message_id=None, muted_until=None)
+        .values(
+            last_read_message_id=None, muted_until=None, pinned_at=None, marked_unread=False
+        )
     )
 
     # Rotation after every membership change, so each roster is final when its epoch commits to it.

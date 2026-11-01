@@ -379,3 +379,22 @@ Origin поза списком `ALLOWED_ORIGINS`; події `typing` і `messag
 - **Microphone and geolocation need a secure context.** The gateway now allows both for its own origin (`Permissions-Policy: geolocation=(self), microphone=(self)`; camera and payment stay denied). Browsers only expose `getUserMedia` and `navigator.geolocation` on HTTPS or `localhost`, so voice messages and location sharing work on `localhost` but not over plain HTTP on any other host until TLS exists (§1).
 - **Poll control messages cannot be deleted by users.** A voter changes a vote by voting again and the author cannot delete their own close message (`409 CONTROL_MESSAGE_NOT_ALLOWED`); only deleting the poll removes them. Each sender is capped at 50 control messages per poll and 4096 characters of ciphertext each; the cap is checked without a lock and can be overshot by a concurrent burst. ObjectId order across API workers is not a reliable chronology within one second.
 - **The server cannot tell a poll from a message.** Editing a poll with `PUT` is accepted and keeps `is_control` false, because `is_control` is only set on votes.
+
+## 12. Меню чату (закріплення, непрочитане, очищення історії) - прийняті обмеження
+
+- **Очищення історії діє лише для мене і не видаляє дані.** Повідомлення лишаються в MongoDB для всіх інших учасників, а для автора очищення відсікаються позначкою `history_start_message_id`. Вкладення, що були в очищеній історії, залишаються в сховищі, доки їх не видалить власник повідомлення або чат. Позначка рухається лише вперед, тому «відновити» очищену історію з клієнта неможливо.
+- **Закріплених чатів не більше п'яти на користувача (`409 PINNED_CHAT_LIMIT`).** Порядок закріплених - за часом закріплення, нові зверху; ручного перевпорядкування немає.
+- **Позначка «непрочитане» - лише прапорець.** Вона не змінює `last_read_message_id` і лічильник непрочитаних, а знімається будь-яким кадром `message_read` від цього користувача (навіть якщо позиція не просунулась) або очищенням історії.
+- **Події `chat_updated` для цих дій надходять лише власним пристроям користувача** і є довговічними, тож відновлюються з потоку після перепідключення; решта учасників про них не дізнається.
+
+## 13. Context menus
+
+- **Rename folder has no menu entry.** `PATCH /chat-folder/{id}` accepts a title, but there is no rename UI to mirror, so the folder-tab menu only offers Delete (with confirmation).
+- **"Mark as read" is only offered for a manual unread flag.** Marking genuinely unread messages read means reading them; the menu cannot honestly claim that, so it is absent while `unread_count > 0`.
+- **A chat owner is not known from the chat list.** `GET /chats/` carries no roster, so a row offers "Leave" unless the chat was opened earlier; the server answers `OWNER_CANNOT_LEAVE` and the client says to transfer ownership or delete.
+- **"Recently used" removal is local only** (localStorage, per account), like adding to it.
+- **Long-press has no haptic cue and no text-selection hand-off on touch;** the native selection menu on iOS can still win over the 500 ms press on selectable text.
+- **Not verified in a browser** at the time of writing; covered by Karma specs only.
+- **Очищення історії пересуває `last_read_message_id` до позначки без трансляції.** Інші учасники (і `read-state`) побачать, що цей користувач «прочитав» усе до останнього повідомлення, але подія `message_read` не надсилається; це свідомо прийнято, бо на момент очищення вони й так бачать позицію лише після наступного завантаження `read-state`.
+- **Message bubbles do not use the directive's touch long-press.** Their menu is built by the chat view and opened from the bubble's own `contextmenu` handler, which Android raises on a long press but iOS Safari does not; iOS users reach it through the overflow button. Moving the bubble onto the directive would need the builder passed down as a provider.
+- **Roster-dependent member rules are client-mirrored.** Make admin/member (owner only) and Remove (strictly higher rank) follow the server rules but are checked again server-side; a role changed elsewhere shows until the next roster load.

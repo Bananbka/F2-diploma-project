@@ -44,6 +44,7 @@
                                 <button
                                     type="button"
                                     class="emoji is-recent"
+                                    [appContextMenu]="recentMenu(emoji)"
                                     [attr.aria-label]="emoji"
                                     (click)="choose(emoji)"
                                     [innerHTML]="emoji | twemoji"

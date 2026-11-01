@@ -36,6 +36,7 @@
                             <button
                                 type="button"
                                 class="sticker"
+                                [appContextMenu]="stickerMenu(sticker, false)"
                                 [attr.aria-label]="sticker.emoji || 'Sticker'"
                                 (click)="pick(sticker)"
                             >
@@ -57,6 +58,7 @@
                                 <button
                                     type="button"
                                     class="sticker is-recent"
+                                    [appContextMenu]="stickerMenu(sticker, true)"
                                     [attr.aria-label]="sticker.emoji || 'Sticker'"
                                     (click)="pick(sticker)"
                                 >
@@ -78,6 +80,7 @@
                                 <button
                                     type="button"
                                     class="sticker"
+                                    [appContextMenu]="stickerMenu(sticker, false)"
                                     [attr.aria-label]="sticker.emoji || 'Sticker'"
                                     (click)="pick(sticker)"
                                 >

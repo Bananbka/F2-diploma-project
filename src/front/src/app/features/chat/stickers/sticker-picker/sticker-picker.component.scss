@@ -120,6 +120,10 @@
 }
 
 .sticker {
+    // Long-press opens the app's own menu on touch; without these iOS/Android also raise their
+    // callout and start a text/image selection under the finger.
+    -webkit-touch-callout: none;
+    user-select: none;
     display: flex;
     align-items: center;
     justify-content: center;

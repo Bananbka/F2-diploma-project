@@ -1,7 +1,7 @@
 ﻿import enum
 import uuid
 
-from sqlalchemy import CHAR, CheckConstraint, UUID, ForeignKey, Enum, DateTime, func, Integer, UniqueConstraint
+from sqlalchemy import Boolean, false, CHAR, CheckConstraint, UUID, ForeignKey, Enum, DateTime, func, Integer, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.infrastructure.postgres import Base
@@ -27,6 +27,14 @@ class ChatParticipant(Base):
     joined_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     last_read_message_id = mapped_column(CHAR(24), nullable=True)
+
+    # Per-user chat-list arrangement, never visible to other members. `pinned_at` doubles as the
+    # pin order (newest pin first); `marked_unread` is a manual "come back to this" flag that does
+    # not touch `last_read_message_id` and is cleared when the user next reads the chat.
+    pinned_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    marked_unread: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
 
     # Epoch this participant joined at. Under HistoryVisibility.JOINED they receive grants only
     # from here onward.

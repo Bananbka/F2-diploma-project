@@ -30,7 +30,15 @@ import { DirectoryService } from './directory.service';
 import { contentOf, DecryptedMessage, MessageService } from './message.service';
 import { PollStoreService } from './poll-store.service';
 import { SessionService } from './session.service';
+import { ToastService } from './toast.service';
 import { WebSocketService } from './websocket.service';
+
+/** Bookkeeping for optimistic per-chat mutations that may overlap; see `ChatStoreService.enter`. */
+interface FlightState<T> {
+    snapshot: T;
+    count: number;
+    seq: number;
+}
 
 const PAGE_SIZE = 50;
 
@@ -153,6 +161,7 @@ export class ChatStoreService {
     private readonly ws = inject(WebSocketService);
     private readonly router = inject(Router);
     private readonly polls = inject(PollStoreService);
+    private readonly toast = inject(ToastService);
 
     readonly chats = signal<Chat[]>([]);
     readonly chatsLoading = signal(false);
@@ -458,6 +467,10 @@ export class ChatStoreService {
                     this.setPresence(event.user_id, false);
                     break;
                 case 'chat_updated':
+                    if (this.applyOwnArrangement(event.chat_id, event.payload)) {
+                        // Pin / manual-unread / cleared-history echoes for this user's other devices.
+                        break;
+                    }
                     if (event.payload?.['peer_deleted'] === true) {
                         // The peer's account is gone. Patched in place rather than refetched: the
                         // composer must go read-only at once, and a refetch is only a round trip
@@ -1141,7 +1154,7 @@ export class ChatStoreService {
     }
 
     /** Mute this chat until a future timestamp, or unmute by passing `null`. */
-    async setMuted(chatId: string, mutedUntil: string | null): Promise<void> {
+    async setMuted(chatId: string, mutedUntil: string | null): Promise<boolean> {
         try {
             const result = await firstValueFrom(this.chatApi.muteChat(chatId, mutedUntil));
             this.chats.update((list) =>
@@ -1155,8 +1168,233 @@ export class ChatStoreService {
                         : c
                 )
             );
+            return true;
         } catch {
             this.realtimeError.set('Could not update mute for this chat.');
+            return false;
+        }
+    }
+
+    private patchChat(chatId: string, patch: Partial<Chat>): void {
+        this.chats.update((list) => list.map((c) => (c.id === chatId ? { ...c, ...patch } : c)));
+    }
+
+    /**
+     * Pin or unpin a chat in this user's own list.
+     *
+     * Applied optimistically and rolled back on failure: the row jumps at once, and a refusal (the
+     * five-pin limit above all) puts it back with a reason rather than leaving a pin that is not
+     * there on the server.
+     */
+    async setPinned(chatId: string, pinned: boolean): Promise<void> {
+        const before = this.chats().find((c) => c.id === chatId);
+        if (!before) {
+            return;
+        }
+        const flight = this.enter(this.pinFlights, chatId, {
+            is_pinned: before.is_pinned ?? false,
+            pinned_at: before.pinned_at ?? null,
+        });
+
+        this.patchChat(chatId, { is_pinned: pinned, pinned_at: pinned ? new Date().toISOString() : null });
+        try {
+            const result = await firstValueFrom(this.chatApi.pinChat(chatId, pinned));
+            if (flight.isLatest()) {
+                this.patchChat(chatId, { is_pinned: pinned, pinned_at: result.pinned_at });
+            }
+        } catch (error) {
+            // A failure of an earlier toggle must not undo a later one that is still in flight or
+            // already succeeded; only the latest request owns the rollback, to the state from
+            // before the FIRST toggle.
+            if (!flight.isLatest()) {
+                return;
+            }
+            this.patchChat(chatId, flight.snapshot);
+            const code = error instanceof HttpErrorResponse ? error.error?.error_code : undefined;
+            this.toast.error(
+                code === 'PINNED_CHAT_LIMIT'
+                    ? 'You can pin up to 5 chats. Unpin one first.'
+                    : pinned
+                      ? 'Could not pin that chat.'
+                      : 'Could not unpin that chat.'
+            );
+        } finally {
+            flight.leave();
+        }
+    }
+
+    /**
+     * One in-flight mutation record per chat and field. `snapshot` is taken before the first toggle
+     * and kept until none is outstanding; `isLatest` says whether this call is still the newest.
+     */
+    private readonly pinFlights = new Map<string, FlightState<{ is_pinned: boolean; pinned_at: string | null }>>();
+    private readonly unreadFlights = new Map<string, FlightState<{ marked_unread: boolean }>>();
+
+    private enter<T>(registry: Map<string, FlightState<T>>, chatId: string, snapshot: T) {
+        let state = registry.get(chatId);
+        if (!state) {
+            state = { snapshot, count: 0, seq: 0 };
+            registry.set(chatId, state);
+        }
+        state.count += 1;
+        const mine = ++state.seq;
+        const current = state;
+        return {
+            snapshot: current.snapshot,
+            isLatest: () => current.seq === mine,
+            leave: () => {
+                current.count -= 1;
+                if (current.count === 0 && registry.get(chatId) === current) {
+                    registry.delete(chatId);
+                }
+            },
+        };
+    }
+
+    /** Flag a chat as unread (or clear the flag) without touching the read position. */
+    async setMarkedUnread(chatId: string, marked: boolean): Promise<void> {
+        const before = this.chats().find((c) => c.id === chatId);
+        if (!before) {
+            return;
+        }
+        const flight = this.enter(this.unreadFlights, chatId, { marked_unread: before.marked_unread ?? false });
+
+        this.patchChat(chatId, { marked_unread: marked });
+        try {
+            const result = await firstValueFrom(this.chatApi.markChatUnread(chatId, marked));
+            if (flight.isLatest()) {
+                this.patchChat(chatId, { marked_unread: result.marked_unread });
+            }
+        } catch {
+            if (flight.isLatest()) {
+                this.patchChat(chatId, flight.snapshot);
+                this.toast.error(marked ? 'Could not mark that chat as unread.' : 'Could not mark that chat as read.');
+            }
+        } finally {
+            flight.leave();
+        }
+    }
+
+    /**
+     * Clear this user's view of a chat. Others keep their history; the server records a floor for
+     * the caller only, and the same floor arrives on the caller's other devices as a `chat_updated`.
+     */
+    async clearHistory(chatId: string): Promise<boolean> {
+        try {
+            const result = await firstValueFrom(this.chatApi.clearHistory(chatId));
+            this.applyHistoryFloor(chatId, result.history_start_message_id);
+            return true;
+        } catch {
+            this.toast.error('Could not clear the history of that chat.');
+            return false;
+        }
+    }
+
+    /** Leave a group or channel; the chat disappears from this user's list. */
+    async leaveChat(chatId: string): Promise<boolean> {
+        try {
+            await firstValueFrom(this.chatApi.leaveChat(chatId));
+            this.onChatDeleted(chatId);
+            return true;
+        } catch (error) {
+            const code = error instanceof HttpErrorResponse ? error.error?.error_code : undefined;
+            this.toast.error(
+                code === 'OWNER_CANNOT_LEAVE'
+                    ? 'Transfer ownership before leaving, or delete the chat.'
+                    : 'Could not leave that chat.'
+            );
+            return false;
+        }
+    }
+
+    /** Delete a group or channel for everyone. Owner only; the server refuses anyone else. */
+    async deleteChat(chatId: string): Promise<boolean> {
+        try {
+            await firstValueFrom(this.chatApi.deleteChat(chatId));
+            this.onChatDeleted(chatId);
+            return true;
+        } catch {
+            this.toast.error('Could not delete that chat.');
+            return false;
+        }
+    }
+
+    /**
+     * `chat_updated` payloads addressed to this user's own devices. Returns true when the payload
+     * was one of them (and so needs no refetch).
+     */
+    private applyOwnArrangement(chatId: string | null, payload: Record<string, unknown> | undefined): boolean {
+        if (!chatId || !payload) {
+            return false;
+        }
+        let handled = false;
+        if (typeof payload['pinned'] === 'boolean') {
+            const pinned = payload['pinned'];
+            const pinnedAt = typeof payload['pinned_at'] === 'string' ? payload['pinned_at'] : null;
+            const current = this.chats().find((c) => c.id === chatId);
+            // While our own request is outstanding its response is the authority; an echo is either
+            // that same change or an older one. Otherwise last writer wins by pin time, so a stale
+            // pin cannot overwrite a newer one. (An unpin carries no time and is always applied.)
+            const stale =
+                this.pinFlights.has(chatId) ||
+                (pinned &&
+                    pinnedAt !== null &&
+                    !!current?.pinned_at &&
+                    Date.parse(pinnedAt) < Date.parse(current.pinned_at));
+            if (!stale) {
+                this.patchChat(chatId, {
+                    is_pinned: pinned,
+                    pinned_at: pinned ? (pinnedAt ?? new Date().toISOString()) : null,
+                });
+            }
+            handled = true;
+        }
+        if (typeof payload['marked_unread'] === 'boolean') {
+            if (!this.unreadFlights.has(chatId)) {
+                this.patchChat(chatId, { marked_unread: payload['marked_unread'] });
+            }
+            handled = true;
+        }
+        if (payload['history_cleared'] === true) {
+            const floor = payload['floor'];
+            this.applyHistoryFloor(chatId, typeof floor === 'string' ? floor : null);
+            handled = true;
+        }
+        return handled;
+    }
+
+    /** Hide everything at or before `floor` from this user's view of the chat. */
+    private applyHistoryFloor(chatId: string, floor: string | null): void {
+        if (floor === null) {
+            return;
+        }
+        this.chats.update((list) =>
+            list.map((c) =>
+                c.id === chatId
+                    ? {
+                          ...c,
+                          unread_count: 0,
+                          marked_unread: false,
+                          last_message: c.last_message && c.last_message._id > floor ? c.last_message : null,
+                      }
+                    : c
+            )
+        );
+        this.previewOverrides.update((map) => {
+            const next = new Map(map);
+            next.delete(chatId);
+            return next;
+        });
+
+        if (this.activeChatId() === chatId) {
+            this.messages.update((list) => list.filter((m) => m.id > floor));
+            this.pinnedMessages.update((list) => list.filter((m) => m.id > floor));
+            for (const id of [...this.rawMessages.keys()]) {
+                if (id <= floor) {
+                    this.rawMessages.delete(id);
+                }
+            }
+            this.hasMoreHistory.set(false);
         }
     }
 
@@ -1419,12 +1657,18 @@ export class ChatStoreService {
 
     private async markRead(chatId: string, decrypted: DecryptedMessage[]): Promise<void> {
         const newest = decrypted.at(-1);
-        if (!newest) {
-            return;
+        const flagged = this.chats().find((c) => c.id === chatId)?.marked_unread === true;
+
+        if (newest) {
+            this.ws.sendRead(chatId, newest.id);
+            this.chats.update((list) => list.map((c) => (c.id === chatId ? { ...c, unread_count: 0 } : c)));
         }
 
-        this.ws.sendRead(chatId, newest.id);
-        this.chats.update((list) => list.map((c) => (c.id === chatId ? { ...c, unread_count: 0 } : c)));
+        // The manual flag is cleared by the server's answer, never assumed locally. An empty page has
+        // no read frame to send, so the flag is cleared explicitly there; the call is idempotent.
+        if (flagged) {
+            await this.setMarkedUnread(chatId, false);
+        }
     }
 
     private async onIncomingMessage(chatId: string | null, payload: Record<string, unknown>): Promise<void> {

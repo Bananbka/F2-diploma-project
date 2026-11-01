@@ -31,6 +31,15 @@ export class PickerRecentsService {
         this.add('stickers', stickerId);
     }
 
+    /** Forget one entry. Client-only: "Recently used" is a local preference with no server copy. */
+    removeEmoji(emoji: string): void {
+        this.remove('emoji', emoji);
+    }
+
+    removeSticker(stickerId: string): void {
+        this.remove('stickers', stickerId);
+    }
+
     private key(kind: RecentKind): string | null {
         const id = this.session.user()?.id;
         return id ? `picker-recents:${id}:${kind}` : null;
@@ -54,6 +63,24 @@ export class PickerRecentsService {
             // Unreadable or tampered value: start over.
         }
         return [];
+    }
+
+    private remove(kind: RecentKind, value: string): void {
+        const key = this.key(kind);
+        if (!key) {
+            return;
+        }
+        const current = this.read(kind);
+        if (!current.includes(value)) {
+            return;
+        }
+        const next = current.filter((existing) => existing !== value);
+        this.cache.update((cached) => ({ ...cached, [key]: next }));
+        try {
+            localStorage.setItem(key, JSON.stringify(next));
+        } catch {
+            // Session-only is fine.
+        }
     }
 
     private add(kind: RecentKind, value: string): void {

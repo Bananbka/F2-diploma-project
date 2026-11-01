@@ -268,6 +268,7 @@
                                             tabindex="0"
                                             [src]="file.url"
                                             [alt]="file.name"
+                                            [attr.data-sticker-url]="file.url"
                                             aria-label="Open sticker pack"
                                             (click)="openStickerPack($event, file)"
                                             (keydown.enter)="openStickerPack($event, file)"
