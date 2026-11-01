@@ -5,10 +5,11 @@ import { argon2id } from '@noble/hashes/argon2.js';
 import { of, throwError } from 'rxjs';
 import { v4 as uuidv4 } from 'uuid';
 
+import { sealMessage } from '../crypto/envelope';
 import { computeMemberSetHash, signDistribution, wrapChainKey } from '../crypto/grants';
 import { generateIdentity, IdentityBundle, KdfParams, sealPrivateBundle } from '../crypto/identity';
-import { b64uDecode, b64uEncode } from '../crypto/primitives';
-import { generateChainKey } from '../crypto/ratchet';
+import { b64uDecode, b64uEncode, utf8 } from '../crypto/primitives';
+import { generateChainKey, SenderChain } from '../crypto/ratchet';
 import {
     ChatRoster,
     Distribution,
@@ -17,9 +18,11 @@ import {
     PublicKey,
     RosterEntry,
 } from '../models/crypto.model';
+import { ChatApiService } from './chat-api.service';
 import { CryptoApiService } from './crypto-api.service';
 import { MemberSetMismatchError, RetryLimitExceededError, RosterVerificationError } from './crypto-errors';
 import { KeyStoreService, SENDER_KEY_PUBLISH_POLICY } from './key-store.service';
+import { MessageService } from './message.service';
 import { SKIPPED_KEY_DB_NAME, SKIPPED_KEY_IDB, SkippedKeyStore } from './skipped-key-store.service';
 
 const USER = 'a0000000-0000-4000-8000-000000000001';
@@ -50,11 +53,19 @@ async function buildDistribution(params: {
     senderIdentity: IdentityBundle;
     recipientPublic: Uint8Array;
     recipientDeviceId: string;
+    /** Reuse a sender key id, to model the same id turning up in another slot. */
+    senderKeyId?: string;
+    /** Receives the chain secrets, for tests that must seal messages on this chain. */
+    capture?: { chainKey?: Uint8Array; chainSigningPrivate?: Uint8Array };
 }): Promise<Distribution> {
-    const senderKeyId = uuidv4();
+    const senderKeyId = params.senderKeyId ?? uuidv4();
     // Throwaway chain-signing keypair, exactly as `ensureSenderChain` mints one per chain.
     const chainIdentity = generateIdentity(SENDER_USER, SENDER_DEVICE, false);
     const chainKey = generateChainKey();
+    if (params.capture) {
+        params.capture.chainKey = chainKey;
+        params.capture.chainSigningPrivate = chainIdentity.signingPrivate;
+    }
 
     const wrapped = await wrapChainKey({
         chainKey,
@@ -158,6 +169,8 @@ describe('KeyStoreService', () => {
             providers: [
                 KeyStoreService,
                 { provide: CryptoApiService, useValue: cryptoApi },
+                // Only reached by the integration specs, which build a real MessageService.
+                { provide: ChatApiService, useValue: {} },
                 { provide: SKIPPED_KEY_DB_NAME, useValue: dbName },
                 { provide: SENDER_KEY_PUBLISH_POLICY, useValue: { maxAttempts: 3, baseDelayMs: 250, sleep } },
             ],
@@ -214,6 +227,184 @@ describe('KeyStoreService', () => {
             await service.ingestDistributions(CHAT, [dist]);
 
             expect(service.getReceiverChain(CHAT, dist.epoch, dist.sender_key_id)).toBeDefined();
+        });
+
+        it('binds an ingested chain to the user whose identity vouched for it', async () => {
+            const bundle = await unlockWithBundle(true);
+            const senderIdentity = generateIdentity(SENDER_USER, SENDER_DEVICE);
+            cryptoApi.getKeysBatch.and.returnValue(of([publicKeyFor(SENDER_USER, SENDER_DEVICE, senderIdentity)]));
+            const dist = await buildDistribution({
+                epoch: 1,
+                senderIdentity,
+                recipientPublic: bundle.prekeyPublic!,
+                recipientDeviceId: DEVICE,
+            });
+
+            expect(service.getChainOwner(CHAT, dist.epoch, dist.sender_key_id)).toBeUndefined();
+            await service.ingestDistributions(CHAT, [dist]);
+
+            expect(service.getChainOwner(CHAT, dist.epoch, dist.sender_key_id)).toBe(SENDER_USER);
+        });
+
+        describe('chain slots are (chat, epoch, sender key id)', () => {
+            it('keeps the same sender key id in another epoch apart from the genuine entry', async () => {
+                const bundle = await unlockWithBundle(true);
+                const senderIdentity = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                cryptoApi.getKeysBatch.and.returnValue(of([publicKeyFor(SENDER_USER, SENDER_DEVICE, senderIdentity)]));
+                const base = { senderIdentity, recipientPublic: bundle.prekeyPublic!, recipientDeviceId: DEVICE };
+
+                const genuine = await buildDistribution({ ...base, epoch: 1 });
+                const reused = await buildDistribution({ ...base, epoch: 2, senderKeyId: genuine.sender_key_id });
+                await service.ingestDistributions(CHAT, [genuine, reused]);
+
+                const key1 = service.getChainSigningKey(CHAT, 1, genuine.sender_key_id)!;
+                const key2 = service.getChainSigningKey(CHAT, 2, genuine.sender_key_id)!;
+                expect(b64uEncode(key1)).toBe(genuine.signing_public_key);
+                expect(b64uEncode(key2)).toBe(reused.signing_public_key);
+                expect(b64uEncode(key1)).not.toBe(b64uEncode(key2));
+                expect(service.getReceiverChain(CHAT, 1, genuine.sender_key_id)).toBeDefined();
+            });
+
+            it('knows nothing of a sender key id in a chat it was never registered for', async () => {
+                const bundle = await unlockWithBundle(true);
+                const senderIdentity = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                cryptoApi.getKeysBatch.and.returnValue(of([publicKeyFor(SENDER_USER, SENDER_DEVICE, senderIdentity)]));
+                const dist = await buildDistribution({
+                    epoch: 1,
+                    senderIdentity,
+                    recipientPublic: bundle.prekeyPublic!,
+                    recipientDeviceId: DEVICE,
+                });
+                await service.ingestDistributions(CHAT, [dist]);
+
+                expect(service.getChainOwner('other-chat', 1, dist.sender_key_id)).toBeUndefined();
+                expect(service.getChainSigningKey('other-chat', 1, dist.sender_key_id)).toBeUndefined();
+                expect(service.getChainOwner(CHAT, 2, dist.sender_key_id)).toBeUndefined();
+            });
+
+            /** The first registration of a slot is final, whoever it belongs to (own chain included). */
+            it('ignores a foreign distribution for a slot already bound to another owner', async () => {
+                const bundle = await unlockWithBundle(true);
+                const senderIdentity = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                cryptoApi.getKeysBatch.and.returnValue(of([publicKeyFor(SENDER_USER, SENDER_DEVICE, senderIdentity)]));
+                const dist = await buildDistribution({
+                    epoch: 1,
+                    senderIdentity,
+                    recipientPublic: bundle.prekeyPublic!,
+                    recipientDeviceId: DEVICE,
+                });
+
+                // Our own chain (or an earlier genuine one) already holds this slot.
+                const ownKey = crypto.getRandomValues(new Uint8Array(32));
+                (
+                    service as unknown as {
+                        registerChain: (c: string, e: number, k: string, owner: string, key: Uint8Array) => void;
+                    }
+                ).registerChain(CHAT, 1, dist.sender_key_id, USER, ownKey);
+
+                await service.ingestDistributions(CHAT, [dist]);
+
+                expect(service.getChainOwner(CHAT, 1, dist.sender_key_id)).toBe(USER);
+                expect(service.getChainSigningKey(CHAT, 1, dist.sender_key_id)).toEqual(ownKey);
+                expect(service.getReceiverChain(CHAT, 1, dist.sender_key_id)).toBeUndefined();
+            });
+
+            it('does not let a conflicting re-registration replace the first', async () => {
+                const bundle = await unlockWithBundle(true);
+                const senderIdentity = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                cryptoApi.getKeysBatch.and.returnValue(of([publicKeyFor(SENDER_USER, SENDER_DEVICE, senderIdentity)]));
+                const base = { senderIdentity, recipientPublic: bundle.prekeyPublic!, recipientDeviceId: DEVICE };
+                const genuine = await buildDistribution({ ...base, epoch: 1 });
+                const conflicting = await buildDistribution({ ...base, epoch: 1, senderKeyId: genuine.sender_key_id });
+
+                await service.ingestDistributions(CHAT, [genuine]);
+                await service.ingestDistributions(CHAT, [conflicting]);
+
+                expect(b64uEncode(service.getChainSigningKey(CHAT, 1, genuine.sender_key_id)!)).toBe(
+                    genuine.signing_public_key
+                );
+            });
+        });
+
+        describe('with the real MessageService (no stubbed owner lookup)', () => {
+            const VICTIM = 'f0000000-0000-4000-8000-0000000000aa';
+
+            async function setup(): Promise<{
+                messages: MessageService;
+                dist: Distribution;
+                seal: (
+                    claimedSender: string,
+                    text: string
+                ) => Promise<import('../models/crypto.model').MessageResponse>;
+            }> {
+                const bundle = await unlockWithBundle(true);
+                const senderIdentity = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                cryptoApi.getKeysBatch.and.returnValue(of([publicKeyFor(SENDER_USER, SENDER_DEVICE, senderIdentity)]));
+                const capture: { chainKey?: Uint8Array; chainSigningPrivate?: Uint8Array } = {};
+                const dist = await buildDistribution({
+                    epoch: 1,
+                    senderIdentity,
+                    recipientPublic: bundle.prekeyPublic!,
+                    recipientDeviceId: DEVICE,
+                    capture,
+                });
+                await service.ingestDistributions(CHAT, [dist]);
+
+                // Every message is a fresh chain at index 0, so each is openable on its own.
+                const seal = async (claimedSender: string, text: string) => {
+                    const { key, nonce, index } = new SenderChain(capture.chainKey!).nextMessageKey();
+                    const envelope = await sealMessage({
+                        messageKey: key,
+                        nonce,
+                        signingPrivate: capture.chainSigningPrivate!,
+                        chatId: CHAT,
+                        epoch: 1,
+                        senderId: claimedSender,
+                        senderKeyId: dist.sender_key_id,
+                        chainIndex: index,
+                        plaintext: utf8(JSON.stringify({ text, attachmentKeys: [] })),
+                    });
+                    return {
+                        _id: uuidv4().replace(/-/g, '').slice(0, 24),
+                        chat_id: CHAT,
+                        sender_id: claimedSender,
+                        encrypted_content: null,
+                        envelope,
+                        channel_post: null,
+                        content_format: 'sender_keys_v1',
+                        reply_to_message_id: null,
+                        forwarded_from: null,
+                        created_at: '2026-01-01T00:00:00Z',
+                        attachments: null,
+                        reactions: [],
+                        is_read: false,
+                        is_pinned: false,
+                        pinned_at: null,
+                        pinned_by: null,
+                        is_edited: false,
+                        is_encrypted: true,
+                    } as import('../models/crypto.model').MessageResponse;
+                };
+
+                return { messages: TestBed.inject(MessageService), dist, seal };
+            }
+
+            it('refuses a message that names another member as sender, and still opens the genuine one', async () => {
+                const { messages, seal } = await setup();
+
+                // The chain's real owner seals a message that claims to come from someone else. The
+                // signature verifies against their own chain key, so only the owner binding stops it.
+                const forged = await messages.decrypt(CHAT, await seal(VICTIM, 'send money to me'));
+                expect(forged.status).toBe('failed');
+                expect(forged.text).toBeNull();
+                expect(forged.senderVerified).toBeFalse();
+
+                // Refused before the ratchet moved, so the owner's real message at the same index opens.
+                const genuine = await messages.decrypt(CHAT, await seal(SENDER_USER, 'hello'));
+                expect(genuine.status).toBe('ok');
+                expect(genuine.text).toBe('hello');
+                expect(genuine.senderVerified).toBeTrue();
+            });
         });
 
         /** Backward compat: a bundle with no `prekeyPrivate` at all has only the identity key to try. */

@@ -1,0 +1,119 @@
+<div
+    class="backdrop"
+    (click)="closed.emit()"
+></div>
+<div
+    class="dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Create poll"
+>
+    <div class="head">
+        <h2>Create poll</h2>
+        <button
+            type="button"
+            class="close"
+            aria-label="Close"
+            (click)="closed.emit()"
+        >
+            <lucide-icon [img]="closeIcon" />
+        </button>
+    </div>
+
+    @if (blockedReason(); as reason) {
+        <p
+            class="error"
+            role="alert"
+        >
+            {{ reason }}
+        </p>
+    }
+
+    <label class="field">
+        <span>Question</span>
+        <input
+            type="text"
+            class="input"
+            [attr.maxlength]="questionMax"
+            [value]="question()"
+            (input)="question.set($any($event.target).value)"
+        />
+    </label>
+
+    <div class="field">
+        <span>Options</span>
+        @for (option of options(); track $index) {
+            <div class="option-row">
+                <input
+                    type="text"
+                    class="input"
+                    [attr.maxlength]="optionMax"
+                    [value]="option"
+                    [attr.aria-label]="'Option ' + ($index + 1)"
+                    (input)="setOption($index, $any($event.target).value)"
+                />
+                <button
+                    type="button"
+                    class="icon"
+                    [attr.aria-label]="'Remove option ' + ($index + 1)"
+                    [disabled]="!canRemoveOption()"
+                    (click)="removeOption($index)"
+                >
+                    <lucide-icon [img]="trashIcon" />
+                </button>
+            </div>
+        }
+        <button
+            type="button"
+            class="add"
+            [disabled]="!canAddOption()"
+            (click)="addOption()"
+        >
+            <lucide-icon [img]="plusIcon" />
+            Add option
+        </button>
+    </div>
+
+    <label class="check">
+        <input
+            type="checkbox"
+            [checked]="multiple()"
+            (change)="multiple.set($any($event.target).checked)"
+        />
+        Allow multiple answers
+    </label>
+
+    <div class="check-block">
+        <label class="check">
+            <input
+                type="checkbox"
+                [checked]="anonymous()"
+                (change)="anonymous.set($any($event.target).checked)"
+            />
+            Anonymous voting
+        </label>
+        <p class="muted">{{ anonymousNote }}</p>
+    </div>
+
+    @if (problem(); as message) {
+        <p class="hint">{{ message }}</p>
+    }
+
+    <div class="actions">
+        <button
+            type="button"
+            class="btn"
+            (click)="closed.emit()"
+        >
+            Cancel
+        </button>
+        <button
+            type="button"
+            class="btn is-primary"
+            [disabled]="!canSubmit()"
+            (click)="submit()"
+        >
+            Send poll
+        </button>
+    </div>
+</div>

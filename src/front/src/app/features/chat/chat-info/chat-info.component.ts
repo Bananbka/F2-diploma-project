@@ -10,6 +10,7 @@ import {
     ChevronRight,
     Copy,
     Crown,
+    Download,
     Link,
     LogOut,
     LucideAngularModule,
@@ -39,6 +40,7 @@ import { SessionService } from '../../../core/services/session.service';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
 import { DELETED_USER_LABEL } from '../../../shared/utils/display';
 import { safetyNumberGroups } from '../../../shared/utils/display';
+import { ExportDialogComponent } from '../export-dialog/export-dialog.component';
 
 interface MemberRow {
     userId: string;
@@ -56,7 +58,7 @@ interface MemberRow {
 
 @Component({
     selector: 'app-chat-info',
-    imports: [RouterLink, LucideAngularModule, AvatarComponent, DatePipe],
+    imports: [RouterLink, LucideAngularModule, AvatarComponent, DatePipe, ExportDialogComponent],
     templateUrl: './chat-info.component.html',
     styleUrl: './chat-info.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
@@ -256,6 +258,9 @@ export class ChatInfoComponent {
     readonly checkIcon = Check;
     readonly crownIcon = Crown;
     readonly xIcon = X;
+    readonly downloadIcon = Download;
+    /** The export dialog is open. */
+    readonly exportOpen = signal(false);
     readonly bellIcon = Bell;
     readonly bellOffIcon = BellOff;
     readonly linkIcon = Link;
@@ -326,9 +331,14 @@ export class ChatInfoComponent {
             // which is what stops DM messages rendering as "Member 1a2b3c4d".
             if (chat.chat_type === 'private') {
                 const peer = chat.participants.find((p) => p.user_id !== this.session.user()?.id);
-                const listTitle = this.store.chats().find((c) => c.id === chatId)?.title ?? null;
+                const listChat = this.store.chats().find((c) => c.id === chatId);
+                const listTitle = listChat?.title ?? null;
                 if (peer) {
-                    this.directory.rememberPrivateChatPeer(peer.user_id, listTitle, chat.avatar_url);
+                    this.directory.rememberPrivateChatPeer(
+                        peer.user_id,
+                        listTitle,
+                        listChat?.avatar_url ?? chat.avatar_url
+                    );
                 }
             }
 

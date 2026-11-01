@@ -1,0 +1,33 @@
+<div class="card">
+    <lucide-icon
+        class="pin"
+        [img]="pinIcon"
+    />
+    <div class="info">
+        @if (valid()) {
+            @if (location().label) {
+                <p class="label">{{ location().label }}</p>
+            } @else {
+                <p class="label">Location</p>
+            }
+            <p class="coords">{{ coordinates() }}</p>
+            @if (accuracy(); as a) {
+                <p class="accuracy">{{ a }}</p>
+            }
+            @if (interactive() && mapUrl(); as url) {
+                <a
+                    class="open"
+                    [href]="url"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                >
+                    Open in map
+                    <lucide-icon [img]="externalIcon" />
+                </a>
+            }
+        } @else {
+            <p class="label">Invalid location</p>
+            <p class="accuracy">The coordinates in this message are out of range.</p>
+        }
+    </div>
+</div>

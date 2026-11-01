@@ -87,12 +87,15 @@ describe('MessageService', () => {
             [
                 'getReceiverChain',
                 'getChainSigningKey',
+                'getChainOwner',
                 'ingestDistributions',
                 'ensureSenderChain',
                 'invalidateSenderChain',
             ],
             ['currentIdentity']
         );
+        // By default the chain belongs to the message's claimed sender, as it does in real use.
+        keyStore.getChainOwner.and.returnValue(SENDER);
         chatApi = jasmine.createSpyObj<ChatApiService>('ChatApiService', [
             'getMessages',
             'editMessage',
@@ -121,6 +124,31 @@ describe('MessageService', () => {
         });
 
         service = TestBed.inject(MessageService);
+    });
+
+    it('refuses a message whose claimed sender does not own the chain it was sealed on', async () => {
+        const chain = { messageKeyFor: jasmine.createSpy('messageKeyFor') };
+        keyStore.getReceiverChain.and.returnValue(chain as never);
+        keyStore.getChainSigningKey.and.returnValue(undefined);
+        // The chain was ingested as belonging to someone other than the sender this message names.
+        keyStore.getChainOwner.and.returnValue('d0000000-0000-4000-8000-0000000000ff');
+
+        const result = await service.decrypt(CHAT, envelopeMessage('forged', 0));
+
+        expect(result.status).toBe('failed');
+        expect(result.text).toBeNull();
+        expect(result.senderVerified).toBeFalse();
+        // Rejected before the ratchet moved, so the real owner's index is not burned.
+        expect(chain.messageKeyFor).not.toHaveBeenCalled();
+    });
+
+    it('refuses a message on a chain whose owner is unknown', async () => {
+        keyStore.getReceiverChain.and.returnValue({ messageKeyFor: jasmine.createSpy() } as never);
+        keyStore.getChainOwner.and.returnValue(undefined);
+
+        const result = await service.decrypt(CHAT, envelopeMessage('orphan', 0));
+
+        expect(result.status).toBe('failed');
     });
 
     /**

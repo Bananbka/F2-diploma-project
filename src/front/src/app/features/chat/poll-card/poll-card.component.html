@@ -1,0 +1,164 @@
+@if (poll(); as p) {
+    @if (tally(); as t) {
+        <div class="poll">
+            <p class="question">{{ p.question }}</p>
+
+            <p class="kind">
+                {{ p.anonymous ? 'Anonymous poll' : 'Public poll' }} ·
+                {{ p.multiple ? 'Multiple answers' : 'Single answer' }}
+                @if (t.closed) {
+                    · <strong class="closed">Closed{{ t.closedBy === 'time' ? ' (time is up)' : '' }}</strong>
+                }
+            </p>
+
+            @if (p.anonymous) {
+                <p class="note">{{ anonymousNote }}</p>
+            }
+
+            @if (message().isEdited) {
+                <p class="note is-warn edited-note">
+                    The author edited this poll. Votes cast before the edit are not counted.
+                </p>
+            }
+
+            <ul
+                class="options"
+                [attr.aria-label]="'Options for: ' + p.question"
+            >
+                @for (option of t.options; track option.index) {
+                    <li>
+                        <button
+                            type="button"
+                            class="option"
+                            [class.is-mine]="isSelected(option.index)"
+                            [disabled]="!canVote()"
+                            [attr.aria-pressed]="isSelected(option.index)"
+                            (click)="choose(option.index)"
+                        >
+                            <span
+                                class="bar"
+                                [style.width.%]="option.percent"
+                                aria-hidden="true"
+                            ></span>
+                            <lucide-icon
+                                class="mark"
+                                [img]="
+                                    p.multiple
+                                        ? isSelected(option.index)
+                                            ? checkSquareIcon
+                                            : squareIcon
+                                        : isSelected(option.index)
+                                          ? circleDotIcon
+                                          : circleIcon
+                                "
+                            />
+                            <span class="label">{{ option.text }}</span>
+                            <span class="figures">{{ option.percent }}% · {{ option.count }}</span>
+                        </button>
+
+                        @if (option.voterIds !== null && option.voterIds.length > 0) {
+                            @let who = voterNames(option);
+                            <p class="voters">
+                                {{ who.shown.join(', ') }}
+                                @if (who.more > 0) {
+                                    and {{ who.more }} more
+                                }
+                            </p>
+                        }
+                    </li>
+                }
+            </ul>
+
+            @if (p.multiple && dirty() && !t.closed) {
+                <button
+                    type="button"
+                    class="action is-primary"
+                    [disabled]="!canVote()"
+                    (click)="submitDraft()"
+                >
+                    Vote
+                </button>
+            }
+
+            <p class="summary">
+                {{ t.totalVoters }} {{ t.totalVoters === 1 ? 'voter' : 'voters' }}
+                @if (loading()) {
+                    · loading votes…
+                }
+            </p>
+
+            @if (t.unreadable > 0) {
+                <p class="note is-warn unreadable-note">
+                    {{ t.unreadable }} {{ t.unreadable === 1 ? 'vote' : 'votes' }} could not be read and
+                    {{ t.unreadable === 1 ? 'is' : 'are' }} not counted.
+                </p>
+            }
+
+            @if (loadFailed()) {
+                <div
+                    class="banner"
+                    role="alert"
+                >
+                    <span>Votes could not be loaded, so these counts may be incomplete.</span>
+                    <button
+                        type="button"
+                        class="action retry-load"
+                        (click)="retryLoad()"
+                    >
+                        Retry
+                    </button>
+                </div>
+            }
+            @if (truncated()) {
+                <div
+                    class="banner truncated-banner"
+                    role="alert"
+                >
+                    <span>
+                        Result may be incomplete: this poll has more votes than could be loaded, so the oldest are
+                        missing.
+                    </span>
+                </div>
+            }
+
+            @if (error()) {
+                <p
+                    class="note is-danger"
+                    role="alert"
+                >
+                    {{ error() }}
+                </p>
+            }
+
+            @if (canClose()) {
+                @if (confirmingClose()) {
+                    <div class="confirm">
+                        <span>Close this poll for everyone?</span>
+                        <button
+                            type="button"
+                            class="action is-danger"
+                            (click)="confirmClose()"
+                        >
+                            Close poll
+                        </button>
+                        <button
+                            type="button"
+                            class="action"
+                            (click)="cancelClose()"
+                        >
+                            Keep open
+                        </button>
+                    </div>
+                } @else {
+                    <button
+                        type="button"
+                        class="action"
+                        (click)="askClose()"
+                    >
+                        Close poll
+                    </button>
+                }
+            }
+        </div>
+    }
+}

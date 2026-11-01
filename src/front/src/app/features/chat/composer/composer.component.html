@@ -163,6 +163,48 @@
             <span class="sr-only">Attach a file</span>
         </button>
 
+        @if (richContent()) {
+            <span class="more-wrap">
+                <button
+                    type="button"
+                    class="side more-trigger"
+                    title="Poll or location"
+                    aria-label="Poll or location"
+                    aria-haspopup="menu"
+                    [attr.aria-expanded]="moreOpen()"
+                    [disabled]="unavailableReason() !== null"
+                    (click)="toggleMore()"
+                >
+                    <lucide-icon [img]="plusIcon" />
+                </button>
+                @if (moreOpen()) {
+                    <div
+                        class="more-menu"
+                        role="menu"
+                    >
+                        <button
+                            type="button"
+                            role="menuitem"
+                            class="more-item poll-item"
+                            (click)="openDialog('poll')"
+                        >
+                            <lucide-icon [img]="pollIcon" />
+                            Poll
+                        </button>
+                        <button
+                            type="button"
+                            role="menuitem"
+                            class="more-item location-item"
+                            (click)="openDialog('location')"
+                        >
+                            <lucide-icon [img]="mapPinIcon" />
+                            Location
+                        </button>
+                    </div>
+                }
+            </span>
+        }
+
         <div class="input">
             <textarea
                 #area
@@ -214,4 +256,21 @@
             </button>
         }
     </div>
+}
+
+@switch (dialog()) {
+    @case ('poll') {
+        <app-poll-dialog
+            [blockedReason]="unavailableReason()"
+            (submitted)="submitPoll($event)"
+            (closed)="closeDialog()"
+        />
+    }
+    @case ('location') {
+        <app-location-dialog
+            [blockedReason]="unavailableReason()"
+            (submitted)="submitLocation($event)"
+            (closed)="closeDialog()"
+        />
+    }
 }

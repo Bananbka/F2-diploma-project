@@ -348,6 +348,9 @@ describe('ComposerComponent', () => {
 
         function rowOrder(host: HTMLElement): string[] {
             return Array.from(host.querySelector('.row')!.children).map((el) => {
+                if (el.classList.contains('more-wrap')) {
+                    return 'more';
+                }
                 if (el.classList.contains('input')) {
                     return 'input';
                 }
@@ -364,10 +367,10 @@ describe('ComposerComponent', () => {
             });
         }
 
-        it('is attach, input, smiley, then the mic when there is nothing to send', () => {
+        it('is attach, more, input, smiley, then the mic when there is nothing to send', () => {
             const host = create();
 
-            expect(rowOrder(host)).toEqual(['attach', 'input', 'emoji', 'mic']);
+            expect(rowOrder(host)).toEqual(['attach', 'more', 'input', 'emoji', 'mic']);
         });
 
         it('swaps the mic for Send in the same slot once there is text', () => {
@@ -375,7 +378,7 @@ describe('ComposerComponent', () => {
             fixture.componentInstance.text.set('hi');
             fixture.detectChanges();
 
-            expect(rowOrder(host)).toEqual(['attach', 'input', 'emoji', 'send']);
+            expect(rowOrder(host)).toEqual(['attach', 'more', 'input', 'emoji', 'send']);
             expect(host.querySelector('.mic-trigger')).toBeNull();
         });
 
@@ -384,7 +387,7 @@ describe('ComposerComponent', () => {
             fixture.componentInstance.staged.set([{ file: { ...uploaded(), kind: 'file' }, previewUrl: null }]);
             fixture.detectChanges();
 
-            expect(rowOrder(host)).toEqual(['attach', 'input', 'emoji', 'send']);
+            expect(rowOrder(host)).toEqual(['attach', 'more', 'input', 'emoji', 'send']);
         });
 
         it('has no separate sticker button and no emoji popover', () => {
@@ -640,6 +643,120 @@ describe('ComposerComponent', () => {
 
             expect(fixture.componentInstance.text()).toBe('already sent text');
             expect(fixture.componentInstance.staged().map((s) => s.file.url)).toEqual([existing.url]);
+        });
+    });
+
+    describe('poll and location entries', () => {
+        const POLL = {
+            question: 'Lunch?',
+            options: ['Pizza', 'Sushi'],
+            multiple: false,
+            anonymous: false,
+            closesAt: null,
+        };
+        const PLACE = { lat: 1, lon: 2, accuracy: null, label: null };
+
+        function trigger(host: HTMLElement): HTMLButtonElement | null {
+            return host.querySelector<HTMLButtonElement>('.more-trigger');
+        }
+
+        it('opens a menu with Poll and Location', () => {
+            const host = create();
+            trigger(host)!.click();
+            fixture.detectChanges();
+
+            expect(host.querySelector('.poll-item')).toBeTruthy();
+            expect(host.querySelector('.location-item')).toBeTruthy();
+        });
+
+        it('is absent where polls cannot be sent (a channel)', () => {
+            const host = create();
+            fixture.componentRef.setInput('richContent', false);
+            fixture.detectChanges();
+            expect(trigger(host)).toBeNull();
+        });
+
+        const blockers: [string, () => void][] = [
+            ['editing a message', () => fixture.componentRef.setInput('editing', true)],
+            [
+                'a read-only conversation',
+                () => {
+                    fixture.componentRef.setInput('canSend', false);
+                    fixture.componentRef.setInput('readOnly', true);
+                },
+            ],
+            [
+                'an unverified member set',
+                () => {
+                    fixture.componentRef.setInput('canSend', false);
+                    fixture.componentRef.setInput('blockedReason', 'Blocked.');
+                },
+            ],
+            ['a voice recording in progress', () => voiceRecorder.recordingState.set('recording')],
+        ];
+
+        for (const [name, apply] of blockers) {
+            it(`is refused during ${name}`, () => {
+                const host = create();
+                apply();
+                fixture.detectChanges();
+                const component = fixture.componentInstance;
+                const polls: unknown[] = [];
+                const places: unknown[] = [];
+                component.pollSubmitted.subscribe((p) => polls.push(p));
+                component.locationSubmitted.subscribe((p) => places.push(p));
+
+                // The recording row replaces the normal row, so the trigger may not exist at all.
+                expect(trigger(host)?.disabled ?? true).toBeTrue();
+                component.toggleMore();
+                expect(component.moreOpen()).toBeFalse();
+                component.openDialog('poll');
+                component.openDialog('location');
+                expect(component.dialog()).toBeNull();
+
+                // Even if a dialog was already open, the submit re-checks the same guard.
+                expect(component.submitPoll(POLL)).toBeFalse();
+                expect(component.submitLocation(PLACE)).toBeFalse();
+                expect(polls).toEqual([]);
+                expect(places).toEqual([]);
+            });
+        }
+
+        it('a dialog opened earlier cannot submit once sending becomes blocked', () => {
+            create();
+            const component = fixture.componentInstance;
+            component.openDialog('poll');
+            expect(component.dialog()).toBe('poll');
+
+            fixture.componentRef.setInput('canSend', false);
+            fixture.detectChanges();
+
+            expect(component.submitPoll(POLL)).toBeFalse();
+            expect(component.dialog()).toBe('poll');
+        });
+
+        it('emits the poll and closes the dialog when allowed', () => {
+            create();
+            const component = fixture.componentInstance;
+            const emitted: unknown[] = [];
+            component.pollSubmitted.subscribe((p) => emitted.push(p));
+
+            component.openDialog('poll');
+            expect(component.submitPoll(POLL)).toBeTrue();
+
+            expect(emitted).toEqual([POLL]);
+            expect(component.dialog()).toBeNull();
+        });
+
+        it('emits the location when allowed', () => {
+            create();
+            const component = fixture.componentInstance;
+            const emitted: unknown[] = [];
+            component.locationSubmitted.subscribe((p) => emitted.push(p));
+
+            component.openDialog('location');
+            expect(component.submitLocation(PLACE)).toBeTrue();
+            expect(emitted).toEqual([PLACE]);
         });
     });
 });

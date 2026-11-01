@@ -337,8 +337,11 @@
                 {{ selectionCount() }} selected
                 @if (forwardableCount() < selectionCount()) {
                     <!-- Forwarding re-encrypts the plaintext, so anything we could not read cannot go. -->
-                    <span class="selection-note">
-                        · {{ selectionCount() - forwardableCount() }} cannot be forwarded (not readable)
+                    <span
+                        class="selection-note"
+                        title="Forwarding re-sends the readable text of a message. Messages that could not be decrypted, polls and locations cannot be forwarded."
+                    >
+                        · {{ selectionCount() - forwardableCount() }} cannot be forwarded (unreadable, poll or location)
                     </span>
                 }
             </span>
@@ -449,12 +452,15 @@
             [initialText]="editing()?.text ?? ''"
             [initialAttachments]="editing()?.attachments ?? []"
             [editing]="!!editing()"
+            [richContent]="!isChannel()"
             [canSend]="canSend()"
             [blockedReason]="sendBlockedReason()"
             [readOnly]="peerDeleted() && !memberVerificationError()"
             [rekeying]="isRekeying()"
             [placeholder]="isChannel() ? 'Post to channel…' : 'Message…'"
             (submitted)="send($event)"
+            (pollSubmitted)="sendPoll($event)"
+            (locationSubmitted)="sendLocation($event)"
             (typing)="onTyping($event)"
         />
     }

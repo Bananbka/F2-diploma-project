@@ -56,6 +56,14 @@ async def ensure_indexes():
         partialFilterExpression={"client_message_id": {"$type": "binData"}},
     )
 
+    # get_poll_votes: control messages of one poll, newest first. Partial, since control messages
+    # are a small fraction of the collection.
+    await messages.create_index(
+        [("chat_id", 1), ("poll_message_id", 1), ("_id", -1)],
+        name="ix_chat_poll_id",
+        partialFilterExpression={"is_control": True},
+    )
+
     audit_log = mongo_client.db["security_audit"]
 
     # The two ways an audit log is ever read: everything about one account, and everything in a

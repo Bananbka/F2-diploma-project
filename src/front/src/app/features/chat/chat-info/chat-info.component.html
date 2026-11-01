@@ -458,6 +458,30 @@
         </section>
 
         <section class="group">
+            <p class="section">Data</p>
+            <button
+                type="button"
+                class="tile export-row"
+                (click)="exportOpen.set(true)"
+            >
+                <span class="tile-icon">
+                    <lucide-icon [img]="downloadIcon" />
+                </span>
+                <span class="tile-text">
+                    <span class="tile-title">Export chat history</span>
+                    <span class="tile-sub">Save a decrypted JSON copy to this device</span>
+                </span>
+            </button>
+        </section>
+
+        @if (exportOpen()) {
+            <app-export-dialog
+                [chatId]="chatId()"
+                (closed)="exportOpen.set(false)"
+            />
+        }
+
+        <section class="group">
             <div class="panel">
                 <button
                     type="button"

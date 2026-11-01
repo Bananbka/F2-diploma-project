@@ -13,11 +13,14 @@ import {
     viewChild,
 } from '@angular/core';
 import {
+    ChartBar,
     Check,
     Film,
     LucideAngularModule,
+    MapPin,
     Mic,
     Paperclip,
+    Plus,
     RefreshCw,
     Send,
     ShieldAlert,
@@ -31,10 +34,13 @@ import { firstValueFrom } from 'rxjs';
 import { computeWaveformPeaks } from '../../../core/audio/waveform';
 import { encryptAttachment } from '../../../core/crypto/attachment-crypto';
 import { AttachmentKind, MessageAttachment } from '../../../core/models/crypto.model';
+import { LocationPayload, PollPayload } from '../../../core/models/message-payload';
 import { Sticker as StickerModel } from '../../../core/models/sticker.model';
 import { ChatPanelStoreService, ComposerBridge } from '../../../core/services/chat-panel-store.service';
 import { ProfileApiService } from '../../../core/services/profile-api.service';
 import { VoiceRecorderService } from '../../../core/services/voice-recorder.service';
+import { LocationDialogComponent } from '../location-dialog/location-dialog.component';
+import { PollDialogComponent } from '../poll-dialog/poll-dialog.component';
 
 /** What the composer hands over. Attachments travel with the message, not separately. */
 export interface ComposedMessage {
@@ -67,10 +73,11 @@ function inferKind(mimeType: string): AttachmentKind {
 
 @Component({
     selector: 'app-composer',
-    imports: [LucideAngularModule],
+    imports: [LucideAngularModule, PollDialogComponent, LocationDialogComponent],
     templateUrl: './composer.component.html',
     styleUrl: './composer.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
+    host: { '(document:mousedown)': 'onDocumentMouseDown($event)' },
 })
 export class ComposerComponent {
     private readonly profileApi = inject(ProfileApiService);
@@ -98,9 +105,17 @@ export class ComposerComponent {
      */
     readonly initialAttachments = input<MessageAttachment[]>([]);
     readonly editing = input(false);
+    /** Polls and locations travel in sealed payloads; a channel's signed posts cannot carry them. */
+    readonly richContent = input(true);
 
     readonly submitted = output<ComposedMessage>();
     readonly typing = output<boolean>();
+    readonly pollSubmitted = output<PollPayload>();
+    readonly locationSubmitted = output<LocationPayload>();
+
+    /** The poll/location menu, and which dialog (if any) it opened. */
+    readonly moreOpen = signal(false);
+    readonly dialog = signal<'poll' | 'location' | null>(null);
 
     readonly text = signal('');
     readonly staged = signal<StagedAttachment[]>([]);
@@ -217,6 +232,9 @@ export class ComposerComponent {
     readonly micIcon = Mic;
     readonly trashIcon = Trash2;
     readonly checkIcon = Check;
+    readonly plusIcon = Plus;
+    readonly pollIcon = ChartBar;
+    readonly mapPinIcon = MapPin;
 
     onInput(value: string): void {
         this.text.set(value);
@@ -352,6 +370,52 @@ export class ComposerComponent {
 
     openFilePicker(): void {
         this.fileInput()?.nativeElement.click();
+    }
+
+    /** The "+" menu. Refused for the same reasons as the smiley: one guard, `unavailableReason`. */
+    toggleMore(): void {
+        if (this.unavailableReason() !== null || !this.richContent()) {
+            this.moreOpen.set(false);
+            return;
+        }
+        this.moreOpen.update((open) => !open);
+    }
+
+    openDialog(kind: 'poll' | 'location'): void {
+        this.moreOpen.set(false);
+        if (this.unavailableReason() !== null || !this.richContent()) {
+            return;
+        }
+        this.dialog.set(kind);
+    }
+
+    closeDialog(): void {
+        this.dialog.set(null);
+    }
+
+    /** The guard is checked again at submit: the state may have changed while the dialog was open. */
+    submitPoll(poll: PollPayload): boolean {
+        if (this.unavailableReason() !== null || !this.richContent()) {
+            return false;
+        }
+        this.pollSubmitted.emit(poll);
+        this.dialog.set(null);
+        return true;
+    }
+
+    submitLocation(location: LocationPayload): boolean {
+        if (this.unavailableReason() !== null || !this.richContent()) {
+            return false;
+        }
+        this.locationSubmitted.emit(location);
+        this.dialog.set(null);
+        return true;
+    }
+
+    onDocumentMouseDown(event: MouseEvent): void {
+        if (this.moreOpen() && !(event.target as HTMLElement).closest('.more-wrap')) {
+            this.moreOpen.set(false);
+        }
     }
 
     /** The smiley: toggles the side panel on the emoji/sticker picker. Refused when composing is not possible. */

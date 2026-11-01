@@ -35,6 +35,7 @@ import {
 } from 'lucide-angular';
 
 import { Chat } from '../../../core/models/chat.model';
+import { LocationPayload, PollPayload } from '../../../core/models/message-payload';
 import { ChatPanelStoreService } from '../../../core/services/chat-panel-store.service';
 import {
     ChatStoreService,
@@ -43,7 +44,7 @@ import {
     PendingMessage,
 } from '../../../core/services/chat-store.service';
 import { DirectoryService } from '../../../core/services/directory.service';
-import { DecryptedMessage } from '../../../core/services/message.service';
+import { contentOf, DecryptedMessage } from '../../../core/services/message.service';
 import { SessionService } from '../../../core/services/session.service';
 import { VoiceRecorderService } from '../../../core/services/voice-recorder.service';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
@@ -296,7 +297,7 @@ export class ChatViewComponent {
             chatId: this.chat()?.id ?? '',
             senderId: this.session.user()?.id ?? '',
             createdAt: pending.createdAt,
-            text: pending.text,
+            text: pending.content ? null : pending.text,
             status: 'ok',
             isEdited: false,
             replyToId: null,
@@ -305,6 +306,8 @@ export class ChatViewComponent {
             senderVerified: true,
             reactions: [],
             isPinned: false,
+            // A poll or location being sent renders through the same bubble as a delivered one.
+            content: pending.content,
         };
     }
 
@@ -376,7 +379,8 @@ export class ChatViewComponent {
             items.push({ icon: Copy, label: 'Copy text', action: () => void this.copyText(message) });
         }
 
-        if (this.directory.isMe(message.senderId) && message.status === 'ok') {
+        // Only plain text can be re-sealed by the composer; a poll or location is not editable.
+        if (this.directory.isMe(message.senderId) && message.status === 'ok' && contentOf(message).kind === 'text') {
             items.push({ icon: Pencil, label: 'Edit', action: () => this.startEdit(message) });
         }
 
@@ -588,6 +592,16 @@ export class ChatViewComponent {
         }
 
         await this.store.send(composed.text, replyTo?.id, composed.attachments);
+    }
+
+    async sendPoll(poll: PollPayload): Promise<void> {
+        this.pinToBottom = true;
+        await this.store.sendPoll(poll);
+    }
+
+    async sendLocation(location: LocationPayload): Promise<void> {
+        this.pinToBottom = true;
+        await this.store.sendLocation(location);
     }
 
     onTyping(active: boolean): void {

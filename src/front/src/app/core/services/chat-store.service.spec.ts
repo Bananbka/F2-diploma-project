@@ -10,6 +10,7 @@ import { CryptoApiService } from './crypto-api.service';
 import { MemberSetMismatchError, RetryLimitExceededError, RosterVerificationError } from './crypto-errors';
 import { DirectoryService } from './directory.service';
 import { DecryptedMessage, DecryptStatus, MessageService } from './message.service';
+import { PollStoreService } from './poll-store.service';
 import { SessionService } from './session.service';
 import { WebSocketService } from './websocket.service';
 
@@ -959,6 +960,130 @@ describe('ChatStoreService', () => {
             await settle();
 
             expect(store.chats()[0].unread_count).toBe(1);
+        });
+
+        describe('poll control messages', () => {
+            it('removes a deleted control message from its poll', async () => {
+                const polls = TestBed.inject(PollStoreService);
+                spyOn(polls, 'removeControl').and.callThrough();
+                spyOn(polls, 'forget').and.callThrough();
+
+                ws.messages.next({
+                    event_type: 'message_deleted',
+                    chat_id: CHAT,
+                    payload: { message_id: '64b0000000000000000000a1' },
+                });
+                await settle();
+
+                expect(polls.removeControl).toHaveBeenCalledWith('64b0000000000000000000a1');
+                expect(polls.forget).toHaveBeenCalledWith('64b0000000000000000000a1');
+            });
+
+            it('marks held tallies stale when the open conversation changes', async () => {
+                const polls = TestBed.inject(PollStoreService);
+                spyOn(polls, 'markAllStale').and.callThrough();
+
+                store.activeChatId.set(null);
+                TestBed.flushEffects();
+
+                expect(polls.markAllStale).toHaveBeenCalled();
+            });
+
+            const POLL = '64b0000000000000000000a0';
+            const VOTE = '64b0000000000000000000a1';
+            const controlFrame = {
+                event_type: 'new_message',
+                chat_id: CHAT,
+                payload: { _id: VOTE, is_control: true, poll_message_id: POLL },
+            };
+            const control = (): DecryptedMessage => ({
+                ...decrypted(VOTE, 'ok'),
+                text: null,
+                isControl: true,
+                senderVerified: true,
+                content: { kind: 'poll_vote', vote: { pollId: POLL, options: [0] } },
+            });
+
+            it('never reaches the message list, the preview or the last message', async () => {
+                messages.decrypt.and.resolveTo(control());
+                store.chats.set([chat({ last_message: null })]);
+
+                ws.messages.next(controlFrame);
+                await settle();
+
+                expect(store.messages().length).toBe(0);
+                expect(store.chats()[0].last_message).toBeNull();
+                expect(store.preview(store.chats()[0]).text).toBe('No messages yet');
+            });
+
+            it('does not count towards unread in a closed chat', async () => {
+                store.activeChatId.set(null);
+                store.chats.set([chat({ unread_count: 0 })]);
+
+                ws.messages.next(controlFrame);
+                await settle();
+
+                expect(store.chats()[0].unread_count).toBe(0);
+                expect(messages.decrypt).not.toHaveBeenCalled();
+            });
+
+            it('is dropped even when a history page lets one through', async () => {
+                const normal = decrypted('64b000000000000000000050', 'ok');
+                messages.loadMessages.and.resolveTo({ raw: [], messages: [normal, control()] });
+
+                await store.reloadAfterGap();
+
+                expect(store.messages().map((m) => m.id)).toEqual([normal.id]);
+            });
+        });
+
+        it('previews an attachment-only message instead of leaving the row blank', async () => {
+            const sticker: DecryptedMessage = {
+                ...decrypted('64b000000000000000000060', 'ok'),
+                text: '',
+                attachments: [{ url: 'u', name: 'x', size: 0, content_type: 'image/webp', kind: 'sticker' }],
+            };
+            messages.decrypt.and.resolveTo(sticker);
+
+            ws.messages.next({
+                event_type: 'new_message',
+                chat_id: CHAT,
+                payload: { _id: sticker.id },
+            });
+            await settle();
+
+            expect(store.preview(store.chats()[0])).toEqual({ text: 'Sticker', readable: true });
+        });
+
+        it('previews a poll and a location by what they are', async () => {
+            const poll: DecryptedMessage = {
+                ...decrypted('64b000000000000000000061', 'ok'),
+                text: null,
+                content: {
+                    kind: 'poll',
+                    poll: {
+                        question: 'Lunch?',
+                        options: ['a', 'b'],
+                        multiple: false,
+                        anonymous: false,
+                        closesAt: null,
+                    },
+                },
+            };
+            messages.decrypt.and.resolveTo(poll);
+            ws.messages.next({ event_type: 'new_message', chat_id: CHAT, payload: { _id: poll.id } });
+            await settle();
+            expect(store.preview(store.chats()[0]).text).toBe('Poll: Lunch?');
+
+            const place: DecryptedMessage = {
+                ...decrypted('64b000000000000000000062', 'ok'),
+                text: null,
+                content: { kind: 'location', location: { lat: 1, lon: 2, accuracy: null, label: null } },
+            };
+            messages.decrypt.and.resolveTo(place);
+            ws.messages.next({ event_type: 'new_message', chat_id: CHAT, payload: { _id: place.id } });
+            await settle();
+            expect(store.preview(store.chats()[0]).text).toBe('Location');
         });
     });
 });

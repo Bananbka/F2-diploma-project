@@ -418,6 +418,101 @@ silently persisting an unreadable attachment. This check correctly exempts stick
 — they never carried a key to begin with, so requiring one would make editing any message that
 happens to carry a sticker impossible, including a pure text-only edit.
 
+### 4.6 Poll control messages
+
+A poll is an ordinary sealed message whose plaintext payload describes it. A vote or a close marker is
+a *control message*: an ordinary sealed message (same envelope, AAD, signature, epoch enforcement,
+`client_message_id` idempotency and rate limit) that additionally carries two fields outside the
+envelope:
+
+| Field             | Type            | Rule                                                              |
+|-------------------|-----------------|-------------------------------------------------------------------|
+| `is_control`      | bool, default 0 | `true` marks a vote or close message.                             |
+| `poll_message_id` | 24-hex ObjectId | Required iff `is_control`; forbidden otherwise. Names the poll.   |
+
+The server checks that the poll exists in the **same chat**, is not itself a control message, and that
+the chat is a `sender_keys_v1` private or group chat (never a channel or a legacy chat). A control
+message carries no reply, forward or attachments and cannot be edited, reacted to or pinned. Edits never
+change either field. It is not counted as unread, never becomes a chat's `last_message`, does not
+reorder the chat list and is absent from `GET /chats/{id}/messages`. It is served by
+`GET /messages/{chat_id}/polls/{poll_message_id}/votes?limit=&before=` (newest first, default 100,
+max 200, same history floor as normal history), and is published as a normal `new_message` event.
+Deleting the poll deletes its control messages; users cannot delete a control message themselves (`409 CONTROL_MESSAGE_NOT_ALLOWED`): a voter retracts by voting again, and a close marker cannot be removed to reopen a poll.
+
+Limits, enforced before anything is stored: the envelope `ct` of a control message may not exceed 4096 characters (`422 CONTROL_MESSAGE_TOO_LARGE`), and one sender may hold at most 50 control messages per poll (`409 CONTROL_MESSAGE_LIMIT`; the count is not atomic, so a concurrent burst can overshoot slightly). `CONTROL_MESSAGE_NOT_ALLOWED` is `422` when the chat or shape can never carry a control message (channel, legacy chat) and `409` when an operation is attempted on an existing one (react, pin, delete). `GET .../votes` is rate limited per user.
+
+The server cannot tell that a message *is* a poll: a poll is an ordinary message, so editing it with `PUT` works and keeps `is_control` false.
+
+**Ordering is not a chronology.** Pagination and "newest first" follow the ObjectId. Across several API workers an ObjectId is only reliably ordered at second granularity, so two votes sent within the same second may be listed out of true order. Clients order votes by ObjectId, as they do all messages; it is a total order for everyone, not a proof of which was sent first.
+
+**Metadata leak.** The fields are unencrypted by necessity. The server learns that a message is a vote
+or a close marker, which poll it belongs to, who sent it and when. It never learns the question, the
+options or the chosen answer: those live only in the sealed payload. Anonymity of votes is a
+client-side presentation choice only; every control message is signed by its sender's chain key.
+
+### 4.7 Typed plaintext payloads (polls, votes, locations)
+
+The plaintext half of the poll control messages of §4.6. Like attachment keys (§4.5), these live **inside** the sealed plaintext: no change to the envelope,
+ratchet, AAD or grants, nothing for `npm run interop` to check, and the server never parses them.
+
+A plain text message keeps the original shape, `{"text": ..., "attachmentKeys": [...]}`. A typed
+payload adds `v` (currently `1`) and `type`, one body object named after the type, and a `text`
+fallback (and an empty `attachmentKeys`) so an older client shows a readable line instead of JSON:
+
+| `type` | Body | Limits |
+|---|---|---|
+| `poll` | `poll: {question, options[], multiple, anonymous, closes_at?}` | question 1-300 chars; 2-10 options of 1-100 chars; `multiple`/`anonymous` booleans; `closes_at` ISO-8601 or null |
+| `poll_vote` | `poll_vote: {poll_id, options[]}` | `poll_id` 24-hex ObjectId of the poll message; 1-10 distinct integer indices in 0-9 (exactly one unless the poll is `multiple`) |
+| `poll_close` | `poll_close: {poll_id}` | as above |
+| `location` | `location: {lat, lon, accuracy?, label?}` | finite numbers rounded to 6 decimals (about 0.1 m), lat in [-90, 90], lon in [-180, 180]; accuracy >= 0; label clamped to 100 chars |
+
+**Control messages.** `poll_vote` and `poll_close` are sent with the server-visible `is_control: true`
+and `poll_message_id` (the poll they refer to). The server uses these only to keep them out of
+history, unread counts and previews, and to list them per poll; it cannot read them. Everything
+else is the client's job, and a vote counts only if all of these hold:
+
+- it decrypted and its signature verified (an unreadable or unverified control message is ignored);
+- `poll_message_id` and the sealed `poll_id` both equal the poll being tallied. The first is
+  unauthenticated metadata, the second is signed; requiring both stops a vote being replayed into
+  another poll by whoever controls either field;
+- its id is greater than the poll's (ObjectIds are chronological), and the sender is a current member;
+- for a single-choice poll it names exactly one option; an invalid vote is skipped and never erases
+  an earlier valid one.
+
+Per voter the latest valid vote by message id replaces earlier ones. Only the poll's author can
+close: the earliest valid `poll_close` from the author wins, and votes after it (or created after
+`closes_at`) are ignored. If the poll message is deleted its votes are ignored.
+
+**Edit and delete.** The server lets a poll's author re-seal the poll message (`PUT`), which can
+change the question or options under existing votes; the UI never offers it. A client that finds the
+poll message edited counts only votes created at or after `edited_at` and says so on the card. Deleting
+the poll deletes its control messages; deleting an individual vote or close is refused by the server
+(`409 CONTROL_MESSAGE_NOT_ALLOWED`). Votes are capped server-side per (poll, sender), so changing one's
+mind has a limit, and a control message's ciphertext is capped (4 KB).
+
+**What a tally is worth.** It is computed by each client from the list of control messages the server
+returns, in the order of the server's ObjectIds. Each message is authenticated (signed by its sender's
+chain, whose owner is bound at distribution ingest), so the server cannot forge a vote or change who
+cast it. It *can* omit votes, delay them, or order them: dropping a voter's newest vote makes an
+older one stand, and dropping a close lets a poll appear open. A malicious server can therefore bias a
+result, and different members can in principle be shown different results. Clients show a warning when
+the list is truncated or votes could not be read, but cannot detect omission. A member who leaves or is
+removed stops counting: their votes disappear from the tally once they are not in the roster.
+
+**Receive-side strictness.** The same validators run on send and on receipt. A payload whose `type`
+is unknown, whose `v` is newer than understood, whose body is malformed, oversized or contains
+`NaN`/out-of-range numbers, or which is misplaced (a vote that is not a control message, or a
+control message that is not a vote or close) is shown as an *unsupported message*, never as text and
+never counted. Optional labels are clamped rather than rejected.
+
+**Anonymous polls are anonymous in the interface only.** The server sees who sent every vote (it is
+a message from a known account to a known poll), every message is signed with the sender's chain key
+so a vote is cryptographically attributable to its sender, and any member's client can decrypt it.
+`anonymous: true` makes an honest client omit voter identities from the tally and the export; the
+server knows who voted, and other members' browsers can read it too. The interface merely hides it.
+The UI says exactly this next to the "Anonymous" label. Real anonymity would need blind signatures
+or ring signatures over a channel unlinked from the sender, which this protocol does not have.
+
 ---
 
 ## 5. Key epochs and grants

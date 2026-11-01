@@ -415,7 +415,8 @@ async def enrich_chats_with_mongo_data(
         unread_branches.append({"case": is_unread, "then": 1})
 
     pipeline = [
-        {"$match": {"chat_id": {"$in": chat_ids}}},
+        # Poll control messages (votes) are neither unread nor a chat preview.
+        {"$match": {"chat_id": {"$in": chat_ids}, "is_control": {"$ne": True}}},
         {"$sort": {"_id": -1}},
         {
             "$group": {

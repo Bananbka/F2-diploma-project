@@ -53,7 +53,7 @@
                 <span class="quote-author">{{ quotedAuthor() }}</span>
                 <span
                     class="quote-text"
-                    [innerHTML]="quoted.text ?? 'Unreadable message' | twemoji"
+                    [innerHTML]="quotePreview(quoted) | twemoji"
                 ></span>
             </button>
         } @else {
@@ -89,13 +89,34 @@
 
         <div class="content">
             @if (!isStickerOnly()) {
-                @if (message().text !== null) {
-                    <p
-                        class="text"
-                        [innerHTML]="message().text | twemoji"
-                    ></p>
-                } @else {
-                    <p class="text is-placeholder">{{ view().placeholder }}</p>
+                @switch (contentKind()) {
+                    @case ('poll') {
+                        <app-poll-card [message]="message()" />
+                    }
+                    @case ('location') {
+                        @if (locationContent(); as place) {
+                            <app-location-card
+                                [location]="place"
+                                [interactive]="!selecting()"
+                            />
+                        }
+                    }
+                    @case ('unsupported') {
+                        <!-- A structured message we cannot or will not interpret. Never rendered as
+                             text, and not hidden either: the reader should know something was here. -->
+                        <p class="text is-placeholder">Unsupported message</p>
+                        <p class="detail">{{ unsupportedDetail() }}</p>
+                    }
+                    @default {
+                        @if (message().text !== null) {
+                            <p
+                                class="text"
+                                [innerHTML]="message().text | twemoji"
+                            ></p>
+                        } @else {
+                            <p class="text is-placeholder">{{ view().placeholder }}</p>
+                        }
+                    }
                 }
             }
 

@@ -1,0 +1,105 @@
+<div
+    class="backdrop"
+    (click)="closed.emit()"
+></div>
+<div
+    class="dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Share location"
+>
+    <div class="head">
+        <h2>Share location</h2>
+        <button
+            type="button"
+            class="close"
+            aria-label="Close"
+            (click)="closed.emit()"
+        >
+            <lucide-icon [img]="closeIcon" />
+        </button>
+    </div>
+
+    <p class="muted">
+        Your browser will ask for permission. Your position is sent once, end-to-end encrypted, to this chat's members.
+        It is not tracked or updated afterwards.
+    </p>
+
+    @if (blockedReason(); as reason) {
+        <p
+            class="error"
+            role="alert"
+        >
+            {{ reason }}
+        </p>
+    }
+
+    @if (error(); as message) {
+        <p
+            class="error"
+            role="alert"
+        >
+            {{ message }}
+        </p>
+    }
+
+    @if (phase() === 'ready' && coordinates(); as coords) {
+        <div
+            class="preview"
+            aria-live="polite"
+        >
+            <lucide-icon [img]="pinIcon" />
+            <div>
+                <p class="coords">{{ coords }}</p>
+                @if (fix()!.accuracy !== null) {
+                    <p class="muted">Accurate to about {{ fix()!.accuracy!.toFixed(0) }} m</p>
+                }
+            </div>
+        </div>
+
+        <label class="field">
+            <span>Label (optional)</span>
+            <input
+                type="text"
+                [attr.maxlength]="labelMax"
+                [value]="label()"
+                (input)="label.set($any($event.target).value)"
+            />
+        </label>
+    }
+
+    <div class="actions">
+        @if (phase() === 'ready') {
+            <button
+                type="button"
+                class="btn"
+                (click)="locate()"
+            >
+                Locate again
+            </button>
+            <button
+                type="button"
+                class="btn is-primary"
+                [disabled]="!canSend()"
+                (click)="send()"
+            >
+                Send
+            </button>
+        } @else {
+            <button
+                type="button"
+                class="btn is-primary"
+                [disabled]="phase() === 'locating'"
+                (click)="locate()"
+            >
+                {{
+                    phase() === 'locating'
+                        ? 'Finding your position…'
+                        : phase() === 'error'
+                          ? 'Try again'
+                          : 'Use my current location'
+                }}
+            </button>
+        }
+    </div>
+</div>

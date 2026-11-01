@@ -134,8 +134,14 @@ export class KeyStoreService {
     private readonly ownChains = new Map<string, OwnChain>();
     /** (chatId, epoch, senderKeyId) -> receiving chain */
     private readonly peerChains = new Map<string, ReceiverChain>();
-    /** senderKeyId -> the chain's Ed25519 public key, for verifying message signatures */
+    /** (chatId, epoch, senderKeyId) -> the chain's Ed25519 public key, for verifying message signatures */
     private readonly chainSigningKeys = new Map<string, Uint8Array>();
+    /**
+     * (chatId, epoch, senderKeyId) -> the user who owns that chain, as proven at distribution ingest (their identity
+     * key vouched for it). A message's claimed `sender_id` must equal this: the envelope AAD binds
+     * the sender id, but whoever holds a chain can seal a message claiming to be someone else.
+     */
+    private readonly chainOwners = new Map<string, string>();
 
     readonly isUnlocked = signal(false);
 
@@ -400,6 +406,7 @@ export class KeyStoreService {
         this.ownChains.clear();
         this.peerChains.clear();
         this.chainSigningKeys.clear();
+        this.chainOwners.clear();
         this.isUnlocked.set(false);
         // Persisted skipped keys go with the KEK that wraps them: lock, logout, password reset and
         // account deletion all land here.
@@ -623,7 +630,7 @@ export class KeyStoreService {
         };
 
         this.ownChains.set(cacheKey, own);
-        this.chainSigningKeys.set(senderKeyId, chainIdentity.signingPublic);
+        this.registerChain(chatId, epoch, senderKeyId, identity.userId, chainIdentity.signingPublic);
         return own;
     }
 
@@ -640,6 +647,20 @@ export class KeyStoreService {
         for (const dist of distributions) {
             const cacheKey = `${chatId}:${dist.epoch}:${dist.sender_key_id}`;
             if (this.peerChains.has(cacheKey) || !dist.grant) {
+                continue;
+            }
+
+            // First registration wins. A slot already bound to a different owner or signing key is
+            // not overwritten: the later distribution is rejected for that slot.
+            if (
+                !this.chainSlotAccepts(
+                    chatId,
+                    dist.epoch,
+                    dist.sender_key_id,
+                    dist.sender_user_id,
+                    dist.signing_public_key
+                )
+            ) {
                 continue;
             }
 
@@ -690,7 +711,15 @@ export class KeyStoreService {
                 }
 
                 this.peerChains.set(cacheKey, chain);
-                this.chainSigningKeys.set(dist.sender_key_id, b64uDecode(dist.signing_public_key));
+                // `senderKey` was fetched for exactly `dist.sender_user_id` and passed the identity
+                // binding check above, so this owner is the one the sender's own key vouches for.
+                this.registerChain(
+                    chatId,
+                    dist.epoch,
+                    dist.sender_key_id,
+                    dist.sender_user_id,
+                    b64uDecode(dist.signing_public_key)
+                );
             } catch {
                 // Neither private half opened it: a grant wrapped to a prekey we have since
                 // rotated away from with no fallback path, or one whose ciphertext genuinely does
@@ -835,7 +864,55 @@ export class KeyStoreService {
         return this.peerChains.get(`${chatId}:${epoch}:${senderKeyId}`);
     }
 
-    getChainSigningKey(senderKeyId: string): Uint8Array | undefined {
-        return this.chainSigningKeys.get(senderKeyId);
+    getChainSigningKey(chatId: string, epoch: number, senderKeyId: string): Uint8Array | undefined {
+        return this.chainSigningKeys.get(`${chatId}:${epoch}:${senderKeyId}`);
+    }
+
+    /** The user a sender chain belongs to, or undefined for a chain we have not ingested. */
+    getChainOwner(chatId: string, epoch: number, senderKeyId: string): string | undefined {
+        return this.chainOwners.get(`${chatId}:${epoch}:${senderKeyId}`);
+    }
+
+    /**
+     * Bind a chain slot to its owner and signing key, once. Keyed by chat and epoch as well as the
+     * sender key id, so the same id presented in another chat or epoch (or by another sender) can
+     * neither overwrite nor be confused with the genuine entry.
+     */
+    private registerChain(
+        chatId: string,
+        epoch: number,
+        senderKeyId: string,
+        ownerId: string,
+        signingPublic: Uint8Array
+    ): void {
+        const slot = `${chatId}:${epoch}:${senderKeyId}`;
+        if (this.chainOwners.has(slot)) {
+            return;
+        }
+        this.chainOwners.set(slot, ownerId);
+        this.chainSigningKeys.set(slot, signingPublic);
+    }
+
+    /** True when the slot is free, or already bound to exactly this owner and signing key. */
+    private chainSlotAccepts(
+        chatId: string,
+        epoch: number,
+        senderKeyId: string,
+        ownerId: string,
+        signingPublicB64: string
+    ): boolean {
+        const slot = `${chatId}:${epoch}:${senderKeyId}`;
+        const owner = this.chainOwners.get(slot);
+        if (owner === undefined) {
+            return true;
+        }
+        const key = this.chainSigningKeys.get(slot);
+        const offered = b64uDecode(signingPublicB64);
+        return (
+            owner === ownerId &&
+            key !== undefined &&
+            key.length === offered.length &&
+            key.every((byte, index) => byte === offered[index])
+        );
     }
 }

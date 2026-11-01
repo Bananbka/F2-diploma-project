@@ -1,5 +1,7 @@
-﻿from fastapi import APIRouter, Depends, Response
-from fastapi import Path
+﻿import uuid
+
+from fastapi import APIRouter, Depends, Response
+from fastapi import Path, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from sqlalchemy.ext.asyncio import AsyncSession
 from loguru import logger
@@ -42,6 +44,11 @@ MESSAGE_WRITE_LIMIT = 300
 REACTION_WRITE_WINDOW = 60
 REACTION_WRITE_LIMIT = 600
 PIN_WRITE_WINDOW = 60
+
+# Reading a poll's votes is a per-user read like a directory lookup: cheap, but a loop over a
+# 200-row page should not be free.
+POLL_VOTES_READ_WINDOW = 60
+POLL_VOTES_READ_LIMIT = 120
 PIN_WRITE_LIMIT = 60
 
 
@@ -109,6 +116,35 @@ async def create_message(
     await _broadcast(publisher, db, WSEventType.NEW_MESSAGE, new_msg, user.id)
 
     return SuccessResponse(data=new_msg)
+
+
+@router.get(
+    "/{chat_id}/polls/{poll_message_id}/votes",
+    response_model=SuccessResponse[list[MessageResponse]],
+)
+async def get_poll_votes(
+        chat_id: uuid.UUID = Path(..., description="Chat ID"),
+        poll_message_id: str = Path(..., description="Poll message ID"),
+        limit: int = Query(100, ge=1, le=200),
+        before: str | None = Query(None, description="_id of the oldest control message loaded."),
+        user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_db), mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
+        redis: Redis = Depends(get_redis),
+):
+    """Sealed vote / close messages of one poll, newest first. Clients decrypt and tally."""
+    await enforce_rate_limit(
+        redis,
+        scope="poll-votes-read",
+        identifier=str(user.id),
+        limit=POLL_VOTES_READ_LIMIT,
+        window_seconds=POLL_VOTES_READ_WINDOW,
+        message="You are loading poll votes too quickly. Please slow down.",
+    )
+
+    votes = await messages_service.get_poll_votes(
+        db, mongo_db, user.id, chat_id, poll_message_id, limit, before
+    )
+    return SuccessResponse(data=votes)
 
 
 @router.put("/{message_id}", response_model=SuccessResponse[MessageResponse])

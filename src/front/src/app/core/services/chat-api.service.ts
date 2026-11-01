@@ -125,7 +125,8 @@ export class ChatApiService {
         replyTo?: string,
         attachments?: MessageAttachment[],
         forwardedFrom?: ForwardOrigin,
-        clientMessageId?: string
+        clientMessageId?: string,
+        control?: { pollMessageId: string }
     ): Observable<MessageResponse> {
         return this.http
             .post<SuccessResponse<MessageResponse>>(this.messagesCollectionUrl, {
@@ -135,6 +136,8 @@ export class ChatApiService {
                 reply_to_message_id: replyTo ?? null,
                 attachments: attachments?.length ? attachments : null,
                 forwarded_from: forwardedFrom ?? null,
+                // Present only for a vote/close, so ordinary sends keep their exact body.
+                ...(control ? { is_control: true, poll_message_id: control.pollMessageId } : {}),
             })
             .pipe(map((r) => r.data));
     }
@@ -163,6 +166,23 @@ export class ChatApiService {
     /** Where the batched attachment-fetch endpoint lives — see `AttachmentBatchService`. */
     attachmentsBatchUrl(): string {
         return `${this.configService.apiUrl}files/attachments/batch`;
+    }
+
+    /**
+     * Control messages (votes, closes) of one poll, newest first. The server returns them sealed;
+     * the client decrypts and tallies. `before` is the oldest id already loaded.
+     */
+    getPollVotes(chatId: string, pollMessageId: string, limit = 100, before?: string): Observable<MessageResponse[]> {
+        let params = new HttpParams().set('limit', limit);
+        if (before) {
+            params = params.set('before', before);
+        }
+
+        return this.http
+            .get<SuccessResponse<MessageResponse[]>>(`${this.messagesUrl}${chatId}/polls/${pollMessageId}/votes`, {
+                params,
+            })
+            .pipe(map((r) => r.data));
     }
 
     /** Send a signed broadcast post. Channels are authenticated but not confidential. */

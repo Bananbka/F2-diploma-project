@@ -1,5 +1,6 @@
 ﻿import datetime
 import enum
+import re
 import uuid
 from typing import Literal
 
@@ -217,6 +218,11 @@ class MessageDocument(BaseModel):
     is_edited: bool = False
     edited_at: datetime.datetime | None = None
 
+    # Poll control message (vote / close). The payload stays sealed; only the fact that this is a
+    # control message and which poll it belongs to are visible to the server. See crypto-spec-v1.
+    is_control: bool = False
+    poll_message_id: str | None = None
+
     created_at: datetime.datetime
 
 
@@ -247,6 +253,9 @@ class MessageResponse(BaseModel):
     pinned_by: uuid.UUID | None = None
     is_edited: bool = False
     edited_at: datetime.datetime | None = None
+
+    is_control: bool = False
+    poll_message_id: str | None = None
 
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
@@ -289,6 +298,27 @@ class MessageCreateRequest(BaseModel):
     # can attribute the copy; the server has no way to confirm it and does not pretend to.
     forwarded_from: ForwardOrigin | None = None
     attachments: list[Attachment] | None = Field(default=None, max_length=10)
+
+    # Poll control message (vote / close): sealed like any other message, but flagged so the server
+    # can keep it out of unread counts, previews and the history listing. `poll_message_id` is
+    # required exactly when `is_control` is true.
+    is_control: bool = False
+    poll_message_id: str | None = Field(None, max_length=24)
+
+    @model_validator(mode="after")
+    def check_control_fields(self):
+        if self.is_control:
+            if self.poll_message_id is None:
+                raise ValueError("'poll_message_id' is required when 'is_control' is true")
+            if not re.fullmatch(r"[0-9a-f]{24}", self.poll_message_id):
+                raise ValueError("'poll_message_id' must be a 24-character hex ObjectId")
+            if self.reply_to_message_id or self.forwarded_from or self.attachments:
+                raise ValueError(
+                    "a control message cannot carry a reply, a forward or attachments"
+                )
+        elif self.poll_message_id is not None:
+            raise ValueError("'poll_message_id' is only allowed when 'is_control' is true")
+        return self
 
     @model_validator(mode="after")
     def check_exactly_one_content(self):
