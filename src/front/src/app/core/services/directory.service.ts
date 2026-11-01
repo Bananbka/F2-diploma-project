@@ -54,7 +54,7 @@ export class DirectoryService {
                 userId: me.id,
                 name: me.full_name,
                 username: me.username,
-                avatarUrl: me.avatar,
+                avatarUrl: me.avatar_url,
                 resolved: true,
             });
         }

@@ -62,13 +62,13 @@
             <button
                 type="button"
                 class="head-button"
-                [class.is-active]="panelOpen()"
-                [attr.aria-pressed]="panelOpen()"
-                [attr.aria-label]="panelOpen() ? 'Close side panel' : 'Open side panel'"
-                [title]="panelOpen() ? 'Close side panel' : 'Open side panel'"
-                (click)="togglePanel()"
+                [class.is-active]="profileOpen()"
+                [attr.aria-pressed]="profileOpen()"
+                aria-label="Chat info"
+                title="Chat info"
+                (click)="toggleProfile()"
             >
-                <lucide-icon [img]="panelOpen() ? panelCloseIcon : panelIcon" />
+                <lucide-icon [img]="infoIcon" />
             </button>
         </div>
     </header>

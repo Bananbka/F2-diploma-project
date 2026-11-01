@@ -6,127 +6,140 @@
     ></div>
 }
 
-<aside
-    class="panel"
-    aria-label="Conversation panel"
+<app-resizable-panel
+    storageKey="chat-panel"
+    edge="left"
+    label="Resize panel"
+    [minWidth]="288"
+    [maxWidth]="576"
+    [defaultWidth]="352"
+    [disabled]="overlay()"
 >
-    <div class="bar">
-        <div
-            class="tabs"
-            role="tablist"
-            aria-label="Conversation panel sections"
-        >
-            @for (view of tabs; track view.id) {
-                <button
-                    type="button"
-                    role="tab"
-                    class="tab"
-                    [id]="'chat-panel-tab-' + view.id"
-                    [class.is-active]="tab() === view.id"
-                    [attr.aria-selected]="tab() === view.id"
-                    [attr.aria-controls]="'chat-panel-body-' + view.id"
-                    [attr.tabindex]="tab() === view.id ? 0 : -1"
-                    (click)="selectTab(view.id)"
-                    (keydown)="onTabKeydown($event)"
+    <aside
+        class="panel"
+        [attr.aria-label]="view() === 'profile' ? 'Chat info' : 'Emoji and stickers'"
+    >
+        <div class="bar">
+            @if (view() === 'picker') {
+                <div
+                    class="tabs"
+                    role="tablist"
+                    aria-label="Emoji and stickers"
                 >
-                    <lucide-icon [img]="view.icon" />
-                    {{ view.label }}
-                </button>
+                    @for (item of tabs; track item.id) {
+                        <button
+                            type="button"
+                            role="tab"
+                            class="tab"
+                            [id]="'chat-panel-tab-' + item.id"
+                            [class.is-active]="tab() === item.id"
+                            [attr.aria-selected]="tab() === item.id"
+                            [attr.aria-controls]="'chat-panel-body-' + item.id"
+                            [attr.tabindex]="tab() === item.id ? 0 : -1"
+                            (click)="selectTab(item.id)"
+                            (keydown)="onTabKeydown($event)"
+                        >
+                            <lucide-icon [img]="item.icon" />
+                            {{ item.label }}
+                        </button>
+                    }
+                </div>
+            } @else {
+                <h2 class="title">Chat info</h2>
+            }
+            <button
+                type="button"
+                class="close"
+                aria-label="Close panel"
+                title="Close panel"
+                (click)="close()"
+            >
+                <lucide-icon [img]="closeIcon" />
+            </button>
+        </div>
+
+        <div
+            id="chat-panel-body-profile"
+            class="body"
+            [hidden]="view() !== 'profile'"
+        >
+            @if (visited().has('profile')) {
+                <app-chat-info
+                    [chatId]="chatId()"
+                    [embedded]="true"
+                />
             }
         </div>
-        <button
-            type="button"
-            class="close"
-            aria-label="Close panel"
-            title="Close panel"
-            (click)="close()"
+
+        <div
+            id="chat-panel-body-emoji"
+            class="body is-flush"
+            role="tabpanel"
+            aria-labelledby="chat-panel-tab-emoji"
+            [hidden]="view() !== 'picker' || tab() !== 'emoji'"
         >
-            <lucide-icon [img]="closeIcon" />
-        </button>
-    </div>
-
-    <div
-        id="chat-panel-body-profile"
-        class="body"
-        role="tabpanel"
-        aria-labelledby="chat-panel-tab-profile"
-        [hidden]="tab() !== 'profile'"
-    >
-        @if (visited().has('profile')) {
-            <app-chat-info
-                [chatId]="chatId()"
-                [embedded]="true"
-            />
-        }
-    </div>
-
-    <div
-        id="chat-panel-body-stickers"
-        class="body is-flush"
-        role="tabpanel"
-        aria-labelledby="chat-panel-tab-stickers"
-        [hidden]="tab() !== 'stickers'"
-    >
-        @if (visited().has('stickers')) {
-            @if (unavailableReason(); as reason) {
-                <p
-                    class="note"
-                    role="status"
+            @if (visited().has('emoji')) {
+                @if (unavailableReason(); as reason) {
+                    <p
+                        class="note"
+                        role="status"
+                    >
+                        {{ reason }}
+                    </p>
+                } @else if (refused()) {
+                    <p
+                        class="note"
+                        role="status"
+                    >
+                        The composer could not accept that right now.
+                    </p>
+                }
+                <fieldset
+                    class="locked"
+                    [disabled]="unavailableReason() !== null"
                 >
-                    {{ reason }}
-                </p>
-            } @else if (refused()) {
-                <p
-                    class="note"
-                    role="status"
-                >
-                    The composer could not accept that right now.
-                </p>
+                    <app-emoji-picker
+                        [embedded]="true"
+                        [recents]="recentEmoji()"
+                        (pick)="onEmojiPicked($event)"
+                    />
+                </fieldset>
             }
-            <fieldset
-                class="locked"
-                [disabled]="unavailableReason() !== null"
-            >
-                <app-sticker-picker
-                    [embedded]="true"
-                    (stickerPicked)="onStickerPicked($event)"
-                />
-            </fieldset>
-        }
-    </div>
+        </div>
 
-    <div
-        id="chat-panel-body-emoji"
-        class="body is-flush"
-        role="tabpanel"
-        aria-labelledby="chat-panel-tab-emoji"
-        [hidden]="tab() !== 'emoji'"
-    >
-        @if (visited().has('emoji')) {
-            @if (unavailableReason(); as reason) {
-                <p
-                    class="note"
-                    role="status"
+        <div
+            id="chat-panel-body-stickers"
+            class="body is-flush"
+            role="tabpanel"
+            aria-labelledby="chat-panel-tab-stickers"
+            [hidden]="view() !== 'picker' || tab() !== 'stickers'"
+        >
+            @if (visited().has('stickers')) {
+                @if (unavailableReason(); as reason) {
+                    <p
+                        class="note"
+                        role="status"
+                    >
+                        {{ reason }}
+                    </p>
+                } @else if (refused()) {
+                    <p
+                        class="note"
+                        role="status"
+                    >
+                        The composer could not accept that right now.
+                    </p>
+                }
+                <fieldset
+                    class="locked"
+                    [disabled]="unavailableReason() !== null"
                 >
-                    {{ reason }}
-                </p>
-            } @else if (refused()) {
-                <p
-                    class="note"
-                    role="status"
-                >
-                    The composer could not accept that right now.
-                </p>
+                    <app-sticker-picker
+                        [recentIds]="recentStickerIds()"
+                        (stickerPicked)="onStickerPicked($event)"
+                    />
+                </fieldset>
             }
-            <fieldset
-                class="locked"
-                [disabled]="unavailableReason() !== null"
-            >
-                <app-emoji-picker
-                    [embedded]="true"
-                    (pick)="onEmojiPicked($event)"
-                />
-            </fieldset>
-        }
-    </div>
-</aside>
+        </div>
+    </aside>
+</app-resizable-panel>

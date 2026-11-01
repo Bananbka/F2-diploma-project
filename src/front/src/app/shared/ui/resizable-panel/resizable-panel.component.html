@@ -3,7 +3,15 @@
 @if (!disabled()) {
     <div
         class="handle"
+        role="separator"
+        aria-orientation="vertical"
+        tabindex="0"
         [class.is-dragging]="isDragging()"
+        [attr.aria-label]="label()"
+        [attr.aria-valuenow]="width()"
+        [attr.aria-valuemin]="minWidth()"
+        [attr.aria-valuemax]="maxWidth()"
         (pointerdown)="onHandlePointerDown($event)"
+        (keydown)="onHandleKeydown($event)"
     ></div>
 }

@@ -1,11 +1,14 @@
+import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 
 import { DirectoryService } from '../../../core/services/directory.service';
 import { KeyStoreService } from '../../../core/services/key-store.service';
+import { SessionService } from '../../../core/services/session.service';
 import { TrustStoreService } from '../../../core/services/trust-store.service';
 import { SafetyNumberComponent } from './safety-number.component';
 
 const CHAT = 'a0000000-0000-4000-8000-000000000001';
+const ME = 'a1111111-0000-4000-8000-000000000009';
 const PEER = 'bbbbbbbb-0000-4000-8000-000000000002';
 const NUMBER_A = '04672 91834 52017 73649 18293 64751 39082 57164 82031 46918 73052 19374';
 const NUMBER_B = '11111 22222 33333 44444 55555 66666 77777 88888 99999 00000 12345 67890';
@@ -48,6 +51,7 @@ describe('SafetyNumberComponent', () => {
             providers: [
                 { provide: KeyStoreService, useValue: keyStore },
                 { provide: DirectoryService, useValue: directory },
+                { provide: SessionService, useValue: { user: signal({ id: ME }) } },
             ],
         }).compileComponents();
 
@@ -77,7 +81,7 @@ describe('SafetyNumberComponent', () => {
      * must not re-trust the new key on its own.
      */
     it("raises a loud alarm when a verified peer's number changes", async () => {
-        trust.markVerified(PEER, NUMBER_B);
+        trust.markVerified(ME, PEER, NUMBER_B);
 
         const host = await render(NUMBER_A);
 
@@ -89,11 +93,29 @@ describe('SafetyNumberComponent', () => {
     });
 
     it('confirms a peer whose number is unchanged since verification', async () => {
-        trust.markVerified(PEER, NUMBER_A);
+        trust.markVerified(ME, PEER, NUMBER_A);
 
         const host = await render(NUMBER_A);
 
         expect(fixture.componentInstance.state()?.kind).toBe('verified');
         expect(host.textContent).toContain('Verified');
+    });
+
+    it('does not alarm for the same peer when I am signed in as a different account of mine', async () => {
+        // Verified under another of my accounts; this account has never compared with this peer.
+        trust.markVerified('a2222222-0000-4000-8000-000000000008', PEER, NUMBER_B);
+
+        const host = await render(NUMBER_A);
+
+        expect(fixture.componentInstance.state()?.kind).toBe('unverified');
+        expect(host.querySelector('[role="alert"]')).toBeNull();
+    });
+
+    it('names both keys as possible causes in the alarm', async () => {
+        trust.markVerified(ME, PEER, NUMBER_B);
+
+        const host = await render(NUMBER_A);
+
+        expect(host.querySelector('.alarm-note')?.textContent).toContain('your own keys change');
     });
 });

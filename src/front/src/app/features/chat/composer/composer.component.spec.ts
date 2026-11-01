@@ -161,12 +161,12 @@ describe('ComposerComponent', () => {
      * a test rather than shipping silently.
      */
     describe('editing() guards every composer trigger — see CLAUDE.md "Lessons"', () => {
-        it('disables the sticker-tray trigger while editing', () => {
+        it('disables the smiley (emoji and stickers) trigger while editing', () => {
             const host = create();
             fixture.componentRef.setInput('editing', true);
             fixture.detectChanges();
 
-            const trigger = host.querySelector<HTMLButtonElement>('.sticker-trigger');
+            const trigger = host.querySelector<HTMLButtonElement>('.emoji-trigger');
             expect(trigger?.disabled).toBe(true);
         });
 
@@ -188,7 +188,7 @@ describe('ComposerComponent', () => {
             expect(trigger?.disabled).toBe(true);
         });
 
-        it('onStickerPicked() is a no-op while editing, even if called directly (defense in depth behind the disabled button)', () => {
+        it('sendSticker() is a no-op while editing, even if called directly (defense in depth behind the disabled button)', () => {
             create();
             fixture.componentRef.setInput('editing', true);
             fixture.detectChanges();
@@ -196,7 +196,7 @@ describe('ComposerComponent', () => {
             const spy = jasmine.createSpy('submitted');
             fixture.componentInstance.submitted.subscribe(spy);
 
-            fixture.componentInstance.onStickerPicked({
+            fixture.componentInstance.sendSticker({
                 id: 's1',
                 pack_id: 'pack',
                 image_url: 'https://files.test/s.webp',
@@ -207,7 +207,7 @@ describe('ComposerComponent', () => {
             expect(spy).not.toHaveBeenCalled();
         });
 
-        it('onStickerPicked() is a no-op while sending is blocked', () => {
+        it('sendSticker() is a no-op while sending is blocked', () => {
             create();
             fixture.componentRef.setInput('canSend', false);
             fixture.detectChanges();
@@ -215,7 +215,7 @@ describe('ComposerComponent', () => {
             const spy = jasmine.createSpy('submitted');
             fixture.componentInstance.submitted.subscribe(spy);
 
-            fixture.componentInstance.onStickerPicked({
+            fixture.componentInstance.sendSticker({
                 id: 's1',
                 pack_id: 'pack',
                 image_url: 'https://files.test/s.webp',
@@ -335,6 +335,118 @@ describe('ComposerComponent', () => {
         });
     });
 
+    describe('row layout', () => {
+        let panel: ChatPanelStoreService;
+
+        beforeEach(() => {
+            localStorage.removeItem('chat-panel-open');
+            panel = TestBed.inject(ChatPanelStoreService);
+            panel.close();
+        });
+
+        afterEach(() => localStorage.removeItem('chat-panel-open'));
+
+        function rowOrder(host: HTMLElement): string[] {
+            return Array.from(host.querySelector('.row')!.children).map((el) => {
+                if (el.classList.contains('input')) {
+                    return 'input';
+                }
+                if (el.classList.contains('emoji-trigger')) {
+                    return 'emoji';
+                }
+                if (el.classList.contains('mic-trigger')) {
+                    return 'mic';
+                }
+                if (el.classList.contains('send')) {
+                    return 'send';
+                }
+                return 'attach';
+            });
+        }
+
+        it('is attach, input, smiley, then the mic when there is nothing to send', () => {
+            const host = create();
+
+            expect(rowOrder(host)).toEqual(['attach', 'input', 'emoji', 'mic']);
+        });
+
+        it('swaps the mic for Send in the same slot once there is text', () => {
+            const host = create();
+            fixture.componentInstance.text.set('hi');
+            fixture.detectChanges();
+
+            expect(rowOrder(host)).toEqual(['attach', 'input', 'emoji', 'send']);
+            expect(host.querySelector('.mic-trigger')).toBeNull();
+        });
+
+        it('also shows Send when only an attachment is staged', () => {
+            const host = create();
+            fixture.componentInstance.staged.set([{ file: { ...uploaded(), kind: 'file' }, previewUrl: null }]);
+            fixture.detectChanges();
+
+            expect(rowOrder(host)).toEqual(['attach', 'input', 'emoji', 'send']);
+        });
+
+        it('has no separate sticker button and no emoji popover', () => {
+            const host = create();
+
+            expect(host.querySelector('.sticker-trigger')).toBeNull();
+            expect(host.querySelectorAll('.emoji-trigger').length).toBe(1);
+            expect(host.querySelector('app-emoji-picker')).toBeNull();
+            expect(host.querySelector('app-sticker-picker')).toBeNull();
+        });
+
+        it('keeps Send disabled while sending is blocked', () => {
+            const host = create();
+            fixture.componentRef.setInput('canSend', false);
+            fixture.componentInstance.text.set('hi');
+            fixture.detectChanges();
+
+            expect(host.querySelector<HTMLButtonElement>('.send')?.disabled).toBeTrue();
+        });
+
+        it('smiley toggles the panel on the picker and reflects it in aria-pressed', () => {
+            const host = create();
+            const smiley = host.querySelector<HTMLButtonElement>('.emoji-trigger')!;
+            expect(smiley.getAttribute('aria-pressed')).toBe('false');
+            expect(smiley.getAttribute('aria-label')).toBe('Emoji and stickers');
+
+            smiley.click();
+            fixture.detectChanges();
+            expect(panel.open()).toBeTrue();
+            expect(panel.view()).toBe('picker');
+            expect(smiley.getAttribute('aria-pressed')).toBe('true');
+
+            smiley.click();
+            fixture.detectChanges();
+            expect(panel.open()).toBeFalse();
+            expect(smiley.getAttribute('aria-pressed')).toBe('false');
+        });
+
+        it('is not pressed while the panel shows chat info', () => {
+            const host = create();
+            panel.showProfile();
+            fixture.detectChanges();
+
+            expect(host.querySelector('.emoji-trigger')?.getAttribute('aria-pressed')).toBe('false');
+        });
+
+        it('Enter sends and Shift+Enter does not', () => {
+            const host = create();
+            const spy = jasmine.createSpy('submitted');
+            fixture.componentInstance.submitted.subscribe(spy);
+            fixture.componentInstance.text.set('hey');
+            fixture.detectChanges();
+            const box = host.querySelector('textarea')!;
+
+            box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, cancelable: true }));
+            expect(spy).not.toHaveBeenCalled();
+
+            box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }));
+            expect(spy).toHaveBeenCalledTimes(1);
+        });
+    });
+
     describe('emoji insertion', () => {
         const GRIN = '😀';
 
@@ -351,31 +463,17 @@ describe('ComposerComponent', () => {
             fixture.detectChanges();
         }
 
-        function openPicker(host: HTMLElement): void {
-            host.querySelector<HTMLButtonElement>('.emoji-trigger')?.click();
-            fixture.detectChanges();
-        }
-
-        function clickFirstEmoji(host: HTMLElement): void {
-            host.querySelector<HTMLButtonElement>('app-emoji-picker .emoji')?.click();
-            fixture.detectChanges();
-        }
-
-        it('inserts at the caret from the picker and puts the caret after it, focus back on the box', () => {
+        it('inserts at the caret and puts the caret after it, focus back on the box', () => {
             const host = create();
             typeInto(host, 'helloworld', 5);
 
-            openPicker(host);
-            // The picker takes focus away from the box; its caret must survive the round trip.
+            // The panel's picker takes focus away from the box; its caret must survive the round trip.
             (document.activeElement as HTMLElement | null)?.blur();
-            clickFirstEmoji(host);
+            expect(fixture.componentInstance.insertEmoji(GRIN)).toBeTrue();
 
-            const firstEmoji = host
-                .querySelector<HTMLButtonElement>('app-emoji-picker .emoji')
-                ?.getAttribute('aria-label');
-            expect(fixture.componentInstance.text()).toBe(`hello${firstEmoji}world`);
-            expect(area(host).value).toBe(`hello${firstEmoji}world`);
-            expect(area(host).selectionStart).toBe(5 + (firstEmoji?.length ?? 0));
+            expect(fixture.componentInstance.text()).toBe(`hello${GRIN}world`);
+            expect(area(host).value).toBe(`hello${GRIN}world`);
+            expect(area(host).selectionStart).toBe(5 + GRIN.length);
             expect(area(host).selectionEnd).toBe(area(host).selectionStart);
             expect(document.activeElement).toBe(area(host));
         });
@@ -418,9 +516,9 @@ describe('ComposerComponent', () => {
 
                 expect(host.querySelector<HTMLButtonElement>('.emoji-trigger')?.disabled).toBeTrue();
 
-                fixture.componentInstance.toggleEmojiPicker();
+                fixture.componentInstance.togglePicker();
                 fixture.detectChanges();
-                expect(fixture.componentInstance.emojiPickerOpen()).toBeFalse();
+                expect(TestBed.inject(ChatPanelStoreService).open()).toBeFalse();
                 expect(fixture.componentInstance.insertEmoji(GRIN)).toBeFalse();
                 expect(fixture.componentInstance.text()).toBe('');
             });
@@ -445,15 +543,15 @@ describe('ComposerComponent', () => {
                 expect(fixture.componentInstance.text()).toBe('');
             });
 
-            it('closes an open picker when editing begins', () => {
+            it('refuses to open the panel from the smiley while recording', () => {
                 const host = create();
-                openPicker(host);
-                expect(host.querySelector('app-emoji-picker')).not.toBeNull();
-
-                fixture.componentRef.setInput('editing', true);
+                voiceRecorder.recordingState.set('recording');
                 fixture.detectChanges();
 
-                expect(host.querySelector('app-emoji-picker')).toBeNull();
+                // The whole row is replaced by the recording UI, and the guard holds regardless.
+                expect(host.querySelector('.emoji-trigger')).toBeNull();
+                fixture.componentInstance.togglePicker();
+                expect(TestBed.inject(ChatPanelStoreService).open()).toBeFalse();
             });
 
             it('refuses while a voice message is being recorded', () => {

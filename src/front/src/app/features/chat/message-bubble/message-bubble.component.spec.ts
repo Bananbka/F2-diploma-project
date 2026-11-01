@@ -332,4 +332,63 @@ describe('MessageBubbleComponent', () => {
             expect(fixture.componentInstance.pickerOpen()).toBe(true);
         });
     });
+
+    describe('footer is a single row', () => {
+        function footerOf(host: HTMLElement): HTMLElement {
+            return host.querySelector<HTMLElement>('.meta')!;
+        }
+
+        function expectOneFooterRow(host: HTMLElement): void {
+            const footer = footerOf(host);
+            expect(footer.querySelector('.react-trigger')).not.toBeNull();
+            expect(footer.querySelector('.time')).not.toBeNull();
+            expect(footer.querySelector('button.action')).not.toBeNull();
+            // With no reactions there is no separate chip row above it.
+            expect(host.querySelector('.reactions')).toBeNull();
+            expect(host.querySelectorAll('.react-trigger').length).toBe(1);
+        }
+
+        it('puts add-reaction, actions and time in the same row for a text message', () => {
+            expectOneFooterRow(create(buildMessage()));
+        });
+
+        it('does the same for a sticker, image, voice and file message', () => {
+            const kinds: Partial<MessageAttachment>[] = [
+                { kind: 'sticker', content_type: 'image/webp' },
+                { kind: 'image' },
+                { kind: 'audio', content_type: 'audio/webm' },
+                { kind: 'file', content_type: 'application/pdf', name: 'a.pdf' },
+            ];
+            for (const attachment of kinds) {
+                const host = create(buildMessage({ text: '', attachments: [buildAttachment(attachment)] }));
+                expectOneFooterRow(host);
+            }
+        });
+
+        it('keeps the tick in the same row for our own message', () => {
+            (TestBed.inject(DirectoryService).isMe as jasmine.Spy).and.returnValue(true);
+            const host = create(buildMessage({ senderId: 'me' }));
+
+            const footer = footerOf(host);
+            expect(footer.querySelector('.receipt')).not.toBeNull();
+            expect(footer.querySelector('.react-trigger')).not.toBeNull();
+        });
+
+        it('renders chips in their own row only when reactions exist, with the add control still in the footer', () => {
+            const host = create(
+                buildMessage({ reactions: [{ emoji: '👍', user_id: 'u1', created_at: '2024-01-01T00:00:00Z' }] })
+            );
+
+            expect(host.querySelectorAll('.reactions .reaction-pill').length).toBe(1);
+            expect(host.querySelector('.reactions .react-trigger')).toBeNull();
+            expect(footerOf(host).querySelector('.react-trigger')).not.toBeNull();
+        });
+
+        it('keeps the accessible names', () => {
+            const host = create(buildMessage());
+
+            expect(host.querySelector('.react-trigger')?.getAttribute('aria-label')).toBe('Add a reaction');
+            expect(host.querySelector('button.action')?.getAttribute('aria-label')).toBe('Actions for this message');
+        });
+    });
 });

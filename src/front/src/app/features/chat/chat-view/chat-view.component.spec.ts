@@ -262,48 +262,67 @@ describe('ChatViewComponent', () => {
             localStorage.removeItem('chat-panel-open');
             panel = TestBed.inject(ChatPanelStoreService);
             panel.close();
-            panel.selectTab('stickers');
+            panel.showPicker('stickers');
+            panel.close();
         });
 
-        afterEach(() => localStorage.removeItem('chat-panel-open'));
+        afterEach(() => {
+            localStorage.removeItem('chat-panel-open');
+            localStorage.removeItem('chat-panel-view');
+            localStorage.removeItem('chat-panel-picker-tab');
+        });
 
-        function panelButton(host: HTMLElement): HTMLButtonElement {
+        function infoButton(host: HTMLElement): HTMLButtonElement {
             return host.querySelector<HTMLButtonElement>('.head-actions button[aria-pressed]')!;
         }
 
-        it('has a header toggle that opens and closes the panel and reflects its state', () => {
+        it('has a clearly named Chat info toggle that opens the Profile view and reflects its state', () => {
             const host = create();
-            expect(panelButton(host).getAttribute('aria-pressed')).toBe('false');
-            expect(panelButton(host).getAttribute('aria-label')).toBe('Open side panel');
+            expect(infoButton(host).getAttribute('aria-label')).toBe('Chat info');
+            expect(infoButton(host).getAttribute('title')).toBe('Chat info');
+            expect(infoButton(host).getAttribute('aria-pressed')).toBe('false');
 
-            panelButton(host).click();
+            infoButton(host).click();
             fixture.detectChanges();
             expect(panel.open()).toBeTrue();
-            expect(panelButton(host).getAttribute('aria-pressed')).toBe('true');
-            expect(panelButton(host).getAttribute('aria-label')).toBe('Close side panel');
+            expect(panel.view()).toBe('profile');
+            expect(infoButton(host).getAttribute('aria-pressed')).toBe('true');
 
-            panelButton(host).click();
+            infoButton(host).click();
             fixture.detectChanges();
             expect(panel.open()).toBeFalse();
         });
 
-        it('the header identity opens the Profile tab', () => {
+        it('is not pressed while the panel is open on the emoji/sticker picker, and switches rather than closes', () => {
+            const host = create();
+            panel.showPicker('emoji');
+            fixture.detectChanges();
+            expect(infoButton(host).getAttribute('aria-pressed')).toBe('false');
+
+            infoButton(host).click();
+            fixture.detectChanges();
+
+            expect(panel.open()).toBeTrue();
+            expect(panel.view()).toBe('profile');
+        });
+
+        it('the header identity opens the Profile view', () => {
             const host = create();
 
             host.querySelector<HTMLButtonElement>('.identity')?.click();
 
             expect(panel.open()).toBeTrue();
-            expect(panel.tab()).toBe('profile');
+            expect(panel.view()).toBe('profile');
         });
 
-        it('the member-verification banner opens the Profile tab to review members', () => {
+        it('the member-verification banner opens the Profile view to review members', () => {
             store.memberVerificationError.set('member set hash mismatch');
             const host = create();
 
             host.querySelector<HTMLButtonElement>('.alarm-button')?.click();
 
             expect(panel.open()).toBeTrue();
-            expect(panel.tab()).toBe('profile');
+            expect(panel.view()).toBe('profile');
         });
     });
 

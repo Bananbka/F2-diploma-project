@@ -57,7 +57,7 @@ export class ProfileComponent {
     readonly uploading = signal(false);
     readonly saved = signal(false);
     readonly error = signal<string | null>(null);
-    readonly avatarUrl = signal<string | null>(this.session.user()?.avatar ?? null);
+    readonly avatarUrl = signal<string | null>(this.session.user()?.avatar_url ?? null);
 
     readonly devices = signal<DeviceRow[]>([]);
     readonly devicesLoading = signal(true);
@@ -156,7 +156,7 @@ export class ProfileComponent {
         try {
             const updated = await firstValueFrom(this.profileApi.updateProfile(payload));
             // The response omits avatar_url, so keep the locally known value rather than blanking it.
-            this.session.user.set({ ...updated, avatar: this.avatarUrl() ?? updated.avatar });
+            this.session.user.set({ ...updated, avatar_url: this.avatarUrl() ?? updated.avatar_url ?? null });
             this.saved.set(true);
         } catch (error) {
             this.error.set(applyServerErrors(this.form, error) ?? 'Could not save your profile.');

@@ -264,7 +264,7 @@ export class SessionService {
      * public keys under it.
      *
      * `TrustStoreService` is deliberately left alone. It holds public fingerprints of *other* people,
-     * keyed by their user id, so it is no part of this account's data; and forgetting a confirmed
+     * keyed by the (own id, peer id) pair, so it is no part of this account's data; and forgetting a confirmed
      * number costs the only defence against a later key substitution.
      */
     async deleteAccount(password: string): Promise<void> {

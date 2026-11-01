@@ -35,10 +35,13 @@
                 <div>
                     <p class="alarm-title">This safety number has changed</p>
                     <p class="alarm-note">
-                        You marked {{ peer().name }} as verified, and their number is now different. That happens when
-                        they reinstall or add a device — and it is also exactly what it looks like when the server
-                        substitutes a key so it can read your messages. Compare the new number below in person or over a
-                        call you trust before accepting it. Do not accept it because this screen asked you to.
+                        You marked {{ peer().name }} as verified, and the number for this conversation is now different.
+                        That happens when they reinstall or add a device, or when your own keys change — and it is also
+                        exactly what it looks like when the server substitutes a key so it can read your messages. The
+                        number is computed from both of your keys, so it is remembered per account of yours: signing in
+                        as a different account does not trigger this, but re-creating your own keys does. Compare the
+                        new number below in person or over a call you trust before accepting it. Do not accept it
+                        because this screen asked you to.
                     </p>
                 </div>
             </section>
