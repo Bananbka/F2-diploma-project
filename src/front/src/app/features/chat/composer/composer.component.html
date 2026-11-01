@@ -163,61 +163,6 @@
             <span class="sr-only">Attach a file</span>
         </button>
 
-        <div class="sticker-trigger-wrap">
-            <button
-                type="button"
-                class="side emoji-trigger"
-                title="Insert an emoji"
-                aria-haspopup="dialog"
-                [attr.aria-expanded]="emojiPickerOpen()"
-                [disabled]="unavailableReason() !== null"
-                (click)="toggleEmojiPicker()"
-            >
-                <lucide-icon [img]="smileIcon" />
-                <span class="sr-only">Insert an emoji</span>
-            </button>
-
-            @if (emojiPickerOpen() && unavailableReason() === null) {
-                <app-emoji-picker
-                    (pick)="onEmojiPicked($event)"
-                    (closeRequested)="emojiPickerOpen.set(false)"
-                />
-            }
-        </div>
-
-        <div class="sticker-trigger-wrap">
-            <button
-                type="button"
-                class="side sticker-trigger"
-                title="Send a sticker"
-                aria-haspopup="dialog"
-                [attr.aria-expanded]="stickerPickerOpen()"
-                [disabled]="!canSend() || editing()"
-                (click)="toggleStickerPicker()"
-            >
-                <lucide-icon [img]="stickerIcon" />
-                <span class="sr-only">Send a sticker</span>
-            </button>
-
-            @if (stickerPickerOpen()) {
-                <app-sticker-picker
-                    (closeRequested)="stickerPickerOpen.set(false)"
-                    (stickerPicked)="onStickerPicked($event)"
-                />
-            }
-        </div>
-
-        <button
-            type="button"
-            class="side mic-trigger"
-            title="Record a voice message"
-            [disabled]="!canSend() || editing() || startingRecording()"
-            (click)="startRecording()"
-        >
-            <lucide-icon [img]="micIcon" />
-            <span class="sr-only">Record a voice message</span>
-        </button>
-
         <div class="input">
             <textarea
                 #area
@@ -233,12 +178,40 @@
 
         <button
             type="button"
-            class="send"
-            aria-label="Send message"
-            [disabled]="(!text().trim() && staged().length === 0) || !canSend()"
-            (click)="send()"
+            class="side emoji-trigger"
+            title="Emoji and stickers"
+            aria-label="Emoji and stickers"
+            [class.is-active]="pickerOpen()"
+            [attr.aria-pressed]="pickerOpen()"
+            [disabled]="unavailableReason() !== null"
+            (click)="togglePicker()"
         >
-            <lucide-icon [img]="sendIcon" />
+            <lucide-icon [img]="smileIcon" />
         </button>
+
+        <!-- One slot, two occupants, as in Telegram: Send when there is something to send,
+             otherwise the microphone. Both stay guarded by canSend()/editing(). -->
+        @if (hasContent()) {
+            <button
+                type="button"
+                class="send"
+                aria-label="Send message"
+                [disabled]="!canSend()"
+                (click)="send()"
+            >
+                <lucide-icon [img]="sendIcon" />
+            </button>
+        } @else {
+            <button
+                type="button"
+                class="side mic-trigger"
+                title="Record a voice message"
+                [disabled]="!canSend() || editing() || startingRecording()"
+                (click)="startRecording()"
+            >
+                <lucide-icon [img]="micIcon" />
+                <span class="sr-only">Record a voice message</span>
+            </button>
+        }
     </div>
 }

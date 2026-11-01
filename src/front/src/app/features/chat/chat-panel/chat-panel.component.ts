@@ -10,11 +10,13 @@ import {
     signal,
     untracked,
 } from '@angular/core';
-import { LucideAngularModule, Smile, Sticker, User, X } from 'lucide-angular';
+import { LucideAngularModule, Smile, Sticker, X } from 'lucide-angular';
 
 import { Sticker as StickerModel } from '../../../core/models/sticker.model';
-import { CHAT_PANEL_TABS, ChatPanelStoreService, ChatPanelTab } from '../../../core/services/chat-panel-store.service';
+import { ChatPanelStoreService, PICKER_TABS, PickerTab } from '../../../core/services/chat-panel-store.service';
+import { PickerRecentsService } from '../../../core/services/picker-recents.service';
 import { EmojiPickerComponent } from '../../../shared/ui/emoji-picker/emoji-picker.component';
+import { ResizablePanelComponent } from '../../../shared/ui/resizable-panel/resizable-panel.component';
 import { ChatInfoComponent } from '../chat-info/chat-info.component';
 import { StickerPickerComponent } from '../stickers/sticker-picker/sticker-picker.component';
 
@@ -22,29 +24,37 @@ import { StickerPickerComponent } from '../stickers/sticker-picker/sticker-picke
 const OVERLAY_QUERY = '(width < 72rem)';
 
 interface TabView {
-    id: ChatPanelTab;
+    id: PickerTab;
     label: string;
-    icon: typeof User;
+    icon: typeof Smile;
 }
 
 const TAB_VIEWS: readonly TabView[] = [
-    { id: 'profile', label: 'Profile', icon: User },
-    { id: 'stickers', label: 'Stickers', icon: Sticker },
     { id: 'emoji', label: 'Emoji', icon: Smile },
+    { id: 'stickers', label: 'Stickers', icon: Sticker },
 ];
 
 /**
- * The conversation's right-hand panel: profile / chat info, the sticker tray and an emoji grid.
+ * The conversation's right-hand panel. One panel with two views: the emoji/sticker picker (tabs
+ * "Emoji" and "Stickers", opened from the composer's smiley) and the chat info (opened from the
+ * conversation header). Each entry point toggles its own view, so the panel is always showing
+ * exactly what the button that opened it says.
  *
  * Docked beside the conversation on wide screens; a slide-over with a backdrop (closable with
- * Escape) on narrow ones. The sticker and emoji tabs never touch the composer directly: they go
- * through the bridge the live composer registers in `ChatPanelStoreService`, so every guard the
- * composer applies to its own buttons (blocked member set, read-only peer, editing, recording)
- * applies here too, and the tabs are disabled with the reason spelled out when it refuses.
+ * Escape) on narrow ones. The picker never touches the composer directly: it goes through the
+ * bridge the live composer registers in `ChatPanelStoreService`, so every guard the composer
+ * applies (blocked member set, read-only peer, editing, recording) applies here too, and the picker
+ * is disabled with the reason spelled out when it refuses.
  */
 @Component({
     selector: 'app-chat-panel',
-    imports: [LucideAngularModule, ChatInfoComponent, StickerPickerComponent, EmojiPickerComponent],
+    imports: [
+        LucideAngularModule,
+        ChatInfoComponent,
+        StickerPickerComponent,
+        EmojiPickerComponent,
+        ResizablePanelComponent,
+    ],
     templateUrl: './chat-panel.component.html',
     styleUrl: './chat-panel.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
@@ -60,11 +70,16 @@ export class ChatPanelComponent {
 
     readonly chatId = input.required<string>();
 
+    private readonly recents = inject(PickerRecentsService);
+
     readonly tabs = TAB_VIEWS;
-    readonly tab = this.panel.tab;
+    readonly view = this.panel.view;
+    readonly tab = this.panel.pickerTab;
+    readonly recentEmoji = this.recents.emoji;
+    readonly recentStickerIds = this.recents.stickerIds;
     readonly overlay = signal(window.matchMedia(OVERLAY_QUERY).matches);
-    /** Tabs opened at least once. The sticker tray fetches on creation, so build it lazily and keep it. */
-    readonly visited = signal<ReadonlySet<ChatPanelTab>>(new Set([this.panel.tab()]));
+    /** Bodies shown at least once. The sticker tab fetches on creation, so build lazily and keep. */
+    readonly visited = signal<ReadonlySet<string>>(new Set());
 
     /** Why the sticker/emoji tabs cannot be used right now, or null. */
     readonly unavailableReason = computed(() => {
@@ -84,8 +99,8 @@ export class ChatPanelComponent {
         this.destroyRef.onDestroy(() => media.removeEventListener('change', onChange));
 
         effect(() => {
-            const tab = this.tab();
-            untracked(() => this.visited.update((seen) => (seen.has(tab) ? seen : new Set(seen).add(tab))));
+            const shown = this.view() === 'profile' ? 'profile' : this.tab();
+            untracked(() => this.visited.update((seen) => (seen.has(shown) ? seen : new Set(seen).add(shown))));
         });
 
         // A slide-over takes over the screen, so move focus into it; a docked panel must not steal
@@ -109,14 +124,14 @@ export class ChatPanelComponent {
         }
     }
 
-    selectTab(tab: ChatPanelTab): void {
+    selectTab(tab: PickerTab): void {
         this.refused.set(false);
-        this.panel.selectTab(tab);
+        this.panel.selectPickerTab(tab);
     }
 
     /** Roving tabindex: arrows/Home/End move between tabs and select them, per the tabs pattern. */
     onTabKeydown(event: KeyboardEvent): void {
-        const order = CHAT_PANEL_TABS;
+        const order = PICKER_TABS;
         const index = order.indexOf(this.tab());
         let next: number;
         switch (event.key) {
@@ -141,10 +156,18 @@ export class ChatPanelComponent {
     }
 
     onEmojiPicked(emoji: string): void {
-        this.refused.set(!this.panel.composer()?.insertEmoji(emoji));
+        const accepted = this.panel.composer()?.insertEmoji(emoji) ?? false;
+        this.refused.set(!accepted);
+        if (accepted) {
+            this.recents.addEmoji(emoji);
+        }
     }
 
     onStickerPicked(sticker: StickerModel): void {
-        this.refused.set(!this.panel.composer()?.sendSticker(sticker));
+        const accepted = this.panel.composer()?.sendSticker(sticker) ?? false;
+        this.refused.set(!accepted);
+        if (accepted) {
+            this.recents.addSticker(sticker.id);
+        }
     }
 }

@@ -22,7 +22,6 @@ import {
     Send,
     ShieldAlert,
     Smile,
-    Sticker,
     Trash2,
     UserX,
     X,
@@ -36,8 +35,6 @@ import { Sticker as StickerModel } from '../../../core/models/sticker.model';
 import { ChatPanelStoreService, ComposerBridge } from '../../../core/services/chat-panel-store.service';
 import { ProfileApiService } from '../../../core/services/profile-api.service';
 import { VoiceRecorderService } from '../../../core/services/voice-recorder.service';
-import { EmojiPickerComponent } from '../../../shared/ui/emoji-picker/emoji-picker.component';
-import { StickerPickerComponent } from '../stickers/sticker-picker/sticker-picker.component';
 
 /** What the composer hands over. Attachments travel with the message, not separately. */
 export interface ComposedMessage {
@@ -70,7 +67,7 @@ function inferKind(mimeType: string): AttachmentKind {
 
 @Component({
     selector: 'app-composer',
-    imports: [LucideAngularModule, StickerPickerComponent, EmojiPickerComponent],
+    imports: [LucideAngularModule],
     templateUrl: './composer.component.html',
     styleUrl: './composer.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
@@ -80,9 +77,6 @@ export class ComposerComponent {
     private readonly destroyRef = inject(DestroyRef);
     private readonly voiceRecorder = inject(VoiceRecorderService);
     private readonly panel = inject(ChatPanelStoreService);
-
-    readonly stickerPickerOpen = signal(false);
-    readonly emojiPickerOpen = signal(false);
 
     /** False while the member set cannot be verified — sending is refused, not merely discouraged. */
     readonly canSend = input(true);
@@ -133,8 +127,8 @@ export class ComposerComponent {
     /**
      * Why text/stickers cannot be put into the composer right now, or null when they can.
      *
-     * The single source for the emoji and sticker triggers here and for the side panel (through
-     * the bridge), so the two surfaces cannot drift apart: a guard added once applies to both.
+     * The single source for the smiley button here and for the side panel's picker (through the
+     * bridge), so the two surfaces cannot drift apart: a guard added once applies to both.
      */
     readonly unavailableReason = computed<string | null>(() => {
         if (!this.canSend()) {
@@ -150,6 +144,12 @@ export class ComposerComponent {
         }
         return null;
     });
+
+    /** Whether the side panel is currently showing the emoji/sticker picker. */
+    readonly pickerOpen = computed(() => this.panel.open() && this.panel.view() === 'picker');
+
+    /** Something to send: text or a staged attachment. Decides whether Send or the mic holds the slot. */
+    readonly hasContent = computed(() => this.text().trim().length > 0 || this.staged().length > 0);
 
     private readonly bridge: ComposerBridge = {
         unavailableReason: this.unavailableReason,
@@ -213,7 +213,6 @@ export class ComposerComponent {
     readonly userXIcon = UserX;
     readonly filmIcon = Film;
     readonly closeIcon = X;
-    readonly stickerIcon = Sticker;
     readonly smileIcon = Smile;
     readonly micIcon = Mic;
     readonly trashIcon = Trash2;
@@ -355,24 +354,23 @@ export class ComposerComponent {
         this.fileInput()?.nativeElement.click();
     }
 
-    toggleStickerPicker(): void {
-        this.stickerPickerOpen.update((open) => !open);
+    /** The smiley: toggles the side panel on the emoji/sticker picker. Refused when composing is not possible. */
+    togglePicker(): void {
+        if (this.unavailableReason() !== null) {
+            return;
+        }
+        this.panel.togglePicker();
     }
 
     /**
-     * A sticker sends immediately on pick, with no staging step — unlike a file attachment, which
+     * A sticker sends immediately on pick, with no staging step: unlike a file attachment, which
      * waits in the composer until Enter/Send. It carries no `decryptionKey`: stickers are public
      * images in the sticker bucket, never sealed, so nothing downstream needs to decrypt them.
      */
-    onStickerPicked(sticker: StickerModel): void {
-        this.stickerPickerOpen.set(false);
-        this.sendSticker(sticker);
-    }
-
-    /** Shared by the tray here and the side panel. Returns whether the sticker was actually sent. */
+    /** Used by the side panel through the bridge. Returns whether the sticker was actually sent. */
     sendSticker(sticker: StickerModel): boolean {
         // A sticker carries no `decryptionKey` by design, and `editMessage` rejects attachments
-        // without one. The trigger button is disabled while editing, but guard here too: nothing
+        // without one. The smiley is disabled while editing, but guard here too: nothing
         // should route a sticker into an edit and lose the user's in-progress draft.
         if (this.unavailableReason() !== null) {
             return false;
@@ -391,18 +389,6 @@ export class ComposerComponent {
             ],
         });
         return true;
-    }
-
-    toggleEmojiPicker(): void {
-        if (this.unavailableReason() !== null) {
-            return;
-        }
-        this.emojiPickerOpen.update((open) => !open);
-    }
-
-    /** The popover's pick: insert, keep the popover open for several in a row, and refocus the box. */
-    onEmojiPicked(emoji: string): void {
-        this.insertEmoji(emoji);
     }
 
     /**
@@ -476,7 +462,7 @@ export class ComposerComponent {
      * way a sticker sends immediately on pick.
      */
     async confirmRecording(): Promise<void> {
-        // Mirrors the guard in `onStickerPicked()`: the mic button is disabled while `editing()` is
+        // Mirrors the guard in `sendSticker()`: the mic button is disabled while `editing()` is
         // already true, but the reverse ordering — start recording, then start editing a different
         // message while it's still in flight — is not blocked at the point where editing begins, so
         // this is the last line of defense against silently routing a voice note into an edit.

@@ -1,6 +1,7 @@
 import {
     ChangeDetectionStrategy,
     Component,
+    computed,
     DestroyRef,
     ElementRef,
     inject,
@@ -8,8 +9,10 @@ import {
     output,
     signal,
 } from '@angular/core';
+import { Clock, LucideAngularModule, Search } from 'lucide-angular';
 
 import { TwemojiPipe } from '../../emoji/twemoji.pipe';
+import { activeSectionKey, JUMP_SETTLE_MS, scrollToSection } from '../section-scroll';
 import { EMOJI_CATEGORIES } from './emoji-data';
 
 /**
@@ -28,7 +31,7 @@ import { EMOJI_CATEGORIES } from './emoji-data';
  */
 @Component({
     selector: 'app-emoji-picker',
-    imports: [TwemojiPipe],
+    imports: [TwemojiPipe, LucideAngularModule],
     templateUrl: './emoji-picker.component.html',
     styleUrl: './emoji-picker.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
@@ -44,11 +47,43 @@ export class EmojiPickerComponent {
      */
     readonly embedded = input(false);
 
+    /** Emoji to list under "Recently used" (embedded mode only; the host decides what counts). */
+    readonly recents = input<readonly string[]>([]);
+
     readonly pick = output<string>();
     readonly closeRequested = output<void>();
 
     readonly categories = EMOJI_CATEGORIES;
     readonly activeCategory = signal(0);
+    readonly query = signal('');
+    /** Embedded mode: the section in view ("recent" or a category index), highlighted in the bar. */
+    readonly activeSection = signal<string>('0');
+    private settleUntil = 0;
+
+    readonly searchIcon = Search;
+    readonly recentIcon = Clock;
+
+    /**
+     * Search results, or null when there is no query. There are no per-emoji names in the curated
+     * data, so a query matches an emoji character itself or a category's label (typing "face"
+     * lists the Faces category).
+     */
+    readonly results = computed<string[] | null>(() => {
+        const q = this.query().trim().toLowerCase();
+        if (!q) {
+            return null;
+        }
+        const found = new Set<string>();
+        for (const category of this.categories) {
+            const labelHit = category.label.toLowerCase().includes(q);
+            for (const emoji of category.emoji) {
+                if (labelHit || emoji.includes(q)) {
+                    found.add(emoji);
+                }
+            }
+        }
+        return [...found];
+    });
 
     constructor() {
         const onPointerDown = (event: MouseEvent): void => {
@@ -76,6 +111,36 @@ export class EmojiPickerComponent {
 
     selectCategory(index: number): void {
         this.activeCategory.set(index);
+    }
+
+    /** Scroll the embedded list to a section: a category index, or "recent" for "Recently used". */
+    jumpTo(section: string): void {
+        this.query.set('');
+        this.activeSection.set(section);
+        this.settleUntil = Date.now() + JUMP_SETTLE_MS;
+        // Wait for the next render so a cleared search has re-rendered the sections.
+        setTimeout(() => {
+            const list = this.scroller();
+            if (list) {
+                scrollToSection(list, section);
+            }
+        });
+    }
+
+    /** Scroll spy: keep the bar's highlight on the section whose title is pinned at the top. */
+    onScroll(): void {
+        const list = this.scroller();
+        if (!list || Date.now() < this.settleUntil) {
+            return;
+        }
+        const key = activeSectionKey(list);
+        if (key !== null) {
+            this.activeSection.set(key);
+        }
+    }
+
+    private scroller(): HTMLElement | null {
+        return this.elementRef.nativeElement.querySelector<HTMLElement>('.scroll');
     }
 
     choose(emoji: string): void {

@@ -5,6 +5,7 @@ import * as QRCode from 'qrcode';
 
 import { DirectoryService } from '../../../core/services/directory.service';
 import { KeyStoreService } from '../../../core/services/key-store.service';
+import { SessionService } from '../../../core/services/session.service';
 import { TrustStoreService } from '../../../core/services/trust-store.service';
 import { safetyNumberGroups } from '../../../shared/utils/display';
 
@@ -19,6 +20,7 @@ export class SafetyNumberComponent {
     private readonly keyStore = inject(KeyStoreService);
     private readonly directory = inject(DirectoryService);
     private readonly trust = inject(TrustStoreService);
+    private readonly session = inject(SessionService);
     private readonly router = inject(Router);
 
     readonly chatId = input.required<string>();
@@ -32,13 +34,17 @@ export class SafetyNumberComponent {
     /** Bumped on every trust write so the derived state recomputes. */
     private readonly trustEpoch = signal(0);
 
+    /** Whose number this is: trust records are per pair, so both ids are needed. */
+    private readonly selfId = computed(() => this.session.user()?.id ?? null);
+
     readonly peer = computed(() => this.directory.lookup(this.userId()));
     readonly groups = computed(() => safetyNumberGroups(this.safetyNumber() ?? ''));
 
     readonly state = computed(() => {
         const number = this.safetyNumber();
         this.trustEpoch();
-        return number ? this.trust.stateFor(this.userId(), number) : null;
+        const selfId = this.selfId();
+        return number && selfId ? this.trust.stateFor(selfId, this.userId(), number) : null;
     });
 
     readonly arrowLeftIcon = ArrowLeft;
@@ -96,10 +102,11 @@ export class SafetyNumberComponent {
 
     markVerified(): void {
         const number = this.safetyNumber();
-        if (!number) {
+        const selfId = this.selfId();
+        if (!number || !selfId) {
             return;
         }
-        this.trust.markVerified(this.userId(), number);
+        this.trust.markVerified(selfId, this.userId(), number);
         this.trustEpoch.update((n) => n + 1);
     }
 
@@ -109,7 +116,11 @@ export class SafetyNumberComponent {
     }
 
     reset(): void {
-        this.trust.forget(this.userId());
+        const selfId = this.selfId();
+        if (!selfId) {
+            return;
+        }
+        this.trust.forget(selfId, this.userId());
         this.trustEpoch.update((n) => n + 1);
     }
 

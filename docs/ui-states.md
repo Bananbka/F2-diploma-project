@@ -55,6 +55,9 @@ These carry the most weight and should be the least like ordinary chrome.
 is the **only** defence against the server substituting a public key, so it must be reachable in
 one or two taps, not buried. It needs a distinct **key-changed** variant: when a peer's key
 changes, the number changes, and the user must be told loudly rather than silently re-trusting.
+The number depends on both parties' keys, so confirmations are remembered per pair (own account,
+peer): another account of the user's own on the same browser starts unverified instead of raising a
+false key-changed alarm, and records from before this keying read as unverified, never as verified.
 
 **Roster verification failure** — the highest-severity state in the app. It should be
 unmistakable, block key distribution and sending, and read as "the server may be lying to you."

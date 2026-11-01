@@ -2,30 +2,39 @@ import {
     ChangeDetectionStrategy,
     Component,
     computed,
-    DestroyRef,
     ElementRef,
     inject,
     input,
+    OnInit,
     output,
     signal,
 } from '@angular/core';
 import { RouterLink } from '@angular/router';
-import { Compass, LucideAngularModule, Search, Settings2, Smile } from 'lucide-angular';
+import { Clock, Compass, LucideAngularModule, Search, Settings2, Smile } from 'lucide-angular';
 import { firstValueFrom } from 'rxjs';
 
 import { Sticker, StickerPack, StickerPackSummary } from '../../../../core/models/sticker.model';
 import { StickerApiService } from '../../../../core/services/sticker-api.service';
+import { activeSectionKey, JUMP_SETTLE_MS, scrollToSection } from '../../../../shared/ui/section-scroll';
+
+/** A labelled run of stickers: one of the user's packs. */
+interface PackSection {
+    id: string;
+    title: string;
+    stickers: Sticker[];
+}
 
 /**
- * The sticker tray popover, opened from the composer.
- *
- * Mirrors the reaction tray's own popover pattern in `message-bubble` — a dismiss-on-outside-click
- * listener registered for this component's lifetime, rather than a shared overlay service, since
- * nothing else in this codebase has one either.
+ * The Stickers tab of the side panel: search, "Recently used", one labelled section per pack of the
+ * user's, and a bottom bar of pack icons that scrolls to a section.
  *
  * `GET /stickers/packs/mine` returns the lighter `StickerPackSummary` shape (title, cover image,
- * count — no sticker list), so the actual stickers for a pack are fetched lazily the first time its
- * tab is opened and cached here for the rest of this popover's life.
+ * count, no sticker list), so every pack's stickers are then fetched once (in parallel) and kept for
+ * this component's life. A pack that fails to load is simply absent and an error line is shown,
+ * rather than blocking the packs that did load.
+ *
+ * It never talks to the composer: it emits `stickerPicked` and the panel routes it through the
+ * composer bridge, so the composer's guards apply.
  */
 @Component({
     selector: 'app-sticker-picker',
@@ -33,99 +42,128 @@ import { StickerApiService } from '../../../../core/services/sticker-api.service
     templateUrl: './sticker-picker.component.html',
     styleUrl: './sticker-picker.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
-    host: { '[class.is-embedded]': 'embedded()' },
 })
-export class StickerPickerComponent {
+export class StickerPickerComponent implements OnInit {
     private readonly stickerApi = inject(StickerApiService);
-    private readonly destroyRef = inject(DestroyRef);
     private readonly elementRef = inject<ElementRef<HTMLElement>>(ElementRef);
 
-    /** Rendered inline inside the side panel: static layout, no outside-click dismissal. */
-    readonly embedded = input(false);
+    /** Ids of recently used stickers, newest first. Resolved against loaded packs, never trusted as urls. */
+    readonly recentIds = input<readonly string[]>([]);
 
-    readonly closeRequested = output<void>();
     readonly stickerPicked = output<Sticker>();
 
     readonly tray = signal<StickerPackSummary[]>([]);
-    readonly activePackId = signal<string | null>(null);
     readonly packDetails = signal<Map<string, StickerPack>>(new Map());
+    /** The section in view (a pack id or "recent"), highlighted in the bar. */
+    readonly activeSection = signal<string | null>(null);
+    private settleUntil = 0;
     readonly query = signal('');
 
-    readonly loadingTray = signal(true);
-    readonly loadingPack = signal(false);
+    readonly loading = signal(true);
     readonly error = signal<string | null>(null);
 
     readonly searchIcon = Search;
     readonly manageIcon = Settings2;
     readonly discoverIcon = Compass;
     readonly emptyIcon = Smile;
+    readonly recentIcon = Clock;
 
-    readonly activeStickers = computed<Sticker[]>(() => {
-        const packId = this.activePackId();
-        return packId ? (this.packDetails().get(packId)?.stickers ?? []) : [];
+    readonly sections = computed<PackSection[]>(() =>
+        this.tray()
+            .map((pack) => ({
+                id: pack.id,
+                title: pack.title,
+                stickers: this.packDetails().get(pack.id)?.stickers ?? [],
+            }))
+            .filter((section) => section.stickers.length > 0)
+    );
+
+    readonly recents = computed<Sticker[]>(() => {
+        const byId = new Map<string, Sticker>();
+        for (const section of this.sections()) {
+            for (const sticker of section.stickers) {
+                byId.set(sticker.id, sticker);
+            }
+        }
+        return this.recentIds()
+            .map((id) => byId.get(id))
+            .filter((sticker): sticker is Sticker => sticker !== undefined);
     });
 
-    readonly filteredStickers = computed<Sticker[]>(() => {
+    /** Search results across every pack, or null when there is no query. */
+    readonly results = computed<Sticker[] | null>(() => {
         const q = this.query().trim();
-        const list = this.activeStickers();
-        return q ? list.filter((sticker) => sticker.emoji.includes(q)) : list;
+        if (!q) {
+            return null;
+        }
+        return this.sections()
+            .flatMap((section) => section.stickers)
+            .filter((sticker) => sticker.emoji.includes(q));
     });
 
-    constructor() {
-        void this.loadTray();
-
-        // Same dismissal rule as the reaction tray in message-bubble: any mousedown outside this
-        // popover's own DOM asks the host to close it. The trigger that opened this popover is
-        // excluded via `.sticker-trigger` (mirroring message-bubble's own `.react-trigger` check) —
-        // without it, the mousedown that is about to close the tray would fire first, and the click
-        // that follows on the same button would immediately reopen it.
-        const onPointerDown = (event: MouseEvent): void => {
-            if (this.embedded()) {
-                return;
-            }
-            const target = event.target as HTMLElement;
-            if (!this.elementRef.nativeElement.contains(target) && !target.closest('.sticker-trigger')) {
-                this.closeRequested.emit();
-            }
-        };
-        document.addEventListener('mousedown', onPointerDown, true);
-        this.destroyRef.onDestroy(() => document.removeEventListener('mousedown', onPointerDown, true));
+    ngOnInit(): void {
+        void this.load();
     }
 
-    private async loadTray(): Promise<void> {
-        this.loadingTray.set(true);
+    private async load(): Promise<void> {
+        this.loading.set(true);
         this.error.set(null);
         try {
             const packs = await firstValueFrom(this.stickerApi.getMyPacks());
             this.tray.set(packs);
-            if (packs.length > 0) {
-                await this.selectPack(packs[0].id);
+            this.activeSection.set(packs[0]?.id ?? null);
+
+            const loaded = await Promise.allSettled(
+                packs.map((pack) => firstValueFrom(this.stickerApi.getPack(pack.id)))
+            );
+            const details = new Map<string, StickerPack>();
+            let failed = false;
+            for (const result of loaded) {
+                if (result.status === 'fulfilled') {
+                    details.set(result.value.id, result.value);
+                } else {
+                    failed = true;
+                }
+            }
+            this.packDetails.set(details);
+            if (failed) {
+                this.error.set('Some packs could not be loaded.');
             }
         } catch {
             this.error.set('Could not load your stickers.');
         } finally {
-            this.loadingTray.set(false);
+            this.loading.set(false);
         }
     }
 
-    async selectPack(packId: string): Promise<void> {
-        this.activePackId.set(packId);
+    /** Smooth-scroll to a pack's section, or to "Recently used" with `'recent'`. */
+    jumpTo(target: string): void {
         this.query.set('');
+        this.activeSection.set(target);
+        this.settleUntil = Date.now() + JUMP_SETTLE_MS;
+        // Wait for the next render so a cleared search has re-rendered the sections.
+        setTimeout(() => {
+            const list = this.scroller();
+            if (list) {
+                scrollToSection(list, target);
+            }
+        });
+    }
 
-        if (this.packDetails().has(packId)) {
+    /** Scroll spy: keep the bar's highlight on the pack whose title is pinned at the top. */
+    onScroll(): void {
+        const list = this.scroller();
+        if (!list || Date.now() < this.settleUntil) {
             return;
         }
-
-        this.loadingPack.set(true);
-        this.error.set(null);
-        try {
-            const pack = await firstValueFrom(this.stickerApi.getPack(packId));
-            this.packDetails.update((current) => new Map(current).set(packId, pack));
-        } catch {
-            this.error.set('Could not load that pack.');
-        } finally {
-            this.loadingPack.set(false);
+        const key = activeSectionKey(list);
+        if (key !== null) {
+            this.activeSection.set(key);
         }
+    }
+
+    private scroller(): HTMLElement | null {
+        return this.elementRef.nativeElement.querySelector<HTMLElement>('.scroll');
     }
 
     pick(sticker: Sticker): void {

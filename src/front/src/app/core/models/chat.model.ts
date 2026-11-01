@@ -65,7 +65,7 @@ export interface UserProfile {
     phone_number: string;
     public_key: string;
     bio: string | null;
-    avatar: string | null;
+    avatar_url: string | null;
     is_active: boolean;
     is_deleted?: boolean;
 }

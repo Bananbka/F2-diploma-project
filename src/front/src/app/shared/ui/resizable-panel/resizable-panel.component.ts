@@ -6,6 +6,11 @@ const STORAGE_PREFIX = 'panel-width:';
  * Wraps `ng-content` in a panel whose width is user-resizable via a drag handle on its right edge,
  * and persisted to `localStorage` under `panel-width:<storageKey>`.
  *
+ * The handle sits on the right edge by default (a panel that grows to the right, like the chat list)
+ * or the left edge with `edge="left"` (a panel docked to the right of the screen, which grows when
+ * dragged left). It is a focusable `role="separator"`: Left/Right arrows resize it by `keyboardStep`
+ * pixels (Home/End jump to the limits), so resizing never requires a pointer.
+ *
  * A wrapper component rather than a directive: it needs to render its own handle element, which a
  * bare attribute directive cannot do.
  */
@@ -16,6 +21,7 @@ const STORAGE_PREFIX = 'panel-width:';
     styleUrl: './resizable-panel.component.scss',
     host: {
         '[style.width.px]': 'disabled() ? null : width()',
+        '[class.edge-left]': "edge() === 'left'",
     },
     changeDetection: ChangeDetectionStrategy.OnPush,
 })
@@ -26,6 +32,11 @@ export class ResizablePanelComponent implements OnInit {
     readonly minWidth = input(256);
     readonly maxWidth = input(512);
     readonly defaultWidth = input(320);
+    /** Which edge carries the drag handle. */
+    readonly edge = input<'left' | 'right'>('right');
+    /** Accessible name for the separator. */
+    readonly label = input('Resize panel');
+    readonly keyboardStep = input(16);
 
     /**
      * Short-circuits the inline width and hides the drag handle without tearing the component (and
@@ -88,6 +99,36 @@ export class ResizablePanelComponent implements OnInit {
         }
     }
 
+    /** Arrow keys move the edge in the direction of the arrow; Home/End jump to min/max. */
+    onHandleKeydown(event: KeyboardEvent): void {
+        if (!this.canDrag()) {
+            return;
+        }
+        const step = this.keyboardStep();
+        const grows = this.edge() === 'left' ? 'ArrowLeft' : 'ArrowRight';
+        const shrinks = this.edge() === 'left' ? 'ArrowRight' : 'ArrowLeft';
+        let next: number;
+        switch (event.key) {
+            case grows:
+                next = this.width() + step;
+                break;
+            case shrinks:
+                next = this.width() - step;
+                break;
+            case 'Home':
+                next = this.minWidth();
+                break;
+            case 'End':
+                next = this.maxWidth();
+                break;
+            default:
+                return;
+        }
+        event.preventDefault();
+        this.width.set(this.clamp(next));
+        this.persistWidth(this.width());
+    }
+
     onHandlePointerDown(event: PointerEvent): void {
         if (this.isDragging()) {
             return;
@@ -110,7 +151,8 @@ export class ResizablePanelComponent implements OnInit {
         document.body.style.userSelect = 'none';
 
         const onPointerMove = (moveEvent: PointerEvent) => {
-            const delta = moveEvent.clientX - this.dragStartX;
+            const raw = moveEvent.clientX - this.dragStartX;
+            const delta = this.edge() === 'left' ? -raw : raw;
             this.width.set(this.clamp(this.dragStartWidth + delta));
         };
 

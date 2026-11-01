@@ -29,7 +29,7 @@ describe('DirectoryService', () => {
         contactsApi = jasmine.createSpyObj<ContactsApiService>('ContactsApiService', ['getContacts']);
         chatApi = jasmine.createSpyObj<ChatApiService>('ChatApiService', ['getUsersBatch', 'searchUsers']);
 
-        const session = { user: () => ({ id: ME, full_name: 'Me', username: 'me', avatar: null }) as UserProfile };
+        const session = { user: () => ({ id: ME, full_name: 'Me', username: 'me', avatar_url: null }) as UserProfile };
 
         TestBed.configureTestingModule({
             providers: [

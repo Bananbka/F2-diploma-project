@@ -27,14 +27,24 @@ export type TrustState =
  * safety number is a public fingerprint, so disclosure costs nothing — while *forgetting* it costs
  * the entire defence, because a key change can only be detected against a remembered value.
  *
- * Keyed by user id rather than device id: the user compares a number with a person.
+ * Keyed by the *pair* `<own user id>:<peer user id>`, not by the peer alone. A safety number is
+ * computed from both parties' keys, so the same peer yields a different number under each of the
+ * user's own accounts (and after the user's own keys change). Keyed by peer alone, signing in as a
+ * second account on the same browser made every previously verified peer look like a substituted
+ * key. Still per person rather than per device: the user compares a number with a person.
+ *
+ * Records written before the pair keying were stored under the bare peer id. They are never read:
+ * the pair key cannot collide with a bare id, so such a peer simply reads as unverified. That is the
+ * safe direction. Converting them would claim a verification for a number that was computed under an
+ * account we can no longer identify.
  */
 @Injectable({ providedIn: 'root' })
 export class TrustStoreService {
     private readonly records = signal(this.read());
 
-    stateFor(userId: string, currentSafetyNumber: string): TrustState {
-        const record = this.records()[userId];
+    stateFor(selfId: string, peerId: string, currentSafetyNumber: string): TrustState {
+        const key = this.key(selfId, peerId);
+        const record = key ? this.records()[key] : undefined;
 
         if (!record) {
             return { kind: 'unverified' };
@@ -46,18 +56,31 @@ export class TrustStoreService {
     }
 
     /** Record that the user compared this number out of band and it matched. */
-    markVerified(userId: string, safetyNumber: string): void {
+    markVerified(selfId: string, peerId: string, safetyNumber: string): void {
+        const key = this.key(selfId, peerId);
+        if (!key) {
+            return;
+        }
         this.write({
             ...this.records(),
-            [userId]: { safetyNumber, verifiedAt: new Date().toISOString() },
+            [key]: { safetyNumber, verifiedAt: new Date().toISOString() },
         });
     }
 
     /** Drop the record, returning the peer to unverified. */
-    forget(userId: string): void {
+    forget(selfId: string, peerId: string): void {
+        const key = this.key(selfId, peerId);
+        if (!key) {
+            return;
+        }
         const next = { ...this.records() };
-        delete next[userId];
+        delete next[key];
         this.write(next);
+    }
+
+    /** Null when either id is empty: such a key would put unrelated pairs in one shared bucket. */
+    private key(selfId: string, peerId: string): string | null {
+        return selfId && peerId ? `${selfId}:${peerId}` : null;
     }
 
     private normalise(value: string): string {
@@ -67,7 +90,20 @@ export class TrustStoreService {
     private read(): Record<string, TrustRecord> {
         try {
             const raw = localStorage.getItem(STORAGE_KEY);
-            return raw ? (JSON.parse(raw) as Record<string, TrustRecord>) : {};
+            const parsed: unknown = raw ? JSON.parse(raw) : {};
+            if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+                return {};
+            }
+            // Tampered or hand-edited storage must not be able to make the comparison throw: keep only
+            // entries that really are records, drop the rest (those peers read as unverified).
+            const valid: Record<string, TrustRecord> = {};
+            for (const [key, value] of Object.entries(parsed)) {
+                const record = value as Partial<TrustRecord> | null;
+                if (record && typeof record.safetyNumber === 'string' && typeof record.verifiedAt === 'string') {
+                    valid[key] = { safetyNumber: record.safetyNumber, verifiedAt: record.verifiedAt };
+                }
+            }
+            return valid;
         } catch {
             // Corrupt or unavailable storage means every peer reads as unverified, which is the safe
             // direction to fail in — it prompts a fresh comparison rather than assuming trust.

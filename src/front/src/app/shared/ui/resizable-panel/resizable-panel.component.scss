@@ -27,8 +27,23 @@
         transition: background-color 0.15s ease;
     }
 
+    &:focus-visible {
+        outline: none;
+    }
+
     &:hover::after,
+    &:focus-visible::after,
     &.is-dragging::after {
         background: var(--primary);
+    }
+}
+
+/* Panel docked to the right of the screen: the handle is on its left edge. */
+:host(.edge-left) .handle {
+    right: auto;
+    left: 0;
+
+    &::after {
+        left: 0;
     }
 }

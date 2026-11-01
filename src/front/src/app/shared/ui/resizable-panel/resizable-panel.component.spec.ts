@@ -159,4 +159,67 @@ describe('ResizablePanelComponent', () => {
         expect(host.querySelector('.handle')).toBeNull();
         expect((fixture.nativeElement as HTMLElement).style.width).toBe('');
     });
+
+    describe('left-edge panel and keyboard', () => {
+        function createLeft(): HTMLElement {
+            fixture = TestBed.createComponent(ResizablePanelComponent);
+            fixture.componentRef.setInput('storageKey', 'test-left');
+            fixture.componentRef.setInput('edge', 'left');
+            fixture.componentRef.setInput('minWidth', 288);
+            fixture.componentRef.setInput('maxWidth', 576);
+            fixture.componentRef.setInput('defaultWidth', 352);
+            fixture.detectChanges();
+            return fixture.nativeElement as HTMLElement;
+        }
+
+        it('grows when dragged to the left, and persists on release', () => {
+            const host = createLeft();
+            drag(host, -48);
+
+            expect(fixture.componentInstance.width()).toBe(400);
+            expect(localStorage.getItem('panel-width:test-left')).toBe('400');
+        });
+
+        it('exposes a focusable vertical separator with its value and limits', () => {
+            const host = createLeft();
+            const handle = host.querySelector<HTMLElement>('.handle')!;
+
+            expect(handle.getAttribute('role')).toBe('separator');
+            expect(handle.getAttribute('tabindex')).toBe('0');
+            expect(handle.getAttribute('aria-valuenow')).toBe('352');
+            expect(handle.getAttribute('aria-valuemin')).toBe('288');
+            expect(handle.getAttribute('aria-valuemax')).toBe('576');
+        });
+
+        it('resizes with the arrow keys in the direction of the arrow, clamped, and persists', () => {
+            const host = createLeft();
+            const handle = host.querySelector<HTMLElement>('.handle')!;
+
+            handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+            expect(fixture.componentInstance.width()).toBe(368);
+
+            handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+            handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+            expect(fixture.componentInstance.width()).toBe(336);
+
+            handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }));
+            expect(fixture.componentInstance.width()).toBe(288);
+            handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+            expect(fixture.componentInstance.width()).toBe(288);
+
+            handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+            expect(fixture.componentInstance.width()).toBe(576);
+            expect(localStorage.getItem('panel-width:test-left')).toBe('576');
+        });
+
+        it('releases the drag when the pointer is cancelled', () => {
+            const host = createLeft();
+            startDrag(host);
+            expect(fixture.componentInstance.isDragging()).toBeTrue();
+
+            document.dispatchEvent(new PointerEvent('pointercancel', { pointerId: 1 }));
+
+            expect(fixture.componentInstance.isDragging()).toBeFalse();
+        });
+    });
 });

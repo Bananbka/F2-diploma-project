@@ -17,10 +17,9 @@ import {
     CheckCheck,
     Copy,
     Forward,
+    Info,
     LucideAngularModule,
     MessageSquare,
-    PanelRight,
-    PanelRightClose,
     Pencil,
     Pin,
     PinOff,
@@ -208,9 +207,9 @@ export class ChatViewComponent {
     private atNewest = false;
 
     readonly arrowLeftIcon = ArrowLeft;
-    readonly panelIcon = PanelRight;
-    readonly panelCloseIcon = PanelRightClose;
-    readonly panelOpen = this.panel.open;
+    readonly infoIcon = Info;
+    /** True only while the panel is showing chat info, which is what the header button controls. */
+    readonly profileOpen = computed(() => this.panel.open() && this.panel.view() === 'profile');
     readonly shieldIcon = Shield;
     readonly shieldAlertIcon = ShieldAlert;
     readonly shieldOffIcon = ShieldOff;
@@ -645,16 +644,16 @@ export class ChatViewComponent {
         await this.store.unpinMessage(messageId);
     }
 
-    togglePanel(): void {
-        this.panel.toggle();
+    toggleProfile(): void {
+        this.panel.toggleProfile();
     }
 
     /**
      * The chat-info entry points (header identity, member-verification banner) open the side panel
-     * on its Profile tab. The standalone `/chats/:id/info` route still exists for deep links.
+     * on its chat-info view. The standalone `/chats/:id/info` route still exists for deep links.
      */
     openProfile(): void {
-        this.panel.show('profile');
+        this.panel.showProfile();
     }
 
     async openSafetyNumber(): Promise<void> {

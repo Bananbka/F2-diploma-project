@@ -486,6 +486,7 @@
    lands. `.pending-meta` in chat-view pins the same value — keep them in step. */
 .meta {
     display: flex;
+    flex-wrap: nowrap;
     align-items: center;
     gap: 0.375rem;
     min-height: 1.125rem;
@@ -639,14 +640,21 @@
 
 .reaction-add-wrap {
     position: relative;
+    flex-shrink: 0;
+}
+
+/* Incoming rows read left to right, so the control goes first; outgoing rows are reversed, where
+   its place after the actions button already puts it on the far left. */
+:host(:not(.is-outgoing)) .reaction-add-wrap {
+    order: -1;
 }
 
 .reaction-add {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 1.5rem;
-    height: 1.5rem;
+    width: 1.25rem;
+    height: 1.25rem;
     background: none;
     border: 1px dashed var(--border);
     border-radius: 50%;
