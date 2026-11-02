@@ -380,6 +380,13 @@ async def websocket_endpoint(
 
         pubsub = await open_subscription(events_redis, channel_name)
 
+        # A revocation published between the handshake check and the subscribe above went to no
+        # one, and the periodic watcher only looks again a minute later. Check once now that the
+        # subscription is live, so every revocation is either seen here or buffered on the pubsub.
+        if not await ws_session_is_valid(redis, token):
+            await _close_revoked(websocket)
+            return
+
         # Subscribe first, replay second, listen third. A durable event is appended and published
         # in one atomic step, so an event is either already in the stream when the replay reads it,
         # or published after the subscribe and therefore buffered here. Events in the overlap are
