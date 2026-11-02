@@ -5,7 +5,10 @@ import { of } from 'rxjs';
 
 import { UserProfile } from '../../../core/models/chat.model';
 import { AuthApiService } from '../../../core/services/auth-api.service';
+import { ChatStoreService } from '../../../core/services/chat-store.service';
 import { CryptoApiService } from '../../../core/services/crypto-api.service';
+import { Folder, FolderApiService } from '../../../core/services/folder-api.service';
+import { FolderStoreService } from '../../../core/services/folder-store.service';
 import { KeyStoreService } from '../../../core/services/key-store.service';
 import { MessageService } from '../../../core/services/message.service';
 import { ProfileApiService } from '../../../core/services/profile-api.service';
@@ -29,6 +32,8 @@ const ME: UserProfile = {
     is_active: true,
 };
 
+const folders = signal<Folder[]>([]);
+
 describe('NavigationRailComponent avatar', () => {
     let fixture: ComponentFixture<NavigationRailComponent>;
     let session: SessionService;
@@ -39,6 +44,7 @@ describe('NavigationRailComponent avatar', () => {
     }
 
     beforeEach(async () => {
+        folders.set([]);
         authApi = jasmine.createSpyObj<AuthApiService>('AuthApiService', ['me']);
         authApi.me.and.returnValue(of(ME));
         const keyStore = jasmine.createSpyObj<KeyStoreService>('KeyStoreService', ['lock']);
@@ -54,12 +60,14 @@ describe('NavigationRailComponent avatar', () => {
                 { provide: MessageService, useValue: {} },
                 { provide: WebSocketService, useValue: {} },
                 { provide: ProfileApiService, useValue: {} },
+                { provide: ChatStoreService, useValue: { chats: signal([]) } },
+                { provide: FolderApiService, useValue: { getFolders: () => of(folders()) } },
             ],
         }).compileComponents();
 
         session = TestBed.inject(SessionService);
         fixture = TestBed.createComponent(NavigationRailComponent);
-        fixture.componentRef.setInput('filter', 'all');
+        fixture.componentRef.setInput('view', 'all');
     });
 
     it('shows the avatar from a profile loaded from the API (avatar_url)', async () => {
@@ -80,6 +88,49 @@ describe('NavigationRailComponent avatar', () => {
 
         expect(authApi.me).toHaveBeenCalledTimes(2);
         expect(avatarSrc()).toBe(AVATAR);
+    });
+
+    describe('views', () => {
+        const root = () => fixture.nativeElement as HTMLElement;
+        const button = (label: string) =>
+            root().querySelector<HTMLButtonElement>(`nav button[aria-label^="${label}"]`)!;
+
+        it('offers the system views and a New folder entry, marking the selected one', async () => {
+            await session.restore();
+            fixture.detectChanges();
+
+            for (const label of ['All chats', 'Unread', 'Direct', 'Groups', 'Channels', 'New folder']) {
+                expect(button(label)).withContext(label).not.toBeNull();
+            }
+            expect(button('All chats').getAttribute('aria-current')).toBe('page');
+            expect(button('Groups').getAttribute('aria-current')).toBeNull();
+        });
+
+        it('emits the chosen view, for system views and folders alike', async () => {
+            TestBed.inject(FolderStoreService).folders.set([{ id: 'f1', title: 'Work', items: [] }]);
+            await session.restore();
+            fixture.detectChanges();
+            await fixture.whenStable();
+            fixture.detectChanges();
+            const emitted: string[] = [];
+            fixture.componentInstance.viewChange.subscribe((v) => emitted.push(v));
+
+            button('Groups').click();
+            button('Folder Work').click();
+
+            expect(emitted).toEqual(['group', 'folder:f1']);
+            expect(button('Folder Work').textContent).toContain('W');
+        });
+
+        it('opens the folder dialog from New folder', async () => {
+            await session.restore();
+            fixture.detectChanges();
+
+            button('New folder').click();
+            fixture.detectChanges();
+
+            expect(root().querySelector('app-folder-edit-dialog')).not.toBeNull();
+        });
     });
 
     describe('settings entry', () => {

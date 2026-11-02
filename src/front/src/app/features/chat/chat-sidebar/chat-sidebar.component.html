@@ -1,3 +1,5 @@
+<h2 class="view-title">{{ viewTitle() }}</h2>
+
 <div class="head">
     <div class="search">
         <lucide-icon [img]="searchIcon" />
@@ -44,29 +46,10 @@
                     <lucide-icon [img]="hashIcon" />
                     New channel
                 </button>
-                <button
-                    type="button"
-                    role="menuitem"
-                    class="menu-item"
-                    (click)="openFolderDialog()"
-                >
-                    <lucide-icon [img]="folderIcon" />
-                    New folder
-                </button>
             </div>
         }
     </div>
 </div>
-
-<app-chat-nav
-    [chats]="chats()"
-    [folders]="folders()"
-    [selected]="view()"
-    (selectedChange)="selectView($event)"
-    (createFolder)="openFolderDialog()"
-    (editFolder)="openFolderDialog($event)"
-    (deleteFolder)="confirmDeleteFolder($event)"
-/>
 
 <div class="list">
     @if (loading() && chats().length === 0) {
@@ -86,7 +69,7 @@
             @if (query()) {
                 Nothing matches “{{ query() }}”.
             } @else if (view() !== 'all') {
-                Nothing here yet. Pick “All chats” to see everything.
+                Nothing here yet. Pick “All chats” on the left to see everything.
             } @else {
                 No conversations yet. Use the + button to start one.
             }
@@ -194,12 +177,3 @@
         }
     }
 </div>
-
-@if (folderDialog(); as dialog) {
-    <app-folder-edit-dialog
-        [folder]="dialog.folder"
-        [focus]="dialog.focus"
-        [chats]="chats()"
-        (closed)="folderDialog.set(null)"
-    />
-}

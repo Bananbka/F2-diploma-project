@@ -1,5 +1,5 @@
-import { Chat } from '../../../core/models/chat.model';
-import { Folder } from '../../../core/services/folder-api.service';
+import { Chat } from '../../core/models/chat.model';
+import { Folder } from '../../core/services/folder-api.service';
 
 /** The built-in views over the chat list. Only what the data actually supports. */
 export type SystemViewId = 'all' | 'direct' | 'group' | 'channel' | 'unread';
