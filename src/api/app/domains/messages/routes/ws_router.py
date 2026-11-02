@@ -313,8 +313,8 @@ async def _may_act_on(user_id, chat_id, websocket: WebSocket) -> bool:
 
     The socket used to take `chat_id` straight from the frame. Nothing checked membership, so any
     authenticated user could publish typing indicators into conversations they had never been part
-    of, and — worse — drive `mark_messages_as_read` against an arbitrary chat, flipping `is_read`
-    on other people's messages and wiping their unread counts.
+    of, and — worse — advance read marks against an arbitrary chat, wiping other people's unread
+    counts.
 
     Access control lives in Postgres and content lives in Mongo, so the Postgres check has to come
     first on every path that reaches Mongo. This is the socket's half of `get_chat_or_403`.
@@ -493,7 +493,7 @@ async def websocket_endpoint(
                     # Validate and canonicalize before anything touches Postgres or Mongo.
                     # `objectify_id` raises AppException (caught below) on a malformed id, and
                     # the canonical `str(ObjectId(...))` form is what both the monotonicity
-                    # guard and the Mongo read-mark write must compare against — otherwise a
+                    # guard and the stored read mark must compare against — otherwise a
                     # case-variant but valid id (e.g. uppercase hex) would be stored verbatim
                     # and no longer byte-compare consistently against genuine lowercase-hex
                     # ObjectId strings.
@@ -512,16 +512,6 @@ async def websocket_endpoint(
                         )
                         cleared_unread = await clear_marked_unread(
                             db, ws_event.chat_id, user.id
-                        )
-
-                        # Still called for its (deprecated) side effect on the legacy shared
-                        # `is_read` flag — see the note on `mark_messages_as_read`. Its modified
-                        # count must not gate the broadcast below: it is scoped to other members'
-                        # messages, so a reader catching up on only their own sends, or on a range
-                        # another reader already flipped, would otherwise never announce their own
-                        # advancing mark.
-                        await messages_service.mark_messages_as_read(
-                            db, mongo_db, ws_event.chat_id, user.id, last_read_id
                         )
 
                         if advanced:

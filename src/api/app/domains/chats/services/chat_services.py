@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 
 from bson import ObjectId
@@ -313,8 +314,7 @@ async def get_chat_read_state(
     flag. `MessageDocument.is_read` is a single boolean per message, so one member reading a group
     message marked it read for everyone else too — this is the per-user replacement. The caller
     (and the client) derives "has user X read message Y" by comparing `last_read_message_id`
-    against the message's ObjectId, the same `$lte` comparison `mark_messages_as_read` already
-    uses — ObjectId monotonicity is the ordering key throughout this codebase, so no extra sort
+    against the message's ObjectId (`$lte`) — ObjectId monotonicity is the ordering key throughout this codebase, so no extra sort
     field is needed here either.
 
     Does not authorise — callers must check `is_user_in_chat`/`get_chat_or_403` first, same as
@@ -347,13 +347,13 @@ async def update_participant_last_read(
     order hex digits differently. Without the monotonicity guard, a `MESSAGE_READ` frame that is
     delivered out of order (the socket has no dedup or sequencing of its own) could regress a
     reader's mark backwards, which would both under-report their progress to peers and make the
-    `_id: {"$lte": ...}` filter in `mark_messages_as_read` re-scan messages already settled.
+    unread count be computed against a stale cursor.
+
+    This is the only read state: the Mongo `is_read` field is no longer written by anything (it
+    was one boolean shared by every member), so nothing may depend on it being flipped.
 
     The return value is what the caller uses to decide whether the `message_read` broadcast is
-    worth publishing — see `ws_router`. It must not depend on `mark_messages_as_read`'s modified
-    count instead: that count is scoped to *other* people's messages (and to the legacy `is_read`
-    flag), so a participant who reads only their own sent messages, or catches up to a point
-    another reader already flipped, would otherwise never announce their own advancing mark.
+    worth publishing — see `ws_router`.
     """
     stmt = (
         update(ChatParticipant)
@@ -586,51 +586,45 @@ async def enrich_chats_with_mongo_data(
     # Fails closed: a floor that is present but not a valid ObjectId (the column has a CHECK, so
     # this should be unreachable) hides the chat's messages entirely rather than falling back to
     # an unscoped match that would expose history the member was never meant to see.
-    scope_branches = []
-    for chat in pg_chats:
-        floor = getattr(chat, "history_start_message_id", None)
-        if not floor:
-            scope_branches.append({"chat_id": chat.id})
-        elif ObjectId.is_valid(floor):
-            scope_branches.append({"chat_id": chat.id, "_id": {"$gt": ObjectId(floor)}})
-        # else: no branch, so nothing of this chat can match.
-    if not scope_branches:
-        scope_branches.append({"_id": {"$exists": False}})  # matches nothing
-
-    unread_branches = []
-    for chat in pg_chats:
-        chat_match = {"$eq": ["$chat_id", chat.id]}
-        sender_match = {"$ne": ["$sender_id", user_id]}
-
-        if getattr(chat, "last_read_message_id", None) and ObjectId.is_valid(
-            chat.last_read_message_id
-        ):
-            read_match = {"$gt": ["$_id", ObjectId(chat.last_read_message_id)]}
-            is_unread = {"$and": [chat_match, sender_match, read_match]}
-        else:
-            is_unread = {"$and": [chat_match, sender_match]}
-
-        unread_branches.append({"case": is_unread, "then": 1})
-
-    pipeline = [
-        # Poll control messages (votes) are neither unread nor a chat preview.
-        {"$match": {"$or": scope_branches, "is_control": {"$ne": True}}},
-        {"$sort": {"_id": -1}},
-        {
-            "$group": {
-                "_id": "$chat_id",
-                "last_message": {"$first": "$$ROOT"},
-                "unread_count": {
-                    "$sum": {"$switch": {"branches": unread_branches, "default": 0}}
-                },
-            }
-        },
-    ]
-
+    #
+    # Each chat is answered by two bounded queries (newest message, unread count) that ride
+    # `ix_chat_id_id`, run concurrently, rather than one aggregation that scans and sorts every
+    # message of every listed chat.
     collection = mongo_db["messages"]
-    aggregated_data = await collection.aggregate(pipeline, allowDiskUse=True).to_list(None)
+    gate = asyncio.Semaphore(16)
 
-    mongo_dict = {doc["_id"]: doc for doc in aggregated_data}
+    async def _chat_stats(chat) -> tuple[uuid.UUID, dict] | None:
+        # Poll control messages (votes) are neither unread nor a chat preview.
+        scope: dict = {"chat_id": chat.id, "is_control": {"$ne": True}}
+        floor = getattr(chat, "history_start_message_id", None)
+        if floor:
+            if not ObjectId.is_valid(floor):
+                return None  # fail closed: nothing of this chat can match
+            scope["_id"] = {"$gt": ObjectId(floor)}
+
+        unread_query = {**scope, "sender_id": {"$ne": user_id}}
+        last_read = getattr(chat, "last_read_message_id", None)
+        if last_read and ObjectId.is_valid(last_read):
+            # The cursor can sit below the floor, and the floor must win.
+            lower = ObjectId(last_read)
+            if "_id" in scope:
+                lower = max(lower, scope["_id"]["$gt"])
+            unread_query["_id"] = {"$gt": lower}
+
+        async with gate:
+            last_message, unread_count = await asyncio.gather(
+                collection.find_one(scope, sort=[("_id", -1)]),
+                collection.count_documents(unread_query),
+            )
+        if last_message is None:
+            return None  # no messages in scope, so nothing is unread either
+        return chat.id, {"last_message": last_message, "unread_count": unread_count}
+
+    mongo_dict = dict(
+        entry
+        for entry in await asyncio.gather(*(_chat_stats(chat) for chat in pg_chats))
+        if entry is not None
+    )
 
     result = []
     for chat in pg_chats:

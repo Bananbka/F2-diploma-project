@@ -71,9 +71,9 @@ async def is_user_in_all_chats(
     return cp == len(chat_ids)
 
 
-async def get_chat_or_403(
+async def get_chat_and_participant_or_403(
     db: AsyncSession, chat_id: uuid.UUID, user_id: uuid.UUID
-) -> Chat:
+) -> tuple[Chat, ChatParticipant]:
     stmt = (
         select(ChatParticipant, Chat)
         .join(Chat, Chat.id == ChatParticipant.chat_id)
@@ -85,7 +85,13 @@ async def get_chat_or_403(
     if not row:
         raise AppException(403, "FORBIDDEN", "You are not a participant of this chat.")
 
-    _, chat = row.ChatParticipant, row.Chat
+    return row.Chat, row.ChatParticipant
+
+
+async def get_chat_or_403(
+    db: AsyncSession, chat_id: uuid.UUID, user_id: uuid.UUID
+) -> Chat:
+    chat, _ = await get_chat_and_participant_or_403(db, chat_id, user_id)
     return chat
 
 
@@ -692,7 +698,7 @@ async def get_chat_messages(
     limit: int = 50,
     before_id: str | None = None,
 ) -> list[MessageResponse]:
-    chat = await get_chat_or_403(db, chat_id, user_id)
+    chat, participant = await get_chat_and_participant_or_403(db, chat_id, user_id)
 
     collection = mongo_db["messages"]
     # Control messages (poll votes) are not part of the conversation; they have their own listing.
@@ -705,8 +711,7 @@ async def get_chat_messages(
     # Floor history at the point this member joined. They hold no keys for earlier epochs, so this
     # is not the confidentiality boundary — but without it they still receive every historical
     # ciphertext, which leaks sender, timing, size and reply structure for the whole history.
-    participant = await is_user_in_chat(db, user_id, chat_id)
-    if participant is not None and participant.history_start_message_id:
+    if participant.history_start_message_id:
         floor = objectify_id(participant.history_start_message_id)
         query["_id"] = {**query.get("_id", {}), "$gt": floor}
 
@@ -936,46 +941,6 @@ async def delete_message(
         await minio_manager.delete_file(file_url, settings.MINIO_MESSAGE_BUCKET)
 
     return msg["chat_id"]
-
-
-async def mark_messages_as_read(
-    db: AsyncSession,
-    mongo_db: AsyncIOMotorDatabase,
-    chat_id: uuid.UUID,
-    user_id: uuid.UUID,
-    last_read_message_id: str,
-) -> int:
-    """Mark everything up to `last_read_message_id` as read for this chat.
-
-    Takes `db` purely to authorise. Mongo carries no ownership information of its own, so a write
-    that reaches it without a Postgres membership check is unauthorised by construction — and this
-    one is reachable from the WebSocket, where `chat_id` arrives straight from the client.
-
-    The `is_read` flip below is DEPRECATED — it is one boolean shared by every participant, so the
-    first member to read a group message marks it read for everyone else too. It is left in place
-    (rather than migrated away in one step, which would mean a write against a schema-less Mongo
-    collection with no rollback) purely for whatever still reads it; the caller
-    (`ws_router.websocket_endpoint`) separately calls `chat_services.update_participant_last_read`,
-    which is the per-user source of truth surfaced by `GET /chats/{id}/read-state`.
-    """
-    if await is_user_in_chat(db, user_id, chat_id) is None:
-        raise AppException(403, "FORBIDDEN", "You are not a participant of this chat.")
-
-    collection = mongo_db["messages"]
-
-    message_id = objectify_id(last_read_message_id)
-
-    result = await collection.update_many(
-        {
-            "chat_id": chat_id,
-            "sender_id": {"$ne": user_id},
-            "is_read": False,
-            "_id": {"$lte": message_id},
-        },
-        {"$set": {"is_read": True}},
-    )
-
-    return result.modified_count
 
 
 async def toggle_reaction(

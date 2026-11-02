@@ -206,7 +206,7 @@ class MessageDocument(BaseModel):
     reactions: list[Reaction] = Field(default_factory=list)
 
     # DEPRECATED: a single shared boolean, so one member reading a group message marks it read for
-    # every other member too. Kept (and still written by `mark_messages_as_read`) only for
+    # every other member too. Kept in the schema (and no longer written by anything) only for
     # backward compatibility with any client still reading it; per-user read state is now the
     # `last_read_message_id` on each `ChatParticipant`, exposed via `GET /chats/{id}/read-state`
     # and `chat_services.get_chat_read_state`. Do not add new logic that treats this as
