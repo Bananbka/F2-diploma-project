@@ -24,16 +24,50 @@
 
     <label class="field">
         <span class="label">Name</span>
-        <input
-            #nameField
-            type="text"
-            placeholder="Folder name"
-            autocomplete="off"
-            [maxLength]="maxTitle"
-            [value]="name()"
-            (input)="name.set($any($event.target).value)"
-        />
+        <div class="emoji-input-wrap">
+            <input
+                #nameField
+                type="text"
+                placeholder="Folder name"
+                autocomplete="off"
+                [maxLength]="maxTitle"
+                [value]="name()"
+                (input)="name.set($any($event.target).value)"
+            />
+            <app-emoji-button [target]="nameField" />
+        </div>
     </label>
+
+    <div
+        class="field"
+        role="radiogroup"
+        aria-labelledby="folder-icon-label"
+    >
+        <span
+            class="label"
+            id="folder-icon-label"
+        >
+            Icon
+        </span>
+        <div class="icon-grid">
+            @for (option of iconOptions; track option.name) {
+                <button
+                    type="button"
+                    class="icon-option"
+                    role="radio"
+                    [class.is-selected]="icon() === option.name"
+                    [attr.aria-checked]="icon() === option.name"
+                    [attr.aria-label]="option.name === null ? 'Default icon' : option.name"
+                    [title]="option.name === null ? 'Default' : option.name"
+                    [tabindex]="icon() === option.name ? 0 : -1"
+                    (click)="icon.set(option.name)"
+                    (keydown)="onIconKeydown($event)"
+                >
+                    <lucide-icon [img]="option.data" />
+                </button>
+            }
+        </div>
+    </div>
 
     <div class="field">
         <span

@@ -46,13 +46,17 @@
     <div class="fields">
         <div class="field">
             <label for="fullName">Full name</label>
-            <input
-                id="fullName"
-                type="text"
-                autocomplete="name"
-                formControlName="fullName"
-                [attr.aria-invalid]="isInvalid(form.controls.fullName)"
-            />
+            <div class="emoji-input-wrap">
+                <input
+                    #fullNameField
+                    id="fullName"
+                    type="text"
+                    autocomplete="name"
+                    formControlName="fullName"
+                    [attr.aria-invalid]="isInvalid(form.controls.fullName)"
+                />
+                <app-emoji-button [target]="fullNameField" />
+            </div>
             @if (messageFor('fullName'); as message) {
                 <p class="hint is-error">{{ message }}</p>
             }
@@ -76,12 +80,16 @@
 
         <div class="field">
             <label for="bio">Bio</label>
-            <textarea
-                id="bio"
-                rows="3"
-                placeholder="Something about you"
-                formControlName="bio"
-            ></textarea>
+            <div class="emoji-input-wrap is-multiline">
+                <textarea
+                    #bioField
+                    id="bio"
+                    rows="3"
+                    placeholder="Something about you"
+                    formControlName="bio"
+                ></textarea>
+                <app-emoji-button [target]="bioField" />
+            </div>
         </div>
 
         @if (user()?.email) {

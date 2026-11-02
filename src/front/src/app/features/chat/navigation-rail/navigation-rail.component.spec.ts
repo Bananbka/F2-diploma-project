@@ -119,7 +119,23 @@ describe('NavigationRailComponent avatar', () => {
             button('Folder Work').click();
 
             expect(emitted).toEqual(['group', 'folder:f1']);
-            expect(button('Folder Work').textContent).toContain('W');
+            expect(button('Folder Work').querySelector('svg')).not.toBeNull();
+        });
+
+        it('draws the chosen icon, falling back to the folder icon when unset or unknown', async () => {
+            TestBed.inject(FolderStoreService).folders.set([
+                { id: 'f1', title: 'Work', icon: 'briefcase', items: [] },
+                { id: 'f2', title: 'Plain', icon: null, items: [] },
+                { id: 'f3', title: 'Odd', icon: 'no-such-icon', items: [] },
+            ]);
+            await session.restore();
+            fixture.detectChanges();
+            await fixture.whenStable();
+            fixture.detectChanges();
+
+            const art = (label: string) => button(label).querySelector('svg')!.innerHTML;
+            expect(art('Folder Work')).not.toBe(art('Folder Plain'));
+            expect(art('Folder Odd')).toBe(art('Folder Plain'));
         });
 
         it('opens the folder dialog from New folder', async () => {

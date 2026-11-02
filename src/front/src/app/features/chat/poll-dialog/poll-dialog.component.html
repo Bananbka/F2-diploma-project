@@ -31,27 +31,35 @@
 
     <label class="field">
         <span>Question</span>
-        <input
-            type="text"
-            class="input"
-            [attr.maxlength]="questionMax"
-            [value]="question()"
-            (input)="question.set($any($event.target).value)"
-        />
+        <div class="emoji-input-wrap">
+            <input
+                #questionField
+                type="text"
+                class="input"
+                [attr.maxlength]="questionMax"
+                [value]="question()"
+                (input)="question.set($any($event.target).value)"
+            />
+            <app-emoji-button [target]="questionField" />
+        </div>
     </label>
 
     <div class="field">
         <span>Options</span>
         @for (option of options(); track $index) {
             <div class="option-row">
-                <input
-                    type="text"
-                    class="input"
-                    [attr.maxlength]="optionMax"
-                    [value]="option"
-                    [attr.aria-label]="'Option ' + ($index + 1)"
-                    (input)="setOption($index, $any($event.target).value)"
-                />
+                <div class="emoji-input-wrap">
+                    <input
+                        #optionField
+                        type="text"
+                        class="input"
+                        [attr.maxlength]="optionMax"
+                        [value]="option"
+                        [attr.aria-label]="'Option ' + ($index + 1)"
+                        (input)="setOption($index, $any($event.target).value)"
+                    />
+                    <app-emoji-button [target]="optionField" />
+                </div>
                 <button
                     type="button"
                     class="icon"

@@ -16,8 +16,10 @@ import { Chat } from '../../../core/models/chat.model';
 import { Folder } from '../../../core/services/folder-api.service';
 import { FolderStoreService } from '../../../core/services/folder-store.service';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
+import { EmojiButtonComponent } from '../../../shared/ui/emoji-field/emoji-button.component';
 import { trapTab } from '../../../shared/ui/focus-trap';
 import { avatarKindFor, chatTitle } from '../../../shared/utils/display';
+import { FOLDER_ICON_OPTIONS, FOLDER_ICONS } from '../folder-icons';
 
 const MAX_TITLE = 64;
 
@@ -30,7 +32,7 @@ const MAX_TITLE = 64;
  */
 @Component({
     selector: 'app-folder-edit-dialog',
-    imports: [LucideAngularModule, AvatarComponent],
+    imports: [LucideAngularModule, AvatarComponent, EmojiButtonComponent],
     templateUrl: './folder-edit-dialog.component.html',
     styleUrl: './folder-edit-dialog.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
@@ -53,6 +55,9 @@ export class FolderEditDialogComponent {
 
     readonly maxTitle = MAX_TITLE;
     readonly name = signal('');
+    /** The chosen icon name, or null for the default. */
+    readonly icon = signal<string | null>(null);
+    readonly iconOptions = FOLDER_ICON_OPTIONS;
     readonly query = signal('');
     readonly picked = signal<ReadonlySet<string>>(new Set());
     /** What was in the folder when the dialog opened: chats float to the top by this, never by live ticks, so rows do not jump under the cursor. */
@@ -81,6 +86,7 @@ export class FolderEditDialogComponent {
         afterNextRender(() => {
             const folder = this.folder();
             this.name.set(folder?.title ?? '');
+            this.icon.set(folder?.icon && folder.icon in FOLDER_ICONS ? folder.icon : null);
             const ids = new Set(folder?.items.map((item) => item.chat_id) ?? []);
             this.initial.set(ids);
             this.picked.set(new Set(ids));
@@ -96,6 +102,20 @@ export class FolderEditDialogComponent {
             }
             return next;
         });
+    }
+
+    /** Roving selection for the icon radiogroup: arrows move the choice and focus together. */
+    onIconKeydown(event: KeyboardEvent): void {
+        const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
+        if (step === undefined) {
+            return;
+        }
+        event.preventDefault();
+        const index = this.iconOptions.findIndex((o) => o.name === this.icon());
+        const next = this.iconOptions[(index + step + this.iconOptions.length) % this.iconOptions.length];
+        this.icon.set(next.name);
+        const group = (event.currentTarget as HTMLElement).parentElement;
+        queueMicrotask(() => group?.querySelector<HTMLElement>('[aria-checked="true"]')?.focus());
     }
 
     /** Escape closes this dialog only; it is handled here, on the dialog, so a menu or confirmation above it is untouched. */
@@ -128,16 +148,19 @@ export class FolderEditDialogComponent {
         let ok: boolean;
         if (folder) {
             // Only what changed is sent: a rename must not rewrite the membership (the API replaces it).
-            const changes: { title?: string; chatIds?: string[] } = {};
+            const changes: { title?: string; chatIds?: string[]; icon?: string | null } = {};
             if (title !== folder.title) {
                 changes.title = title;
+            }
+            if (this.icon() !== (folder.icon ?? null)) {
+                changes.icon = this.icon();
             }
             if (this.membershipChanged()) {
                 changes.chatIds = ids;
             }
             ok = Object.keys(changes).length === 0 || (await this.folders.update(folder.id, changes));
         } else {
-            ok = (await this.folders.create(title, ids)) !== null;
+            ok = (await this.folders.create(title, ids, this.icon())) !== null;
         }
 
         this.busy.set(false);

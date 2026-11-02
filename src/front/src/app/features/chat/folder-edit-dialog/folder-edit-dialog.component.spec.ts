@@ -71,7 +71,7 @@ describe('FolderEditDialogComponent', () => {
         host.querySelector<HTMLButtonElement>('button[type="submit"]')!.click();
         await fixture.whenStable();
 
-        expect(store.create).toHaveBeenCalledWith('Friends', ['a', 'c']);
+        expect(store.create).toHaveBeenCalledWith('Friends', ['a', 'c'], null);
         expect(closed).toBe(1);
     });
 
@@ -112,6 +112,66 @@ describe('FolderEditDialogComponent', () => {
         host.querySelector<HTMLButtonElement>('button[type="submit"]')!.click();
         await fixture.whenStable();
         expect(store.update).toHaveBeenCalledWith('f1', { chatIds: ['b', 'a'] });
+    });
+
+    describe('icon picker', () => {
+        const options = () => Array.from(host.querySelectorAll<HTMLButtonElement>('.icon-option'));
+        const selected = () => options().filter((o) => o.getAttribute('aria-checked') === 'true');
+
+        it('offers a default plus the curated icons, with the default selected on a new folder', async () => {
+            await open(null);
+            expect(options().length).toBeGreaterThanOrEqual(40);
+            expect(selected().length).toBe(1);
+            expect(selected()[0].getAttribute('aria-label')).toBe('Default icon');
+        });
+
+        it('creates a folder with the chosen icon', async () => {
+            await open(null);
+            type(field('input[type="text"]'), 'Work');
+            options()
+                .find((o) => o.getAttribute('aria-label') === 'briefcase')!
+                .click();
+            fixture.detectChanges();
+            expect(selected()[0].getAttribute('aria-label')).toBe('briefcase');
+            host.querySelector<HTMLButtonElement>('button[type="submit"]')!.click();
+            await fixture.whenStable();
+            expect(store.create).toHaveBeenCalledWith('Work', [], 'briefcase');
+        });
+
+        it('moves the choice with the arrow keys', async () => {
+            await open(null);
+            options()[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+            fixture.detectChanges();
+            expect(selected()[0]).toBe(options()[1]);
+        });
+
+        it('sends only the icon when only the icon changed, and null to clear it', async () => {
+            await open({ ...FOLDER, icon: 'star' });
+            expect(selected()[0].getAttribute('aria-label')).toBe('star');
+            options()
+                .find((o) => o.getAttribute('aria-label') === 'heart')!
+                .click();
+            host.querySelector<HTMLButtonElement>('button[type="submit"]')!.click();
+            await fixture.whenStable();
+            expect(store.update).toHaveBeenCalledWith('f1', { icon: 'heart' });
+
+            store.update.calls.reset();
+            await open({ ...FOLDER, icon: 'star' });
+            options()[0].click();
+            host.querySelector<HTMLButtonElement>('button[type="submit"]')!.click();
+            await fixture.whenStable();
+            expect(store.update).toHaveBeenCalledWith('f1', { icon: null });
+        });
+    });
+
+    it('inserts a picked emoji into the folder name', async () => {
+        await open(null);
+        type(field('input[type="text"]'), 'Work');
+        host.querySelector<HTMLButtonElement>('app-emoji-button .trigger')!.click();
+        fixture.detectChanges();
+        host.querySelector<HTMLButtonElement>('app-emoji-picker button.emoji')!.click();
+        fixture.detectChanges();
+        expect(field('input[type="text"]').value.length).toBeGreaterThan('Work'.length);
     });
 
     it('lands on the chat search when asked to edit chats', async () => {

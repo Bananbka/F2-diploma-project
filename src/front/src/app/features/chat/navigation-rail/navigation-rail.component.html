@@ -44,11 +44,7 @@
             [appContextMenu]="folderMenu(item.folder!)"
             (click)="select(item.key)"
         >
-            <span
-                class="initial"
-                aria-hidden="true"
-                >{{ item.initial }}</span
-            >
+            <lucide-icon [img]="item.icon!" />
             @if (item.unread > 0) {
                 <span
                     class="badge"

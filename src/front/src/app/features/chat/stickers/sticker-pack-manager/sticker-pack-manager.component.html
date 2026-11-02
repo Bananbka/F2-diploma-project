@@ -2,14 +2,18 @@
     <div class="field create">
         <label for="newTitle">New pack</label>
         <div class="create-row">
-            <input
-                id="newTitle"
-                type="text"
-                placeholder="Pack name"
-                [value]="newTitle()"
-                (input)="newTitle.set($any($event.target).value)"
-                (keydown.enter)="createPack()"
-            />
+            <div class="emoji-input-wrap">
+                <input
+                    #newTitleField
+                    id="newTitle"
+                    type="text"
+                    placeholder="Pack name"
+                    [value]="newTitle()"
+                    (input)="newTitle.set($any($event.target).value)"
+                    (keydown.enter)="createPack()"
+                />
+                <app-emoji-button [target]="newTitleField" />
+            </div>
             <button
                 type="button"
                 class="create-btn"
@@ -66,13 +70,17 @@
                                 <div class="field">
                                     <label [for]="'title-' + pack.id">Title</label>
                                     <div class="create-row">
-                                        <input
-                                            [id]="'title-' + pack.id"
-                                            type="text"
-                                            [value]="titleDraft()"
-                                            (input)="titleDraft.set($any($event.target).value)"
-                                            (keydown.enter)="saveTitle()"
-                                        />
+                                        <div class="emoji-input-wrap">
+                                            <input
+                                                #titleDraftField
+                                                [id]="'title-' + pack.id"
+                                                type="text"
+                                                [value]="titleDraft()"
+                                                (input)="titleDraft.set($any($event.target).value)"
+                                                (keydown.enter)="saveTitle()"
+                                            />
+                                            <app-emoji-button [target]="titleDraftField" />
+                                        </div>
                                         <button
                                             type="button"
                                             class="create-btn"

@@ -8,6 +8,7 @@ import { SessionService } from '../../../core/services/session.service';
 import { applyServerErrors, errorTextFor } from '../../../shared/forms/server-errors';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
 import { AvatarCropperComponent } from '../../../shared/ui/avatar-cropper/avatar-cropper.component';
+import { EmojiButtonComponent } from '../../../shared/ui/emoji-field/emoji-button.component';
 import { SettingsService } from '../settings.service';
 
 /**
@@ -20,7 +21,7 @@ import { SettingsService } from '../settings.service';
  */
 @Component({
     selector: 'app-profile',
-    imports: [ReactiveFormsModule, LucideAngularModule, AvatarComponent, AvatarCropperComponent],
+    imports: [ReactiveFormsModule, LucideAngularModule, AvatarComponent, AvatarCropperComponent, EmojiButtonComponent],
     templateUrl: './profile.component.html',
     styleUrl: './profile.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,

@@ -37,9 +37,9 @@ export class FolderStoreService {
         }
     }
 
-    async create(title: string, chatIds: string[]): Promise<Folder | null> {
+    async create(title: string, chatIds: string[], icon: string | null = null): Promise<Folder | null> {
         try {
-            const folder = await firstValueFrom(this.api.createFolder(title.trim(), chatIds));
+            const folder = await firstValueFrom(this.api.createFolder(title.trim(), chatIds, icon));
             this.folders.update((all) => [...all.filter((f) => f.id !== folder.id), folder]);
             await this.load();
             return folder;
@@ -53,13 +53,14 @@ export class FolderStoreService {
      * the API replaces it wholesale: a delta would silently empty the folder. Omit it to leave the
      * membership alone.
      */
-    update(folderId: string, changes: { title?: string; chatIds?: string[] }): Promise<boolean> {
+    update(folderId: string, changes: { title?: string; chatIds?: string[]; icon?: string | null }): Promise<boolean> {
         return this.enqueue(folderId, async () => {
             try {
                 const saved = await firstValueFrom(
                     this.api.updateFolder(folderId, {
                         ...(changes.title !== undefined ? { title: changes.title.trim() } : {}),
                         ...(changes.chatIds !== undefined ? { chat_ids: changes.chatIds } : {}),
+                        ...(changes.icon !== undefined ? { icon: changes.icon } : {}),
                     })
                 );
                 if (saved) {
