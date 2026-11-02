@@ -12,6 +12,14 @@ const OPEN_KEY = 'chat-panel-open';
 const VIEW_KEY = 'chat-panel-view';
 const PICKER_TAB_KEY = 'chat-panel-picker-tab';
 
+/** What the chat-info view was showing for one chat, so a route round-trip can put it back. */
+export interface InfoPanelState {
+    tab: 'main' | 'settings' | 'data';
+    memberId: string | null;
+    /** The member's safety number is open inline in place of their profile. */
+    safetyOpen: boolean;
+}
+
 /** Matches the breakpoint where the panel becomes a slide-over covering the conversation. */
 const OVERLAY_QUERY = '(width < 72rem)';
 
@@ -52,6 +60,20 @@ export class ChatPanelStoreService {
     readonly pickerTab = signal<PickerTab>(readStored(PICKER_TAB_KEY, PICKER_TABS, 'emoji'));
     /** The composer currently on screen, if any. There is at most one. */
     readonly composer = signal<ComposerBridge | null>(null);
+
+    /**
+     * Chat-info state per chat id. In memory only: it has to survive navigating to another route and
+     * back within the session (the component is destroyed on the way), not a reload.
+     */
+    private readonly infoStates = new Map<string, InfoPanelState>();
+
+    infoState(chatId: string): InfoPanelState | null {
+        return this.infoStates.get(chatId) ?? null;
+    }
+
+    saveInfoState(chatId: string, state: InfoPanelState): void {
+        this.infoStates.set(chatId, state);
+    }
 
     /** Header entry point: show chat info, or close the panel if it is already showing it. */
     toggleProfile(): void {

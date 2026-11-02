@@ -15,6 +15,7 @@ import { safetyNumberGroups } from '../../../shared/utils/display';
     templateUrl: './safety-number.component.html',
     styleUrl: './safety-number.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
+    host: { '[class.is-embedded]': 'embedded()' },
 })
 export class SafetyNumberComponent {
     private readonly keyStore = inject(KeyStoreService);
@@ -25,6 +26,8 @@ export class SafetyNumberComponent {
 
     readonly chatId = input.required<string>();
     readonly userId = input.required<string>();
+    /** Shown inside the chat-info side panel, which supplies its own header and back control. */
+    readonly embedded = input(false);
 
     readonly safetyNumber = signal<string | null>(null);
     readonly qrDataUrl = signal<string | null>(null);

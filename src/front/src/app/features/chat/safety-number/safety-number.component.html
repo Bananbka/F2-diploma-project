@@ -1,17 +1,19 @@
-<header class="head">
-    <button
-        type="button"
-        class="back"
-        aria-label="Back to conversation"
-        (click)="back()"
-    >
-        <lucide-icon [img]="arrowLeftIcon" />
-    </button>
-    <div>
-        <h2>Safety number</h2>
-        <p class="head-sub">{{ peer().name }}</p>
-    </div>
-</header>
+@if (!embedded()) {
+    <header class="head">
+        <button
+            type="button"
+            class="back"
+            aria-label="Back to conversation"
+            (click)="back()"
+        >
+            <lucide-icon [img]="arrowLeftIcon" />
+        </button>
+        <div>
+            <h2>Safety number</h2>
+            <p class="head-sub">{{ peer().name }}</p>
+        </div>
+    </header>
+}
 
 <div class="body">
     @if (loading()) {

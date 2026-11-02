@@ -45,6 +45,7 @@ import { b64uDecode } from '../../../core/crypto/primitives';
 import { Chat, InviteLink, ParticipantRole, UserSearchResult } from '../../../core/models/chat.model';
 import { ChatRoster } from '../../../core/models/crypto.model';
 import { ChatApiService } from '../../../core/services/chat-api.service';
+import { ChatPanelStoreService } from '../../../core/services/chat-panel-store.service';
 import { ChatStoreService } from '../../../core/services/chat-store.service';
 import { ContactsApiService } from '../../../core/services/contacts-api.service';
 import { CryptoApiService } from '../../../core/services/crypto-api.service';
@@ -56,6 +57,7 @@ import { ContextMenuDirective, ContextMenuProvider } from '../../../shared/ui/co
 import { ContextMenuEntry } from '../../../shared/ui/context-menu/context-menu.model';
 import { avatarKindFor, DELETED_USER_LABEL, safetyNumberGroups } from '../../../shared/utils/display';
 import { ExportDialogComponent } from '../export-dialog/export-dialog.component';
+import { SafetyNumberComponent } from '../safety-number/safety-number.component';
 
 /** Mirrors the server's `ROLE_RANK`: removal needs a strictly higher rank than the target. */
 const MEMBER_RANK: Record<ParticipantRole, number> = { owner: 3, admin: 2, member: 1 };
@@ -91,7 +93,15 @@ export interface MemberRow {
 
 @Component({
     selector: 'app-chat-info',
-    imports: [RouterLink, LucideAngularModule, AvatarComponent, DatePipe, ExportDialogComponent, ContextMenuDirective],
+    imports: [
+        RouterLink,
+        SafetyNumberComponent,
+        LucideAngularModule,
+        AvatarComponent,
+        DatePipe,
+        ExportDialogComponent,
+        ContextMenuDirective,
+    ],
     templateUrl: './chat-info.component.html',
     styleUrl: './chat-info.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
@@ -107,6 +117,7 @@ export class ChatInfoComponent {
     private readonly router = inject(Router);
     private readonly confirm = inject(ConfirmService);
     private readonly injector = inject(Injector);
+    private readonly panelStore = inject(ChatPanelStoreService);
     private readonly element = inject<ElementRef<HTMLElement>>(ElementRef);
 
     readonly chatId = input.required<string>();
@@ -126,6 +137,8 @@ export class ChatInfoComponent {
     readonly tab = signal<InfoTab>(readStoredTab());
     /** The member whose profile is open in place of the tabs, if any. */
     readonly selectedMemberId = signal<string | null>(null);
+    /** The selected member's safety number, shown inline in place of their profile. */
+    readonly safetyOpen = signal(false);
 
     readonly addOpen = signal(false);
     readonly addQuery = signal('');
@@ -368,6 +381,20 @@ export class ChatInfoComponent {
 
     constructor() {
         effect(() => void this.load(this.chatId()));
+
+        // Remember where the user is, per chat, so coming back from another route lands in the same
+        // place. Gated on `loading` (read first, so it is tracked): mid-load the signals are reset
+        // and would overwrite the saved state before it has been restored.
+        effect(() => {
+            const loading = this.loading();
+            const chatId = this.chatId();
+            const tab = this.tab();
+            const memberId = this.selectedMemberId();
+            const safetyOpen = this.safetyOpen();
+            if (!loading) {
+                this.panelStore.saveInfoState(chatId, { tab, memberId, safetyOpen: memberId !== null && safetyOpen });
+            }
+        });
     }
 
     selectTab(tab: InfoTab): void {
@@ -409,6 +436,7 @@ export class ChatInfoComponent {
     openMember(member: MemberRow): void {
         this.actionError.set(null);
         this.selectedMemberId.set(member.userId);
+        this.safetyOpen.set(false);
         afterNextRender(() => this.element.nativeElement.querySelector<HTMLElement>('.sub-back')?.focus(), {
             injector: this.injector,
         });
@@ -419,6 +447,7 @@ export class ChatInfoComponent {
         const id = this.selectedMemberId();
         this.actionError.set(null);
         this.selectedMemberId.set(null);
+        this.safetyOpen.set(false);
         if (id) {
             afterNextRender(
                 () => this.element.nativeElement.querySelector<HTMLElement>(`[data-member-id="${id}"]`)?.focus(),
@@ -431,7 +460,29 @@ export class ChatInfoComponent {
     onMemberEscape(event: Event): void {
         event.preventDefault();
         event.stopPropagation();
-        this.closeMember();
+        if (this.safetyOpen()) {
+            this.closeSafety();
+        } else {
+            this.closeMember();
+        }
+    }
+
+    /** Show the member's safety number inside the panel rather than navigating away from it. */
+    openSafety(member: MemberRow): void {
+        this.actionError.set(null);
+        this.selectedMemberId.set(member.userId);
+        this.safetyOpen.set(true);
+        afterNextRender(() => this.element.nativeElement.querySelector<HTMLElement>('.sub-back')?.focus(), {
+            injector: this.injector,
+        });
+    }
+
+    /** Back from the safety number to the member's profile. */
+    closeSafety(): void {
+        this.safetyOpen.set(false);
+        afterNextRender(() => this.element.nativeElement.querySelector<HTMLElement>('.sub-back')?.focus(), {
+            injector: this.injector,
+        });
     }
 
     /** Try the load again after it failed. */
@@ -515,6 +566,11 @@ export class ChatInfoComponent {
         this.safetyNumber.set(null);
         this.inviteLinks.set([]);
         this.selectedMemberId.set(null);
+        this.safetyOpen.set(false);
+        // Another chat starts from the default; the same chat (route round-trip, reload after an
+        // add) resumes where it was.
+        const saved = this.panelStore.infoState(chatId);
+        this.tab.set(saved?.tab ?? readStoredTab());
 
         try {
             // `GET /chats/{id}` is the only endpoint that populates participants — the list endpoint
@@ -556,6 +612,15 @@ export class ChatInfoComponent {
                 }
             }
 
+            // A remembered member who has since left (or been removed) is dropped, not shown blank.
+            if (saved?.memberId) {
+                const member = this.members().find((m) => m.userId === saved.memberId);
+                if (member) {
+                    this.selectedMemberId.set(member.userId);
+                    this.safetyOpen.set(saved.safetyOpen && this.canShowSafety(member));
+                }
+            }
+
             if (this.canManageInvites()) {
                 await this.loadInviteLinks(chatId);
             }
@@ -564,6 +629,10 @@ export class ChatInfoComponent {
         } finally {
             this.loading.set(false);
         }
+    }
+
+    canShowSafety(member: MemberRow): boolean {
+        return !member.isMe && !member.deleted && member.hasKeys && !this.isChannel();
     }
 
     private async loadInviteLinks(chatId: string): Promise<void> {
@@ -825,7 +894,7 @@ export class ChatInfoComponent {
                 entries.push({
                     icon: ShieldCheck,
                     label: 'Safety number',
-                    action: () => void this.router.navigate(['/chats', this.chatId(), 'safety', member.userId]),
+                    action: () => this.openSafety(member),
                 });
             }
             if (!member.isMe && !member.deleted && !this.isPrivate()) {

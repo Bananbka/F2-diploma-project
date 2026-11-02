@@ -8,6 +8,7 @@ import { ChatStoreService } from '../../../core/services/chat-store.service';
 import { ContactsApiService } from '../../../core/services/contacts-api.service';
 import { CryptoApiService } from '../../../core/services/crypto-api.service';
 import { DirectoryService } from '../../../core/services/directory.service';
+import { KeyStoreService } from '../../../core/services/key-store.service';
 import { SessionService } from '../../../core/services/session.service';
 import { ChatInfoComponent } from './chat-info.component';
 
@@ -465,6 +466,142 @@ describe('ChatInfoComponent', () => {
             expect(host.querySelector('.profile-name')?.textContent).toContain('Deleted user');
             expect(host.querySelector('.profile-username')).toBeNull();
             expect(host.querySelector('.profile img')).toBeNull();
+        });
+    });
+
+    describe('safety number inline and state restoration', () => {
+        const PEER_ID = 'cccccccc-0000-4000-8000-000000000003';
+        const NUMBER = '12345 67890 12345 67890 12345 67890';
+        const GROUP: Chat = {
+            ...CHAT,
+            participants: [
+                { user_id: OWNER_ID, role: 'owner', joined_at: '2024-01-01T00:00:00Z' },
+                { user_id: PEER_ID, role: 'member', joined_at: '2024-01-01T00:00:00Z' },
+            ],
+        };
+        let cryptoApi: jasmine.SpyObj<CryptoApiService>;
+
+        const rosterOf = (ids: string[]) =>
+            of({
+                chat_id: CHAT_ID,
+                current_epoch: 1,
+                member_set_hash: 'h',
+                members: ids.map((user_id) => ({
+                    user_id,
+                    device_id: 'd',
+                    identity_key_id: 'k',
+                    identity_public_key: 'AAAA',
+                    signing_public_key: 'AAAA',
+                    identity_key_signature: 'AAAA',
+                    signed_prekey_public: null,
+                    signed_prekey_signature: null,
+                })),
+            } as never);
+
+        beforeEach(() => {
+            cryptoApi = TestBed.inject(CryptoApiService) as jasmine.SpyObj<CryptoApiService>;
+            cryptoApi.getRoster.and.returnValue(rosterOf([OWNER_ID, PEER_ID]) as never);
+            chatApi.getChat.and.returnValue(of(GROUP));
+            // The embedded view derives the number locally; stub the key store it asks.
+            spyOn(TestBed.inject(KeyStoreService), 'computeSafetyNumber').and.resolveTo(NUMBER);
+        });
+
+        async function mount(chatId = CHAT_ID): Promise<HTMLElement> {
+            fixture = TestBed.createComponent(ChatInfoComponent);
+            fixture.componentRef.setInput('chatId', chatId);
+            fixture.componentRef.setInput('embedded', true);
+            fixture.detectChanges();
+            await fixture.whenStable();
+            fixture.detectChanges();
+            return fixture.nativeElement as HTMLElement;
+        }
+
+        async function settle(): Promise<void> {
+            fixture.detectChanges();
+            await fixture.whenStable();
+            fixture.detectChanges();
+        }
+
+        const peerRow = (host: HTMLElement) => host.querySelector<HTMLElement>(`[data-member-id="${PEER_ID}"]`)!;
+
+        it('opens the safety number inline and goes back to the member profile', async () => {
+            const router = TestBed.inject(Router);
+            const navigate = spyOn(router, 'navigate');
+            const host = await mount();
+
+            peerRow(host).click();
+            await settle();
+            const tile = Array.from(host.querySelectorAll<HTMLElement>('.tile')).find((t) =>
+                t.textContent?.includes('Safety number')
+            )!;
+            tile.click();
+            await settle();
+
+            expect(host.querySelector('app-safety-number')).not.toBeNull();
+            expect(host.querySelector('app-safety-number .head')).toBeNull();
+            expect(host.querySelector('app-safety-number .full-value')?.textContent).toContain(NUMBER);
+            expect(navigate).not.toHaveBeenCalled();
+
+            host.querySelector<HTMLElement>('.sub-back')!.click();
+            await settle();
+
+            expect(host.querySelector('app-safety-number')).toBeNull();
+            expect(host.querySelector('.profile-name')).not.toBeNull();
+        });
+
+        it('restores tab, member and safety sub-view after the component is destroyed and recreated', async () => {
+            let host = await mount();
+            peerRow(host).click();
+            await settle();
+            fixture.componentInstance.openSafety(fixture.componentInstance.selectedMember()!);
+            await settle();
+            fixture.destroy();
+
+            host = await mount();
+
+            expect(fixture.componentInstance.selectedMemberId()).toBe(PEER_ID);
+            expect(fixture.componentInstance.safetyOpen()).toBeTrue();
+            expect(host.querySelector('app-safety-number')).not.toBeNull();
+        });
+
+        it('restores the selected tab', async () => {
+            await mount();
+            fixture.componentInstance.selectTab('settings');
+            await settle();
+            fixture.destroy();
+            sessionStorage.removeItem('chat-info-tab');
+
+            await mount();
+
+            expect(fixture.componentInstance.tab()).toBe('settings');
+        });
+
+        it('drops a remembered member who is no longer in the chat', async () => {
+            const host = await mount();
+            peerRow(host).click();
+            await settle();
+            fixture.destroy();
+
+            chatApi.getChat.and.returnValue(of({ ...GROUP, participants: [GROUP.participants[0]] }));
+            await mount();
+
+            expect(fixture.componentInstance.selectedMemberId()).toBeNull();
+            expect(fixture.componentInstance.safetyOpen()).toBeFalse();
+        });
+
+        it('starts a different chat from the default', async () => {
+            const host = await mount();
+            peerRow(host).click();
+            await settle();
+            fixture.destroy();
+            sessionStorage.removeItem('chat-info-tab');
+
+            const OTHER = 'a0000000-0000-4000-8000-000000000009';
+            chatApi.getChat.and.returnValue(of({ ...GROUP, id: OTHER }));
+            await mount(OTHER);
+
+            expect(fixture.componentInstance.selectedMemberId()).toBeNull();
+            expect(fixture.componentInstance.tab()).toBe('main');
         });
     });
 });
