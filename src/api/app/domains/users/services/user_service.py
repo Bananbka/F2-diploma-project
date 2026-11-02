@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette import status
 
 from app.core.exceptions import AppException
-from app.core.security import get_password_hash
+from app.core.security import get_password_hash_async
 from app.domains.users.models.user import User
 from app.domains.users.schemas.user_schemas import UserCreate
 
@@ -89,7 +89,7 @@ async def create_user(db: AsyncSession, user_in: UserCreate) -> User | None:
 
     user_dict = {
         **user_in.model_dump(exclude={"password"}),
-        "hashed_password": get_password_hash(user_in.password),
+        "hashed_password": await get_password_hash_async(user_in.password),
     }
 
     user = User(**user_dict)
