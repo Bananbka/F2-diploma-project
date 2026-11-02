@@ -18,13 +18,17 @@
         <div class="fields">
             <div class="field">
                 <label for="title">Group name</label>
-                <input
-                    id="title"
-                    type="text"
-                    placeholder="Dev Team"
-                    formControlName="title"
-                    [attr.aria-invalid]="!!titleError()"
-                />
+                <div class="emoji-input-wrap">
+                    <input
+                        #titleField
+                        id="title"
+                        type="text"
+                        placeholder="Dev Team"
+                        formControlName="title"
+                        [attr.aria-invalid]="!!titleError()"
+                    />
+                    <app-emoji-button [target]="titleField" />
+                </div>
                 @if (titleError(); as message) {
                     <p class="hint is-error">{{ message }}</p>
                 }
@@ -32,12 +36,16 @@
 
             <div class="field">
                 <label for="description">Description</label>
-                <textarea
-                    id="description"
-                    rows="2"
-                    placeholder="What is this group for?"
-                    formControlName="description"
-                ></textarea>
+                <div class="emoji-input-wrap is-multiline">
+                    <textarea
+                        #descriptionField
+                        id="description"
+                        rows="2"
+                        placeholder="What is this group for?"
+                        formControlName="description"
+                    ></textarea>
+                    <app-emoji-button [target]="descriptionField" />
+                </div>
             </div>
         </div>
 

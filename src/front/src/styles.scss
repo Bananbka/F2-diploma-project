@@ -169,6 +169,42 @@ lucide-icon {
         U+2194-21AA, U+231A-23FF, U+24C2, U+25AA-25FE, U+2934-2935, U+3030, U+303D, U+3297, U+3299, U+E0020-E007F;
 }
 
+/* Typed emoji in text fields use the same artwork as the composer. */
+input[type='text'],
+input[type='search'],
+textarea {
+    font-family: 'Twemoji', var(--font-sans);
+}
+
+/* A text field with an emoji button (`app-emoji-button`) tucked into its right edge. */
+.emoji-input-wrap {
+    position: relative;
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    align-items: center;
+
+    /* Tripled class: component stylesheets set `padding` on their inputs with higher specificity and load later. */
+    &.emoji-input-wrap.emoji-input-wrap > input,
+    &.emoji-input-wrap.emoji-input-wrap > textarea {
+        flex: 1;
+        min-width: 0;
+        padding-right: 2.25rem;
+    }
+
+    > app-emoji-button {
+        position: absolute;
+        top: 50%;
+        right: 0.375rem;
+        transform: translateY(-50%);
+    }
+
+    &.is-multiline > app-emoji-button {
+        top: 0.375rem;
+        transform: none;
+    }
+}
+
 .twemoji {
     display: inline-block;
     width: 1.25em;

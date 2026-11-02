@@ -9,6 +9,8 @@ import { ConfigService } from './config.service';
 export interface Folder {
     id: string;
     title: string;
+    /** A lucide kebab-case icon name, or null/absent for the default. */
+    icon?: string | null;
     items: { chat_id: string }[];
 }
 
@@ -26,9 +28,9 @@ export class FolderApiService {
         return this.http.get<SuccessResponse<Folder[]>>(this.apiUrl).pipe(map((r) => r.data));
     }
 
-    createFolder(title: string, chatIds: string[]): Observable<Folder> {
+    createFolder(title: string, chatIds: string[], icon?: string | null): Observable<Folder> {
         return this.http
-            .post<SuccessResponse<Folder>>(this.apiUrl, { title, chat_ids: chatIds })
+            .post<SuccessResponse<Folder>>(this.apiUrl, { title, chat_ids: chatIds, ...(icon ? { icon } : {}) })
             .pipe(map((r) => r.data));
     }
 
@@ -37,9 +39,12 @@ export class FolderApiService {
      *
      * `chat_ids` is a **full replace** despite the verb: sending `[]` empties the folder, and omitting
      * the key entirely leaves its contents untouched. Callers that mean to add one chat must send the
-     * whole resulting set.
+     * whole resulting set. `icon` omitted leaves it unchanged; `null` clears it.
      */
-    updateFolder(folderId: string, changes: { title?: string; chat_ids?: string[] }): Observable<Folder> {
+    updateFolder(
+        folderId: string,
+        changes: { title?: string; chat_ids?: string[]; icon?: string | null }
+    ): Observable<Folder> {
         return this.http.patch<SuccessResponse<Folder>>(`${this.apiUrl}${folderId}`, changes).pipe(map((r) => r.data));
     }
 

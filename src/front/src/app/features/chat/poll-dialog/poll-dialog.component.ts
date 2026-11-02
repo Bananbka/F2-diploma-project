@@ -11,10 +11,11 @@ import {
     PollPayload,
     validatePoll,
 } from '../../../core/models/message-payload';
+import { EmojiButtonComponent } from '../../../shared/ui/emoji-field/emoji-button.component';
 
 @Component({
     selector: 'app-poll-dialog',
-    imports: [LucideAngularModule],
+    imports: [LucideAngularModule, EmojiButtonComponent],
     templateUrl: './poll-dialog.component.html',
     styleUrl: './poll-dialog.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,

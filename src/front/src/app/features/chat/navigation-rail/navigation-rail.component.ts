@@ -39,6 +39,7 @@ import {
     unreadTotal,
 } from '../chat-views';
 import { FolderEditDialogComponent } from '../folder-edit-dialog/folder-edit-dialog.component';
+import { folderIconFor } from '../folder-icons';
 
 const SYSTEM_ICONS: Record<SystemViewId, LucideIconData> = {
     all: MessageSquare,
@@ -52,8 +53,6 @@ export interface RailItem {
     key: ChatViewKey;
     label: string;
     icon: LucideIconData | null;
-    /** The folder's first letter, drawn in place of an icon. */
-    initial: string | null;
     unread: number;
     folder: Folder | null;
 }
@@ -104,7 +103,6 @@ export class NavigationRailComponent {
             key: view.id,
             label: view.label,
             icon: SYSTEM_ICONS[view.id],
-            initial: null,
             // "All chats" would only repeat the total of the others, so it carries no badge.
             unread: view.id === 'all' ? 0 : unreadTotal(this.chats().filter((c) => inSystemView(c, view.id))),
             folder: null,
@@ -115,8 +113,7 @@ export class NavigationRailComponent {
         this.folderStore.folders().map((folder) => ({
             key: folderKey(folder.id),
             label: folder.title,
-            icon: null,
-            initial: (Array.from(folder.title.trim())[0] ?? '?').toUpperCase(),
+            icon: folderIconFor(folder.icon),
             unread: unreadTotal(chatsInFolder(this.chats(), folder)),
             folder,
         }))

@@ -7,7 +7,8 @@
 .dialog {
     @include ui.modal-card(26rem);
 
-    max-height: min(36rem, calc(100vh - 2rem));
+    max-height: min(44rem, calc(100vh - 2rem));
+    overflow-y: auto;
 }
 
 .head {
@@ -86,6 +87,46 @@ input[type='search'] {
 
     input {
         padding-left: 2.25rem;
+    }
+}
+
+.icon-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(2rem, 1fr));
+    gap: 0.25rem;
+}
+
+.icon-option {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    aspect-ratio: 1;
+    padding: 0;
+    background: none;
+    border: 1px solid transparent;
+    border-radius: var(--radius-lg);
+    color: var(--muted-foreground);
+    cursor: pointer;
+
+    &:hover {
+        background: rgb(255 255 255 / 6%);
+        color: var(--foreground);
+    }
+
+    &:focus-visible {
+        outline: 2px solid rgb(163 88 249 / 60%);
+        outline-offset: 1px;
+    }
+
+    &.is-selected {
+        background: rgb(163 88 249 / 18%);
+        border-color: rgb(163 88 249 / 60%);
+        color: var(--foreground);
+    }
+
+    lucide-icon {
+        width: 1.125rem;
+        height: 1.125rem;
     }
 }
 

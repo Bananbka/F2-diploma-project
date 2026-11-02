@@ -20,7 +20,7 @@ async def get_count_of_available_chats(db: AsyncSession, user_id: uuid.UUID, cha
 
 
 async def create_folder(db: AsyncSession, user_id: uuid.UUID, data: FolderCreateRequest) -> ChatFolder:
-    folder = ChatFolder(user_id=user_id, title=data.title)
+    folder = ChatFolder(user_id=user_id, title=data.title, icon=data.icon)
     db.add(folder)
     await db.flush()
 
@@ -62,6 +62,9 @@ async def get_folders(db: AsyncSession, user_id: uuid.UUID) -> list[ChatFolder]:
 async def update_folder(db: AsyncSession, user_id: uuid.UUID, folder: ChatFolder, update_data: dict) -> ChatFolder:
     if 'title' in update_data:
         folder.title = update_data['title']
+
+    if 'icon' in update_data:
+        folder.icon = update_data['icon']
 
     if 'chat_ids' in update_data:
         current_chat_ids = {item.chat_id for item in folder.items}

@@ -1,0 +1,36 @@
+:host {
+    position: relative;
+    display: inline-flex;
+}
+
+.trigger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    padding: 0;
+    background: none;
+    border: none;
+    border-radius: 0.375rem;
+    color: var(--muted-foreground);
+    cursor: pointer;
+
+    &:hover,
+    &[aria-expanded='true'] {
+        color: var(--foreground);
+    }
+
+    lucide-icon {
+        width: 1rem;
+        height: 1rem;
+    }
+}
+
+/* The picker is anchored above by default; fields sit near the top of dialogs, so open downward. */
+:host ::ng-deep app-emoji-picker {
+    top: calc(100% + 0.25rem);
+    right: 0;
+    bottom: auto;
+    left: auto;
+}

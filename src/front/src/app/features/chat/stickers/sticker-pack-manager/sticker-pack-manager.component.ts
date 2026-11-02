@@ -9,6 +9,7 @@ import { SessionService } from '../../../../core/services/session.service';
 import { StickerApiService } from '../../../../core/services/sticker-api.service';
 import { TwemojiPipe } from '../../../../shared/emoji/twemoji.pipe';
 import { ContextMenuDirective, ContextMenuProvider } from '../../../../shared/ui/context-menu/context-menu.directive';
+import { EmojiButtonComponent } from '../../../../shared/ui/emoji-field/emoji-button.component';
 import { EmojiPickerComponent } from '../../../../shared/ui/emoji-picker/emoji-picker.component';
 import { SettingsService } from '../../../settings/settings.service';
 
@@ -26,7 +27,7 @@ const MAX_STICKERS_PER_PACK = 120;
  */
 @Component({
     selector: 'app-sticker-pack-manager',
-    imports: [LucideAngularModule, EmojiPickerComponent, TwemojiPipe, ContextMenuDirective],
+    imports: [LucideAngularModule, EmojiButtonComponent, EmojiPickerComponent, TwemojiPipe, ContextMenuDirective],
     templateUrl: './sticker-pack-manager.component.html',
     styleUrl: './sticker-pack-manager.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,

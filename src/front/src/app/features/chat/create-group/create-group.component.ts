@@ -12,10 +12,11 @@ import { isEncryptionRefused } from '../../../core/services/crypto-errors';
 import { DirectoryService } from '../../../core/services/directory.service';
 import { applyServerErrors, errorTextFor } from '../../../shared/forms/server-errors';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
+import { EmojiButtonComponent } from '../../../shared/ui/emoji-field/emoji-button.component';
 
 @Component({
     selector: 'app-create-group',
-    imports: [ReactiveFormsModule, LucideAngularModule, AvatarComponent],
+    imports: [ReactiveFormsModule, LucideAngularModule, AvatarComponent, EmojiButtonComponent],
     templateUrl: './create-group.component.html',
     styleUrl: './create-group.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,

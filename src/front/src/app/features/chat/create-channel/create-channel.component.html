@@ -18,13 +18,17 @@
         <div class="fields">
             <div class="field">
                 <label for="title">Channel name</label>
-                <input
-                    id="title"
-                    type="text"
-                    placeholder="announcements"
-                    formControlName="title"
-                    [attr.aria-invalid]="!!titleError()"
-                />
+                <div class="emoji-input-wrap">
+                    <input
+                        #titleField
+                        id="title"
+                        type="text"
+                        placeholder="announcements"
+                        formControlName="title"
+                        [attr.aria-invalid]="!!titleError()"
+                    />
+                    <app-emoji-button [target]="titleField" />
+                </div>
                 @if (titleError(); as message) {
                     <p class="hint is-error">{{ message }}</p>
                 } @else if (slug()) {
@@ -37,12 +41,16 @@
 
             <div class="field">
                 <label for="description">Description</label>
-                <textarea
-                    id="description"
-                    rows="3"
-                    placeholder="What is this channel about?"
-                    formControlName="description"
-                ></textarea>
+                <div class="emoji-input-wrap is-multiline">
+                    <textarea
+                        #descriptionField
+                        id="description"
+                        rows="3"
+                        placeholder="What is this channel about?"
+                        formControlName="description"
+                    ></textarea>
+                    <app-emoji-button [target]="descriptionField" />
+                </div>
             </div>
         </div>
 
