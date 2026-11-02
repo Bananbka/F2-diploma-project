@@ -16,6 +16,18 @@
     line-height: 1.55;
 }
 
+/* Embedded in the chat-info side panel: the panel owns the frame, so drop the full-page chrome. */
+:host(.is-embedded) {
+    display: block;
+    min-height: 0;
+    background: none;
+}
+
+:host(.is-embedded) .body {
+    max-width: none;
+    padding: 0;
+}
+
 /* ── Trust states ─────────────────────────────────────────────────────────────────────────── */
 
 .alarm,

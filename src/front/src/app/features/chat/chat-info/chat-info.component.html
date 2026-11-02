@@ -56,160 +56,177 @@
                 class="member-view"
                 (keydown.escape)="onMemberEscape($event)"
             >
-                <button
-                    type="button"
-                    class="sub-back"
-                    (click)="closeMember()"
-                >
-                    <lucide-icon [img]="arrowLeftIcon" />
-                    {{ isChannel() ? 'Subscribers' : 'Members' }}
-                </button>
-
-                <div class="profile">
-                    <app-avatar
-                        size="lg"
-                        [name]="member.name"
-                        [seed]="member.userId"
-                        [imageUrl]="member.avatarUrl"
-                        [deleted]="member.deleted"
+                @if (safetyOpen()) {
+                    <button
+                        type="button"
+                        class="sub-back"
+                        (click)="closeSafety()"
+                    >
+                        <lucide-icon [img]="arrowLeftIcon" />
+                        {{ member.name }}
+                    </button>
+                    <app-safety-number
+                        [chatId]="chat()!.id"
+                        [userId]="member.userId"
+                        [embedded]="true"
                     />
-                    <h3 class="profile-name">{{ member.isMe ? member.name + ' (you)' : member.name }}</h3>
-                    @if (member.username && !member.deleted) {
-                        <p class="profile-username">&#64;{{ member.username }}</p>
-                    }
-                    <p class="badge is-neutral">
-                        @if (member.role === 'owner') {
-                            <lucide-icon [img]="crownIcon" />
+                } @else {
+                    <button
+                        type="button"
+                        class="sub-back"
+                        (click)="closeMember()"
+                    >
+                        <lucide-icon [img]="arrowLeftIcon" />
+                        {{ isChannel() ? 'Subscribers' : 'Members' }}
+                    </button>
+
+                    <div class="profile">
+                        <app-avatar
+                            size="lg"
+                            [name]="member.name"
+                            [seed]="member.userId"
+                            [imageUrl]="member.avatarUrl"
+                            [deleted]="member.deleted"
+                        />
+                        <h3 class="profile-name">{{ member.isMe ? member.name + ' (you)' : member.name }}</h3>
+                        @if (member.username && !member.deleted) {
+                            <p class="profile-username">&#64;{{ member.username }}</p>
                         }
-                        {{ member.role }}
-                    </p>
-                    @if (member.deleted) {
-                        <p class="badge is-neutral">Account deleted</p>
-                    } @else if (!isChannel()) {
-                        @if (member.hasKeys) {
-                            <p
-                                class="badge is-ok"
-                                title="The roster publishes an identity key for this member. That is not the same as having verified it: compare the safety number."
-                            >
-                                <lucide-icon [img]="shieldCheckIcon" />
-                                Identity key published
-                            </p>
-                        } @else {
-                            <p
-                                class="badge is-warn"
-                                title="No identity key published, so this member cannot receive encrypted messages."
-                            >
-                                <lucide-icon [img]="shieldAlertIcon" />
-                                No identity key
-                            </p>
+                        <p class="badge is-neutral">
+                            @if (member.role === 'owner') {
+                                <lucide-icon [img]="crownIcon" />
+                            }
+                            {{ member.role }}
+                        </p>
+                        @if (member.deleted) {
+                            <p class="badge is-neutral">Account deleted</p>
+                        } @else if (!isChannel()) {
+                            @if (member.hasKeys) {
+                                <p
+                                    class="badge is-ok"
+                                    title="The roster publishes an identity key for this member. That is not the same as having verified it: compare the safety number."
+                                >
+                                    <lucide-icon [img]="shieldCheckIcon" />
+                                    Identity key published
+                                </p>
+                            } @else {
+                                <p
+                                    class="badge is-warn"
+                                    title="No identity key published, so this member cannot receive encrypted messages."
+                                >
+                                    <lucide-icon [img]="shieldAlertIcon" />
+                                    No identity key
+                                </p>
+                            }
                         }
-                    }
-                </div>
+                    </div>
 
-                <div class="actions">
-                    @if (!member.isMe && !member.deleted && member.hasKeys && !isChannel()) {
-                        <a
-                            class="tile"
-                            [routerLink]="['/chats', chat()!.id, 'safety', member.userId]"
-                        >
-                            <span class="tile-icon"><lucide-icon [img]="shieldIcon" /></span>
-                            <span class="tile-text">
-                                <span class="tile-title">Safety number</span>
-                                <span class="tile-sub">Compare to confirm no key was substituted</span>
-                            </span>
-                            <lucide-icon
-                                [img]="chevronRightIcon"
-                                class="tile-chevron"
-                            />
-                        </a>
-                    }
+                    <div class="actions">
+                        @if (!member.isMe && !member.deleted && member.hasKeys && !isChannel()) {
+                            <button
+                                type="button"
+                                class="tile"
+                                (click)="openSafety(member)"
+                            >
+                                <span class="tile-icon"><lucide-icon [img]="shieldIcon" /></span>
+                                <span class="tile-text">
+                                    <span class="tile-title">Safety number</span>
+                                    <span class="tile-sub">Compare to confirm no key was substituted</span>
+                                </span>
+                                <lucide-icon
+                                    [img]="chevronRightIcon"
+                                    class="tile-chevron"
+                                />
+                            </button>
+                        }
 
-                    @if (!member.isMe && !member.deleted && !isPrivate()) {
-                        <button
-                            type="button"
-                            class="tile"
-                            [disabled]="busy()"
-                            (click)="messageMember(member)"
-                        >
-                            <span class="tile-icon"><lucide-icon [img]="messageIcon" /></span>
-                            <span class="tile-text">
-                                <span class="tile-title">Message</span>
-                                <span class="tile-sub">Open a private chat</span>
-                            </span>
-                        </button>
-                    }
-
-                    @if (!member.isMe && !member.deleted) {
-                        @if (contacted().has(member.userId)) {
-                            <p class="saved-note">
-                                <lucide-icon [img]="checkIcon" />
-                                Saved as a contact
-                            </p>
-                        } @else {
+                        @if (!member.isMe && !member.deleted && !isPrivate()) {
                             <button
                                 type="button"
                                 class="tile"
                                 [disabled]="busy()"
-                                (click)="addContact(member)"
+                                (click)="messageMember(member)"
                             >
-                                <span class="tile-icon"><lucide-icon [img]="bookmarkIcon" /></span>
+                                <span class="tile-icon"><lucide-icon [img]="messageIcon" /></span>
                                 <span class="tile-text">
-                                    <span class="tile-title">Save as contact</span>
-                                    <span class="tile-sub">Lets their name resolve everywhere</span>
+                                    <span class="tile-title">Message</span>
+                                    <span class="tile-sub">Open a private chat</span>
                                 </span>
                             </button>
                         }
-                    }
 
-                    @if (canChangeRole(member)) {
-                        <label class="tile role-tile">
-                            <span class="tile-icon"><lucide-icon [img]="userPlusIcon" /></span>
-                            <span class="tile-text">
-                                <span class="tile-title">Role</span>
-                            </span>
-                            <select
-                                class="member-role"
+                        @if (!member.isMe && !member.deleted) {
+                            @if (contacted().has(member.userId)) {
+                                <p class="saved-note">
+                                    <lucide-icon [img]="checkIcon" />
+                                    Saved as a contact
+                                </p>
+                            } @else {
+                                <button
+                                    type="button"
+                                    class="tile"
+                                    [disabled]="busy()"
+                                    (click)="addContact(member)"
+                                >
+                                    <span class="tile-icon"><lucide-icon [img]="bookmarkIcon" /></span>
+                                    <span class="tile-text">
+                                        <span class="tile-title">Save as contact</span>
+                                        <span class="tile-sub">Lets their name resolve everywhere</span>
+                                    </span>
+                                </button>
+                            }
+                        }
+
+                        @if (canChangeRole(member)) {
+                            <label class="tile role-tile">
+                                <span class="tile-icon"><lucide-icon [img]="userPlusIcon" /></span>
+                                <span class="tile-text">
+                                    <span class="tile-title">Role</span>
+                                </span>
+                                <select
+                                    class="member-role"
+                                    [disabled]="busy()"
+                                    [attr.aria-label]="'Role for ' + member.name"
+                                    [value]="member.role"
+                                    (change)="setRole(member.userId, $any($event.target).value)"
+                                >
+                                    <option value="admin">Admin</option>
+                                    <option value="member">Member</option>
+                                </select>
+                            </label>
+                        }
+
+                        @if (canTransferTo(member)) {
+                            <button
+                                type="button"
+                                class="tile"
                                 [disabled]="busy()"
-                                [attr.aria-label]="'Role for ' + member.name"
-                                [value]="member.role"
-                                (change)="setRole(member.userId, $any($event.target).value)"
+                                (click)="confirmMakeOwner(member)"
                             >
-                                <option value="admin">Admin</option>
-                                <option value="member">Member</option>
-                            </select>
-                        </label>
-                    }
+                                <span class="tile-icon"><lucide-icon [img]="crownIcon" /></span>
+                                <span class="tile-text">
+                                    <span class="tile-title">Make owner</span>
+                                    <span class="tile-sub">You become an admin</span>
+                                </span>
+                            </button>
+                        }
 
-                    @if (canTransferTo(member)) {
-                        <button
-                            type="button"
-                            class="tile"
-                            [disabled]="busy()"
-                            (click)="confirmMakeOwner(member)"
-                        >
-                            <span class="tile-icon"><lucide-icon [img]="crownIcon" /></span>
-                            <span class="tile-text">
-                                <span class="tile-title">Make owner</span>
-                                <span class="tile-sub">You become an admin</span>
-                            </span>
-                        </button>
-                    }
-
-                    @if (canRemove(member)) {
-                        <button
-                            type="button"
-                            class="tile is-danger"
-                            [disabled]="busy()"
-                            (click)="confirmRemove(member)"
-                        >
-                            <span class="tile-icon"><lucide-icon [img]="userMinusIcon" /></span>
-                            <span class="tile-text">
-                                <span class="tile-title">Remove from chat</span>
-                                <span class="tile-sub">Rotates the chat's keys</span>
-                            </span>
-                        </button>
-                    }
-                </div>
+                        @if (canRemove(member)) {
+                            <button
+                                type="button"
+                                class="tile is-danger"
+                                [disabled]="busy()"
+                                (click)="confirmRemove(member)"
+                            >
+                                <span class="tile-icon"><lucide-icon [img]="userMinusIcon" /></span>
+                                <span class="tile-text">
+                                    <span class="tile-title">Remove from chat</span>
+                                    <span class="tile-sub">Rotates the chat's keys</span>
+                                </span>
+                            </button>
+                        }
+                    </div>
+                }
             </section>
         } @else {
             <section class="profile">
