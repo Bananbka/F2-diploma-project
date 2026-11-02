@@ -654,25 +654,19 @@ async def test_delete_chat_is_rate_limited_per_user():
         await alice.aclose()
 
 
-class _FakeCursor:
-    def __init__(self, docs):
-        self._docs = docs
-
-    async def to_list(self, _n):
-        return self._docs
-
-
 class _FakeCollection:
     def __init__(self):
-        self.pipeline = None
-        self.kwargs = None
+        self.queried_chats = []
 
-    def aggregate(self, pipeline, **kwargs):
-        self.pipeline, self.kwargs = pipeline, kwargs
-        return _FakeCursor([])
+    async def find_one(self, query, **kwargs):
+        self.queried_chats.append(query["chat_id"])
+        return None
+
+    async def count_documents(self, query):
+        return 0
 
 
-async def test_malformed_floor_fails_closed_and_aggregation_may_spill_to_disk():
+async def test_malformed_floor_fails_closed():
     good, bad = uuid.uuid4(), uuid.uuid4()
 
     def chat(cid, floor):
@@ -685,15 +679,8 @@ async def test_malformed_floor_fails_closed_and_aggregation_may_spill_to_disk():
     out = await enrich_chats_with_mongo_data(
         {"messages": coll}, uuid.uuid4(), [chat(good, "a" * 24), chat(bad, "not-an-objectid")]
     )
-    branches = coll.pipeline[0]["$match"]["$or"]
-    assert [b["chat_id"] for b in branches] == [good], "the malformed-floor chat must not be matched"
-    assert coll.kwargs == {"allowDiskUse": True}
+    assert coll.queried_chats == [good], "the malformed-floor chat must not be queried"
     assert all(c["last_message"] is None and c["unread_count"] == 0 for c in out)
-
-    # Only malformed floors: still a valid pipeline that matches nothing.
-    coll = _FakeCollection()
-    await enrich_chats_with_mongo_data({"messages": coll}, uuid.uuid4(), [chat(bad, "zz")])
-    assert coll.pipeline[0]["$match"]["$or"] == [{"_id": {"$exists": False}}]
 
 
 async def test_read_frame_does_not_write_when_the_flag_is_not_set(duo):

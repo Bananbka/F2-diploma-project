@@ -305,11 +305,11 @@ async def test_envelope_still_accepted_once_the_chat_is_actually_encrypted():
 
 
 async def test_socket_refuses_read_receipts_for_a_chat_you_are_not_in():
-    """`mark_messages_as_read` reached Mongo with no Postgres check in front of it.
+    """The read-receipt handler took `chat_id` from the frame with no Postgres check in front.
 
-    Any authenticated user could flip `is_read` across a conversation they had never been part
-    of, wiping every member's unread count. Access control lives in Postgres and content lives in
-    Mongo, so a Mongo write with no Postgres check is unauthorised by construction.
+    Any authenticated user could advance read marks across a conversation they had never been
+    part of, wiping every member's unread count. Access control lives in Postgres and content
+    lives in Mongo, so an action with no Postgres check is unauthorised by construction.
     """
     alice, alice_id = await _register_user()
     bob, bob_id = await _register_user()

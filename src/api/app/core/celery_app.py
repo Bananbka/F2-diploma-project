@@ -11,6 +11,10 @@ celery_app = Celery(
 
 celery_app.conf.update(
     task_track_started=True,
+    # Nothing reads task results, and the backend is the main non-evicting Redis, so don't keep
+    # them (result_expires is the backstop for any task that opts back in).
+    task_ignore_result=True,
+    result_expires=3600,
     broker_connection_retry_on_startup=True,
     timezone=settings.TIMEZONE,
     enable_utc=True,

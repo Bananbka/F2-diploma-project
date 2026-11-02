@@ -172,7 +172,7 @@ class ParticipantReadState(BaseModel):
     chat-level value: `MessageDocument.is_read` is one shared boolean per message, so any one
     member reading a group message flipped it for every other member too. The client derives
     "has user X read message Y" itself by comparing `last_read_message_id >= Y._id` — the same
-    ObjectId-monotonicity comparison `mark_messages_as_read` already performs server-side — so one
+    ObjectId-monotonicity comparison the unread count performs server-side — so one
     small per-chat payload is enough to compute read status for an entire rendered message list,
     for however many participants a private chat or group has.
     """

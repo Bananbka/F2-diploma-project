@@ -202,8 +202,7 @@ async def test_one_members_read_does_not_advance_another_members_state():
 
 async def test_garbage_read_id_is_rejected_without_touching_postgres():
     """A non-ObjectId `last_read_message_id` must be rejected before it ever reaches Postgres —
-    not committed and then only caught later by `mark_messages_as_read`'s own validation, which
-    runs too late to undo the write."""
+    not committed and then only caught later, which would be too late to undo the write."""
     alice, alice_id = await _register_user()
     bob, bob_id = await _register_user()
 
