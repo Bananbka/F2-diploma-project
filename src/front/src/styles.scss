@@ -153,6 +153,22 @@ lucide-icon {
  * Global rather than scoped: it is rendered via `[innerHTML]` as a child of whichever component's
  * template used the pipe, the same reason `lucide-icon`'s svg sizing above is global too.
  */
+/*
+ * The same artwork for text that cannot hold an <img>: the composer's <textarea>. A COLR colour
+ * font (twemoji-colr-font, same glyphs as the SVG set), self-hosted so the CSP's `font-src 'self'`
+ * already covers it. `unicode-range` limits it to emoji blocks, so ordinary text never touches it
+ * and an unsupporting browser simply falls through to the system emoji font. The sent text is
+ * still the plain Unicode characters; only their drawing changes.
+ */
+@font-face {
+    font-family: 'Twemoji';
+    font-display: swap;
+    src: url('/fonts/twemoji.woff2') format('woff2');
+    unicode-range:
+        U+1F000-1FAFF, U+2600-27BF, U+2B00-2BFF, U+200D, U+20E3, U+FE0F, U+00A9, U+00AE, U+203C, U+2049, U+2122, U+2139,
+        U+2194-21AA, U+231A-23FF, U+24C2, U+25AA-25FE, U+2934-2935, U+3030, U+303D, U+3297, U+3299, U+E0020-E007F;
+}
+
 .twemoji {
     display: inline-block;
     width: 1.25em;

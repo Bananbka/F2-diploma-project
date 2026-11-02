@@ -8,9 +8,9 @@ import { ChatApiService } from '../../../core/services/chat-api.service';
 import { ChatStoreService } from '../../../core/services/chat-store.service';
 import { DirectoryService } from '../../../core/services/directory.service';
 import { Folder, FolderApiService } from '../../../core/services/folder-api.service';
-import { FolderStoreService } from '../../../core/services/folder-store.service';
 import { ConfirmService } from '../../../shared/ui/confirm-dialog/confirm.service';
 import { ContextMenuItem } from '../../../shared/ui/context-menu/context-menu.model';
+import { ChatViewKey } from '../chat-views';
 import { ChatSidebarComponent } from './chat-sidebar.component';
 
 function chat(overrides: Partial<Chat>): Chat {
@@ -36,7 +36,7 @@ describe('ChatSidebarComponent menus', () => {
 
     function menuItem(target: Chat, label: string): ContextMenuItem | undefined {
         const fixture = TestBed.createComponent(ChatSidebarComponent);
-        fixture.componentRef.setInput('filter', 'all');
+        fixture.componentRef.setInput('view', 'all');
         const entries = fixture.componentInstance.chatMenu(target)();
         return entries.find((e): e is ContextMenuItem => 'label' in e && e.label === label);
     }
@@ -104,7 +104,7 @@ describe('ChatSidebarComponent menus', () => {
 describe('ChatSidebarComponent views', () => {
     const chats = signal<Chat[]>([]);
 
-    function render(filter: 'all' | 'group' | 'channel' = 'all', folders: Folder[] = []) {
+    function render(view: ChatViewKey = 'all', folders: Folder[] = []) {
         const store = Object.assign(jasmine.createSpyObj('ChatStoreService', ['preview', 'loadChats']), {
             chats,
             chatsLoading: signal(false),
@@ -122,7 +122,7 @@ describe('ChatSidebarComponent views', () => {
             ],
         });
         const fixture = TestBed.createComponent(ChatSidebarComponent);
-        fixture.componentRef.setInput('filter', filter);
+        fixture.componentRef.setInput('view', view);
         fixture.detectChanges();
         return fixture;
     }
@@ -133,7 +133,6 @@ describe('ChatSidebarComponent views', () => {
         );
 
     beforeEach(() => {
-        localStorage.removeItem('chat-nav-collapsed');
         chats.set([
             chat({ id: 'dm', chat_type: 'private', title: 'Bob', unread_count: 2 }),
             chat({ id: 'g1', title: 'Team' }),
@@ -141,84 +140,44 @@ describe('ChatSidebarComponent views', () => {
         ]);
     });
 
-    it('replaces the pill row with the nav sections', async () => {
+    it('is a plain list: no collapsible nav sections inside the sidebar', () => {
         const fixture = render('all', [{ id: 'f1', title: 'Work', items: [{ chat_id: 'g1' }] }]);
-        await fixture.whenStable();
-        fixture.detectChanges();
         const host = fixture.nativeElement as HTMLElement;
 
-        expect(host.querySelector('app-chat-nav')).not.toBeNull();
-        expect(host.querySelector('.folders')).toBeNull();
-        expect(host.querySelector('.folder-tab')).toBeNull();
-    });
-
-    it('filters the list by the selected folder and by system views', async () => {
-        const fixture = render('all', [{ id: 'f1', title: 'Work', items: [{ chat_id: 'g1' }] }]);
-        await fixture.whenStable();
-
-        fixture.componentInstance.selectView('folder:f1');
-        fixture.detectChanges();
-        expect(titles(fixture)).toEqual(['Team']);
-
-        fixture.componentInstance.selectView('direct');
-        fixture.detectChanges();
-        expect(titles(fixture)).toEqual(['Bob']);
-
-        fixture.componentInstance.selectView('unread');
-        fixture.detectChanges();
-        expect(titles(fixture)).toEqual(['Bob']);
-
-        fixture.componentInstance.selectView('channel');
-        fixture.detectChanges();
-        expect(titles(fixture)).toEqual(['News']);
-    });
-
-    it('follows the rail filter', () => {
-        const fixture = render('group');
-        expect(titles(fixture)).toEqual(['Team']);
-        fixture.componentRef.setInput('filter', 'channel');
-        fixture.detectChanges();
-        expect(titles(fixture)).toEqual(['News']);
-    });
-
-    it('falls back to all chats when the selected folder disappears', async () => {
-        const fixture = render('all', [{ id: 'f1', title: 'Work', items: [{ chat_id: 'g1' }] }]);
-        await fixture.whenStable();
-        fixture.componentInstance.selectView('folder:f1');
-        fixture.detectChanges();
-        expect(titles(fixture)).toEqual(['Team']);
-
-        TestBed.inject(FolderStoreService).folders.set([]);
-        fixture.detectChanges();
-
-        expect(fixture.componentInstance.view()).toBe('all');
-        expect(titles(fixture).length).toBe(3);
-    });
-
-    it('resets to all chats when the rail filter is clicked again while a folder is selected', async () => {
-        const fixture = render('all', [{ id: 'f1', title: 'Work', items: [{ chat_id: 'g1' }] }]);
-        await fixture.whenStable();
-        fixture.componentInstance.selectView('folder:f1');
-        fixture.detectChanges();
-
-        fixture.componentRef.setInput('filterVersion', 1);
-        fixture.detectChanges();
-
-        expect(fixture.componentInstance.view()).toBe('all');
-    });
-
-    it('opens the folder dialog from the nav and closes it again', async () => {
-        const fixture = render();
-        await fixture.whenStable();
-        const host = fixture.nativeElement as HTMLElement;
-
-        host.querySelector<HTMLButtonElement>('button[aria-label="New folder"]')!.click();
-        fixture.detectChanges();
-        expect(host.querySelector('app-folder-edit-dialog')).not.toBeNull();
-
-        fixture.componentInstance.folderDialog.set(null);
-        fixture.detectChanges();
+        expect(host.querySelector('app-chat-nav')).toBeNull();
+        expect(host.querySelector('[aria-expanded][aria-controls]')).toBeNull();
         expect(host.querySelector('app-folder-edit-dialog')).toBeNull();
+    });
+
+    it('filters the list by the selected view and titles it', async () => {
+        const fixture = render('all', [{ id: 'f1', title: 'Work', items: [{ chat_id: 'g1' }] }]);
+        await fixture.whenStable();
+        const host = fixture.nativeElement as HTMLElement;
+        const heading = () => host.querySelector('h2.view-title')!.textContent!.trim();
+        const show = (view: ChatViewKey) => {
+            fixture.componentRef.setInput('view', view);
+            fixture.detectChanges();
+        };
+
+        expect(heading()).toBe('All chats');
+        expect(titles(fixture).length).toBe(3);
+
+        show('folder:f1');
+        expect(titles(fixture)).toEqual(['Team']);
+        expect(heading()).toBe('Work');
+
+        show('direct');
+        expect(titles(fixture)).toEqual(['Bob']);
+
+        show('unread');
+        expect(titles(fixture)).toEqual(['Bob']);
+
+        show('group');
+        expect(titles(fixture)).toEqual(['Team']);
+        expect(heading()).toBe('Groups');
+
+        show('channel');
+        expect(titles(fixture)).toEqual(['News']);
     });
 
     it('draws a group without a picture as a lettered circle, like a person', () => {

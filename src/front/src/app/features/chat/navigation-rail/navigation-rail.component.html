@@ -5,21 +5,69 @@
 
 <nav
     class="tabs"
-    aria-label="Chat sections"
+    aria-label="Chat views"
 >
-    @for (tab of tabs; track tab.id) {
+    @for (item of systemItems(); track item.key) {
         <button
             type="button"
             class="rail-button"
-            [class.is-active]="filter() === tab.id"
-            [attr.aria-current]="filter() === tab.id ? 'page' : null"
-            [title]="tab.label"
-            (click)="filterChange.emit(tab.id)"
+            [class.is-active]="view() === item.key"
+            [attr.aria-current]="view() === item.key ? 'page' : null"
+            [attr.aria-label]="labelFor(item)"
+            [title]="item.label"
+            (click)="select(item.key)"
         >
-            <lucide-icon [img]="tab.icon" />
-            <span class="sr-only">{{ tab.label }}</span>
+            <lucide-icon [img]="item.icon!" />
+            @if (item.unread > 0) {
+                <span
+                    class="badge"
+                    aria-hidden="true"
+                    >{{ badgeText(item.unread) }}</span
+                >
+            }
         </button>
     }
+
+    <hr
+        class="divider"
+        aria-hidden="true"
+    />
+
+    @for (item of folderItems(); track item.key) {
+        <button
+            type="button"
+            class="rail-button"
+            [class.is-active]="view() === item.key"
+            [attr.aria-current]="view() === item.key ? 'page' : null"
+            [attr.aria-label]="'Folder ' + labelFor(item)"
+            [title]="item.label"
+            [appContextMenu]="folderMenu(item.folder!)"
+            (click)="select(item.key)"
+        >
+            <span
+                class="initial"
+                aria-hidden="true"
+                >{{ item.initial }}</span
+            >
+            @if (item.unread > 0) {
+                <span
+                    class="badge"
+                    aria-hidden="true"
+                    >{{ badgeText(item.unread) }}</span
+                >
+            }
+        </button>
+    }
+
+    <button
+        type="button"
+        class="rail-button"
+        aria-label="New folder"
+        title="New folder"
+        (click)="openFolderDialog()"
+    >
+        <lucide-icon [img]="plusIcon" />
+    </button>
 </nav>
 
 <div class="foot">
@@ -103,3 +151,12 @@
         }
     </div>
 </div>
+
+@if (folderDialog(); as dialog) {
+    <app-folder-edit-dialog
+        [folder]="dialog.folder"
+        [focus]="dialog.focus"
+        [chats]="chats()"
+        (closed)="folderDialog.set(null)"
+    />
+}

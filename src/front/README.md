@@ -63,4 +63,6 @@ For more information on using the Angular CLI, including detailed command refere
 Emoji graphics are [Twemoji](https://github.com/jdecked/twemoji) by Twitter, Inc and other
 contributors, licensed under [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/). The SVGs
 are copied from the `@twemoji/svg` npm package into `public/assets/emoji/` by
-`scripts/copy-emoji.mjs` and served from this app's own origin — see that script for why.
+`scripts/copy-emoji.mjs` and served from this app's own origin — see that script for why. The composer's text box, which
+cannot hold images, uses the matching COLR font from `twemoji-colr-font` (MIT/CC-BY 4.0),
+vendored as `public/fonts/twemoji.woff2`.

@@ -1,15 +1,26 @@
-import { ChangeDetectionStrategy, Component, computed, DestroyRef, inject, signal } from '@angular/core';
+import {
+    ChangeDetectionStrategy,
+    Component,
+    computed,
+    DestroyRef,
+    effect,
+    inject,
+    signal,
+    untracked,
+} from '@angular/core';
 import { Router, RouterOutlet } from '@angular/router';
 import { LucideAngularModule, WifiOff } from 'lucide-angular';
 
 import { ChatPanelStoreService } from '../../../core/services/chat-panel-store.service';
 import { ChatStoreService } from '../../../core/services/chat-store.service';
 import { DirectoryService } from '../../../core/services/directory.service';
+import { FolderStoreService } from '../../../core/services/folder-store.service';
 import { SessionService } from '../../../core/services/session.service';
 import { ResizablePanelComponent } from '../../../shared/ui/resizable-panel/resizable-panel.component';
 import { ChatPanelComponent } from '../chat-panel/chat-panel.component';
 import { ChatSidebarComponent } from '../chat-sidebar/chat-sidebar.component';
-import { ChatFilter, NavigationRailComponent } from '../navigation-rail/navigation-rail.component';
+import { ChatViewKey, folderKey } from '../chat-views';
+import { NavigationRailComponent } from '../navigation-rail/navigation-rail.component';
 
 /** Matches the `@media (width < 48rem)` breakpoint in the shell's own stylesheet. */
 const NARROW_QUERY = '(width < 48rem)';
@@ -37,13 +48,10 @@ export class ChatShellComponent {
 
     private readonly panel = inject(ChatPanelStoreService);
 
-    readonly filter = signal<ChatFilter>('all');
-    readonly filterVersion = signal(0);
+    private readonly folderStore = inject(FolderStoreService);
 
-    onFilterChange(filter: ChatFilter): void {
-        this.filter.set(filter);
-        this.filterVersion.update((v) => v + 1);
-    }
+    /** The selected view of the chat list: chosen on the rail, applied by the sidebar. */
+    readonly view = signal<ChatViewKey>('all');
     readonly panelOpen = this.panel.open;
 
     readonly isOnline = this.store.isOnline;
@@ -67,6 +75,19 @@ export class ChatShellComponent {
     readonly wifiOffIcon = WifiOff;
 
     constructor() {
+        // A selected folder that is gone (deleted here or elsewhere) must not leave the list
+        // filtered by nothing while the rail shows no selection: fall back to everything.
+        effect(() => {
+            const view = this.view();
+            if (
+                view.startsWith('folder:') &&
+                this.folderStore.loaded() &&
+                !this.folderStore.folders().some((f) => folderKey(f.id) === view)
+            ) {
+                untracked(() => this.view.set('all'));
+            }
+        });
+
         this.store.bindRealtime();
         void this.store.loadChats();
         void this.directory.warm();

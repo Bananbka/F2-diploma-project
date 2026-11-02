@@ -13,8 +13,8 @@
 <div class="layout">
     <app-navigation-rail
         class="rail"
-        [filter]="filter()"
-        (filterChange)="onFilterChange($event)"
+        [view]="view()"
+        (viewChange)="view.set($event)"
         (securityRequested)="openSecurity()"
     />
 
@@ -27,10 +27,7 @@
         [defaultWidth]="320"
         [disabled]="isNarrow()"
     >
-        <app-chat-sidebar
-            [filter]="filter()"
-            [filterVersion]="filterVersion()"
-        />
+        <app-chat-sidebar [view]="view()" />
     </app-resizable-panel>
 
     <main
