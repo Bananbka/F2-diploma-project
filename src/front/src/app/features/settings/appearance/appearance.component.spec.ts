@@ -3,6 +3,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 
 import { Appearance, DEFAULT_APPEARANCE } from '../../../core/models/appearance.model';
 import { AppearanceStore } from '../../../core/services/appearance-store.service';
+import { BackgroundImageService } from '../../../core/services/background-image.service';
 import { ConfirmService } from '../../../shared/ui/confirm-dialog/confirm.service';
 import { AppearanceComponent } from './appearance.component';
 
@@ -26,6 +27,10 @@ describe('AppearanceComponent', () => {
             providers: [
                 { provide: AppearanceStore, useValue: store },
                 { provide: ConfirmService, useValue: confirm },
+                {
+                    provide: BackgroundImageService,
+                    useValue: { colorFor: () => Promise.resolve(null), load: () => Promise.resolve(null) },
+                },
             ],
         });
         fixture = TestBed.createComponent(AppearanceComponent);
@@ -82,5 +87,76 @@ describe('AppearanceComponent', () => {
         confirm.ask.and.resolveTo(true);
         await fixture.componentInstance.reset();
         expect(store.reset).toHaveBeenCalled();
+    });
+
+    it('updates the message shape from the slider and the stepper', () => {
+        const slider = root.querySelector<HTMLInputElement>('#appearance-radius')!;
+        slider.value = '8';
+        slider.dispatchEvent(new Event('input'));
+        expect(store.update).toHaveBeenCalledWith({ bubble_radius: 8 });
+        root.querySelector<HTMLButtonElement>('button[aria-label="More rounded"]')!.click();
+        expect(store.update).toHaveBeenCalledWith({ bubble_radius: 20 });
+    });
+
+    describe('background image tuning', () => {
+        const image = {
+            fit: 'cover',
+            position_x: 50,
+            position_y: 50,
+            zoom: 100,
+            dim: 0,
+            blur: 0,
+            version: 'v1',
+        } as const;
+
+        beforeEach(() => {
+            store.value.set({
+                ...DEFAULT_APPEARANCE,
+                background_image_version: 'v1',
+                background: { kind: 'image', color: null, gradient: null, image },
+            });
+            fixture.detectChanges();
+        });
+
+        it('shows the tuning controls only for an image background and emits fit changes', () => {
+            const radios = root.querySelectorAll<HTMLButtonElement>('.fit-option');
+            expect(radios.length).toBe(3);
+            radios[2].click();
+            expect(store.update).toHaveBeenCalledWith({
+                background: jasmine.objectContaining({ kind: 'image', image: { ...image, fit: 'tile' } }),
+            });
+        });
+
+        it('clamps and emits the sliders', () => {
+            const dim = root.querySelector<HTMLInputElement>('#appearance-image-dim')!;
+            dim.value = '80';
+            dim.dispatchEvent(new Event('input'));
+            expect(store.update).toHaveBeenCalledWith({
+                background: jasmine.objectContaining({ image: { ...image, dim: 80 } }),
+            });
+            const zoom = root.querySelector<HTMLInputElement>('#appearance-image-zoom')!;
+            zoom.value = '250';
+            zoom.dispatchEvent(new Event('input'));
+            expect(store.update).toHaveBeenCalledWith({
+                background: jasmine.objectContaining({ image: { ...image, zoom: 250 } }),
+            });
+        });
+
+        it('confirms before removing the image', async () => {
+            const remove = jasmine.createSpy('removeBackgroundImage').and.resolveTo(true);
+            (store as unknown as { removeBackgroundImage: jasmine.Spy }).removeBackgroundImage = remove;
+            await fixture.componentInstance.removeImage();
+            expect(confirm.ask).toHaveBeenCalled();
+            expect(remove).toHaveBeenCalled();
+        });
+
+        it('shows the upload error', async () => {
+            (store as unknown as { uploadBackgroundImage: jasmine.Spy }).uploadBackgroundImage = jasmine
+                .createSpy('upload')
+                .and.resolveTo({ ok: false, message: 'Too big.' });
+            await fixture.componentInstance.upload(new File([], 'x.png', { type: 'image/png' }));
+            fixture.detectChanges();
+            expect(root.querySelector('.image-error')?.textContent).toContain('Too big.');
+        });
     });
 });

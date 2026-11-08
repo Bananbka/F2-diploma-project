@@ -324,6 +324,16 @@ describe('ChatViewComponent', () => {
             expect(panel.view()).toBe('profile');
         });
 
+        it('keeps the header avatar a fixed size whatever the chat font scale', () => {
+            const host = create();
+            document.body.appendChild(host);
+            const avatar = host.querySelector('.identity app-avatar') as HTMLElement;
+            const before = getComputedStyle(avatar).width;
+            host.style.setProperty('--chat-font-scale', '2');
+            expect(getComputedStyle(avatar).width).toBe(before);
+            host.remove();
+        });
+
         it('the member-verification banner opens the Profile view to review members', () => {
             store.memberVerificationError.set('member set hash mismatch');
             const host = create();

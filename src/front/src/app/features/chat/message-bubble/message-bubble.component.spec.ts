@@ -195,6 +195,56 @@ describe('MessageBubbleComponent', () => {
         });
     });
 
+    describe('avatar alignment', () => {
+        it('shares a row with the bubble and lines its bottom edge up with the bubble, at any font scale', () => {
+            (TestBed.inject(DirectoryService).isMe as jasmine.Spy).and.returnValue(false);
+            for (const scale of ['1', '1.6']) {
+                const host = create(
+                    buildMessage({ reactions: [{ emoji: '👍', user_id: 'u9', created_at: '2024-01-01T00:00:00Z' }] })
+                );
+                document.body.appendChild(host);
+                host.style.setProperty('--chat-font-scale', scale);
+                const row = host.querySelector('.bubble-row') as HTMLElement;
+                const avatar = host.querySelector('.bubble-row > .who') as HTMLElement;
+                const bubble = host.querySelector('.bubble-row > .bubble') as HTMLElement;
+                expect(row).not.toBeNull();
+                expect(avatar).not.toBeNull();
+                expect(bubble).not.toBeNull();
+                expect(
+                    Math.abs(avatar.getBoundingClientRect().bottom - bubble.getBoundingClientRect().bottom)
+                ).toBeLessThanOrEqual(1);
+                host.remove();
+            }
+        });
+    });
+
+    describe('voice message layout', () => {
+        it('centres the audio row: equal space above and below, at any font scale', () => {
+            for (const owner of [false, true]) {
+                (TestBed.inject(DirectoryService).isMe as jasmine.Spy).and.returnValue(owner);
+                for (const scale of ['1', '1.6']) {
+                    const host = create(
+                        buildMessage({
+                            status: 'ok',
+                            text: '',
+                            attachments: [buildAttachment({ kind: 'audio', duration_ms: 4000 })],
+                        })
+                    );
+                    document.body.appendChild(host);
+                    host.style.setProperty('--chat-font-scale', scale);
+                    const bubble = (host.querySelector('.bubble') as HTMLElement).getBoundingClientRect();
+                    const play = (host.querySelector('.audio-play') as HTMLElement).getBoundingClientRect();
+                    const time = (host.querySelector('.audio-time') as HTMLElement).getBoundingClientRect();
+                    const above = play.top - bubble.top;
+                    const below = bubble.bottom - play.bottom;
+                    expect(Math.abs(above - below)).toBeLessThanOrEqual(1);
+                    expect(Math.abs(time.top + time.height / 2 - (play.top + play.height / 2))).toBeLessThanOrEqual(1);
+                    host.remove();
+                }
+            }
+        });
+    });
+
     describe('canRenderMedia gating', () => {
         const statuses: DecryptStatus[] = ['no_key', 'unverified', 'failed', 'legacy'];
 
@@ -430,6 +480,34 @@ describe('MessageBubbleComponent', () => {
             expect(footer.querySelector('.react-trigger')).not.toBeNull();
         });
 
+        it('incoming: reads [react][time][actions] from the left edge, and the time does not move on hover', () => {
+            (TestBed.inject(DirectoryService).isMe as jasmine.Spy).and.returnValue(false);
+            const host = create(buildMessage());
+            document.body.appendChild(host);
+            const left = (selector: string) =>
+                (host.querySelector(selector) as HTMLElement).getBoundingClientRect().left;
+            expect(left('.react-trigger')).toBeLessThan(left('.meta .time'));
+            expect(left('.meta .time')).toBeLessThan(left('.meta .action'));
+            const bubble = (host.querySelector('.bubble') as HTMLElement).getBoundingClientRect();
+            expect(left('.react-trigger') - bubble.left).toBeLessThanOrEqual(4);
+            const timeBefore = left('.meta .time');
+            host.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+            expect(left('.meta .time')).toBe(timeBefore);
+            host.remove();
+        });
+
+        it('own: keeps [react][actions][ticks][time] hugging the right edge', () => {
+            (TestBed.inject(DirectoryService).isMe as jasmine.Spy).and.returnValue(true);
+            const host = create(buildMessage());
+            document.body.appendChild(host);
+            const left = (selector: string) =>
+                (host.querySelector(selector) as HTMLElement).getBoundingClientRect().left;
+            expect(left('.react-trigger')).toBeLessThan(left('.meta .action'));
+            expect(left('.meta .action')).toBeLessThan(left('.meta .receipt'));
+            expect(left('.meta .receipt')).toBeLessThan(left('.meta .time'));
+            host.remove();
+        });
+
         it('renders chips in their own row only when reactions exist, with the add control still in the footer', () => {
             const host = create(
                 buildMessage({ reactions: [{ emoji: '👍', user_id: 'u1', created_at: '2024-01-01T00:00:00Z' }] })
@@ -438,6 +516,25 @@ describe('MessageBubbleComponent', () => {
             expect(host.querySelectorAll('.reactions .reaction-pill').length).toBe(1);
             expect(host.querySelector('.reactions .react-trigger')).toBeNull();
             expect(footerOf(host).querySelector('.react-trigger')).not.toBeNull();
+        });
+
+        it('draws chips and the actions icon from the chat-background variables', () => {
+            const host = create(
+                buildMessage({ reactions: [{ emoji: '👍', user_id: 'u1', created_at: '2024-01-01T00:00:00Z' }] })
+            );
+            const pill = host.querySelector('.reaction-pill') as HTMLElement;
+            const count = host.querySelector('.reaction-count') as HTMLElement;
+            // The chip eases between colours; read the end state rather than a frame of the transition.
+            pill.style.transition = 'none';
+            const before = getComputedStyle(pill).backgroundColor;
+            host.style.setProperty('--chat-chip-bg', 'rgb(1 2 3)');
+            host.style.setProperty('--chat-chip-border', 'rgb(4 5 6)');
+            host.style.setProperty('--chat-meta-fg', 'rgb(7 8 9)');
+            expect(getComputedStyle(pill).backgroundColor).toBe('rgb(1, 2, 3)');
+            expect(getComputedStyle(pill).borderTopColor).toBe('rgb(4, 5, 6)');
+            expect(getComputedStyle(count).color).toBe('rgb(7, 8, 9)');
+            host.style.removeProperty('--chat-chip-bg');
+            expect(getComputedStyle(pill).backgroundColor).toBe(before);
         });
 
         it('places the reaction chips below the time/status footer, not above it', () => {

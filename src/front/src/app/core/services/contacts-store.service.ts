@@ -25,6 +25,26 @@ export class ContactsStoreService {
         }
     }
 
+    /** Save someone (or re-save under a new alias), then refresh so every view agrees. */
+    async add(userId: string, alias?: string): Promise<boolean> {
+        try {
+            await firstValueFrom(this.api.addContact(userId, alias));
+            await this.load();
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    /** Whether this user is a saved contact, reactively. */
+    isSaved(userId: string): boolean {
+        return this.contacts().some((c) => c.contact_id === userId);
+    }
+
+    contactFor(userId: string): Contact | null {
+        return this.contacts().find((c) => c.contact_id === userId) ?? null;
+    }
+
     /**
      * Rename. The endpoint upserts and an absent alias clears it, so an empty name is sent as no alias
      * on purpose: that is how a nickname is removed.

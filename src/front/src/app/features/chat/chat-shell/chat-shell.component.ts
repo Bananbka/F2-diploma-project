@@ -13,8 +13,10 @@ import { LucideAngularModule, WifiOff } from 'lucide-angular';
 
 import { appearanceVars } from '../../../core/services/appearance-css';
 import { AppearanceStore } from '../../../core/services/appearance-store.service';
+import { BackgroundImageService } from '../../../core/services/background-image.service';
 import { ChatPanelStoreService } from '../../../core/services/chat-panel-store.service';
 import { ChatStoreService } from '../../../core/services/chat-store.service';
+import { ContactsStoreService } from '../../../core/services/contacts-store.service';
 import { DirectoryService } from '../../../core/services/directory.service';
 import { FolderStoreService } from '../../../core/services/folder-store.service';
 import { SessionService } from '../../../core/services/session.service';
@@ -53,7 +55,11 @@ export class ChatShellComponent {
     private readonly appearance = inject(AppearanceStore);
 
     /** The user's chat appearance as custom properties scoped to the chat, not to the whole page. */
-    readonly appearanceStyle = computed(() => appearanceVars(this.appearance.value()));
+    private readonly backgroundImages = inject(BackgroundImageService);
+    /** Average colour of the background picture, sampled once per version; null until known. */
+    private readonly imageColor = signal<string | null>(null);
+
+    readonly appearanceStyle = computed(() => appearanceVars(this.appearance.value(), this.imageColor()));
 
     private readonly store = inject(ChatStoreService);
     private readonly directory = inject(DirectoryService);
@@ -64,6 +70,7 @@ export class ChatShellComponent {
     private readonly panel = inject(ChatPanelStoreService);
 
     private readonly folderStore = inject(FolderStoreService);
+    private readonly contactsStore = inject(ContactsStoreService);
 
     /** The selected view of the chat list: chosen on the rail, applied by the sidebar. */
     readonly view = signal<ChatViewKey>('all');
@@ -99,6 +106,9 @@ export class ChatShellComponent {
     readonly wifiOffIcon = WifiOff;
 
     constructor() {
+        // Contacts are needed by chat info ("saved" state) long before the Contacts view opens.
+        void this.contactsStore.load();
+
         // A selected folder that is gone (deleted here or elsewhere) must not leave the list
         // filtered by nothing while the rail shows no selection: fall back to everything.
         effect(() => {
@@ -113,6 +123,22 @@ export class ChatShellComponent {
         });
 
         void this.appearance.load();
+
+        effect((onCleanup) => {
+            const value = this.appearance.value();
+            const version = value.background.image?.version ?? value.background_image_version;
+            this.imageColor.set(null);
+            if (value.background.kind !== 'image' || !version) {
+                return;
+            }
+            let cancelled = false;
+            onCleanup(() => (cancelled = true));
+            void this.backgroundImages.colorFor(version).then((color) => {
+                if (!cancelled) {
+                    this.imageColor.set(color);
+                }
+            });
+        });
         this.store.bindRealtime();
         void this.store.loadChats();
         void this.directory.warm();

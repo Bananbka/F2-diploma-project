@@ -6,6 +6,7 @@ import { Chat, InviteLink } from '../../../core/models/chat.model';
 import { ChatApiService } from '../../../core/services/chat-api.service';
 import { ChatStoreService } from '../../../core/services/chat-store.service';
 import { ContactsApiService } from '../../../core/services/contacts-api.service';
+import { ContactsStoreService } from '../../../core/services/contacts-store.service';
 import { CryptoApiService } from '../../../core/services/crypto-api.service';
 import { DirectoryService } from '../../../core/services/directory.service';
 import { KeyStoreService } from '../../../core/services/key-store.service';
@@ -241,6 +242,36 @@ describe('ChatInfoComponent', () => {
             expect(tabLabels(host)).toEqual(['Members', 'Settings', 'Data']);
             expect(host.querySelector('.members')).not.toBeNull();
             expect(host.querySelector('.invite-create')).toBeNull();
+        });
+
+        it('after a reload, a preloaded contact shows as saved instead of offering Save', async () => {
+            TestBed.inject(ContactsStoreService).contacts.set([
+                {
+                    owner_id: OWNER_ID,
+                    contact_id: PEER_ID,
+                    alias_name: null,
+                    user: { id: PEER_ID, full_name: 'Zed A', username: 'za', avatar_url: null },
+                },
+            ]);
+            const host = await open(PRIVATE);
+            expect(host.querySelector('.saved-note')?.textContent).toContain('Saved as a contact');
+            expect(host.textContent).not.toContain('Save as contact');
+            expect(Array.from(host.querySelectorAll('.saved-actions .link')).map((b) => b.textContent?.trim())).toEqual(
+                ['Rename', 'Remove']
+            );
+        });
+
+        it('offers Save as contact when the peer is not in the store', async () => {
+            TestBed.inject(ContactsStoreService).contacts.set([]);
+            const host = await open(PRIVATE);
+            expect(host.textContent).toContain('Save as contact');
+            expect(host.querySelector('.saved-note')).toBeNull();
+        });
+
+        it('shows the private chat peer picture in the header, monogram only as the fallback', async () => {
+            const host = await open({ ...PRIVATE, avatar_url: 'https://files.test/zed.webp' });
+            expect(fixture.componentInstance.headerAvatarUrl()).toBe('https://files.test/zed.webp');
+            expect(host.querySelector('app-avatar img')?.getAttribute('src')).toBe('https://files.test/zed.webp');
         });
 
         it('offers Profile, Settings and Data for a private chat, without a member list', async () => {

@@ -24,6 +24,26 @@ export class AppearanceApiService {
         return this.http.put<SuccessResponse<Appearance>>(this.url, appearance).pipe(map((r) => r.data));
     }
 
+    uploadBackgroundImage(file: File): Observable<Appearance> {
+        const body = new FormData();
+        body.append('file', file);
+        return this.http
+            .put<SuccessResponse<Appearance>>(`${this.url}/background-image`, body)
+            .pipe(map((r) => r.data));
+    }
+
+    deleteBackgroundImage(): Observable<Appearance> {
+        return this.http.delete<SuccessResponse<Appearance>>(`${this.url}/background-image`).pipe(map((r) => r.data));
+    }
+
+    /** The picture itself, fetched with the session cookie; `version` busts the cache when it changes. */
+    fetchBackgroundImage(version: string): Observable<Blob> {
+        return this.http.get(`${this.url}/background-image`, {
+            params: { v: version },
+            responseType: 'blob',
+        });
+    }
+
     reset(): Observable<Appearance> {
         return this.http.delete<SuccessResponse<Appearance>>(this.url).pipe(map((r) => r.data));
     }

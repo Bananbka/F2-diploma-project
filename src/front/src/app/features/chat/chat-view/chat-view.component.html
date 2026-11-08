@@ -1,3 +1,8 @@
+<app-chat-background
+    [image]="backgroundImage()"
+    [version]="backgroundVersion()"
+/>
+
 @if (!chat()) {
     <div class="placeholder">
         @if (chatId()) {
@@ -28,7 +33,6 @@
             (click)="openProfile()"
         >
             <app-avatar
-                [scaled]="true"
                 [name]="title()"
                 [kind]="avatarKindFor(chat()!.chat_type)"
                 [seed]="chat()!.id"

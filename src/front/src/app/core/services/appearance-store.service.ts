@@ -1,8 +1,16 @@
 import { inject, Injectable, Injector, signal } from '@angular/core';
 import { firstValueFrom } from 'rxjs';
 
-import { Appearance, DEFAULT_APPEARANCE } from '../models/appearance.model';
+import {
+    Appearance,
+    BACKGROUND_IMAGE_MAX_BYTES,
+    BACKGROUND_IMAGE_TYPES,
+    DEFAULT_APPEARANCE,
+    DEFAULT_BACKGROUND_IMAGE,
+    normalizeAppearance,
+} from '../models/appearance.model';
 import { AppearanceApiService } from './appearance-api.service';
+import { BackgroundImageService } from './background-image.service';
 import { ToastService } from './toast.service';
 
 export const APPEARANCE_CACHE_KEY = 'appearance.v1';
@@ -14,7 +22,7 @@ function readCache(): Appearance {
         if (raw) {
             const parsed = JSON.parse(raw) as Appearance;
             if (parsed?.version === 1 && typeof parsed.font_size === 'number' && parsed.background) {
-                return parsed;
+                return normalizeAppearance(parsed);
             }
         }
     } catch {
@@ -38,6 +46,9 @@ export class AppearanceStore {
         return this.injector.get(AppearanceApiService);
     }
     private readonly toast = inject(ToastService);
+    private get images(): BackgroundImageService {
+        return this.injector.get(BackgroundImageService);
+    }
 
     private readonly _value = signal<Appearance>(readCache());
     readonly value = this._value.asReadonly();
@@ -56,10 +67,11 @@ export class AppearanceStore {
         this.loadStarted = true;
         try {
             const remote = await firstValueFrom(this.api.get());
-            this.confirmed = remote;
+            const normalized = normalizeAppearance(remote);
+            this.confirmed = normalized;
             // An edit made while the GET was in flight is newer than what the server sent.
             if (!this.dirty) {
-                this.set(remote);
+                this.set(normalized);
             }
         } catch {
             this.loadStarted = false;
@@ -81,8 +93,9 @@ export class AppearanceStore {
         this.set(DEFAULT_APPEARANCE);
         try {
             const defaults = await firstValueFrom(this.api.reset());
-            this.confirmed = defaults;
-            this.set(defaults);
+            this.confirmed = normalizeAppearance(defaults);
+            this.set(this.confirmed);
+            this.images.clear();
         } catch {
             this.set(before);
             this.toast.error('Could not reset your appearance. Nothing was changed.');
@@ -98,6 +111,7 @@ export class AppearanceStore {
         this.loadStarted = false;
         this.confirmed = DEFAULT_APPEARANCE;
         this._value.set(DEFAULT_APPEARANCE);
+        this.images.clear();
         try {
             localStorage.removeItem(APPEARANCE_CACHE_KEY);
         } catch {
@@ -110,7 +124,7 @@ export class AppearanceStore {
         const sent = this._value();
         try {
             const saved = await firstValueFrom(this.api.put(sent));
-            this.confirmed = saved;
+            this.confirmed = normalizeAppearance(saved);
             if (!this.timer) {
                 this.dirty = false;
             }
@@ -121,6 +135,60 @@ export class AppearanceStore {
             this.dirty = false;
             this.set(this.confirmed);
             this.toast.error('Could not save your appearance. Your previous settings were restored.');
+        }
+    }
+
+    /**
+     * Upload a picture and make it the chat background with default tuning. The file is checked here
+     * first (type, size) so an obviously bad one never leaves the device; the server checks again and
+     * its message is passed back for display. The upload does not change the background kind, so a
+     * second, ordinary save selects it.
+     */
+    async uploadBackgroundImage(file: File): Promise<{ ok: true } | { ok: false; message: string }> {
+        if (!(BACKGROUND_IMAGE_TYPES as readonly string[]).includes(file.type)) {
+            return { ok: false, message: 'Use a JPEG, PNG or WebP image.' };
+        }
+        if (file.size > BACKGROUND_IMAGE_MAX_BYTES) {
+            return { ok: false, message: 'That image is larger than 5 MB.' };
+        }
+        try {
+            const saved = normalizeAppearance(await firstValueFrom(this.api.uploadBackgroundImage(file)));
+            this.confirmed = { ...this.confirmed, background_image_version: saved.background_image_version };
+            this.update({
+                background_image_version: saved.background_image_version,
+                background: {
+                    kind: 'image',
+                    color: null,
+                    gradient: null,
+                    image: { ...DEFAULT_BACKGROUND_IMAGE, version: saved.background_image_version },
+                },
+            });
+            return { ok: true };
+        } catch (error) {
+            const status = (error as { status?: number }).status;
+            const serverMessage = (error as { error?: { error?: { message?: string } } }).error?.error?.message;
+            const message =
+                status === 415
+                    ? 'That file type is not supported. Use JPEG, PNG or WebP.'
+                    : status === 413
+                      ? 'That image is too large. The limit is 5 MB.'
+                      : (serverMessage ?? 'Could not upload that image.');
+            return { ok: false, message };
+        }
+    }
+
+    /** Delete the stored picture and fall back to the default background. */
+    async removeBackgroundImage(): Promise<boolean> {
+        this.cancelPending();
+        try {
+            const saved = normalizeAppearance(await firstValueFrom(this.api.deleteBackgroundImage()));
+            this.confirmed = saved;
+            this.images.clear();
+            this.set(saved);
+            return true;
+        } catch {
+            this.toast.error('Could not remove the background image.');
+            return false;
         }
     }
 

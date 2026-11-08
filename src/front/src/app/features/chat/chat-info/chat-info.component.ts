@@ -1,3 +1,4 @@
+import { NgTemplateOutlet } from '@angular/common';
 import { DatePipe } from '@angular/common';
 import {
     afterNextRender,
@@ -47,7 +48,7 @@ import { ChatRoster } from '../../../core/models/crypto.model';
 import { ChatApiService } from '../../../core/services/chat-api.service';
 import { ChatPanelStoreService } from '../../../core/services/chat-panel-store.service';
 import { ChatStoreService } from '../../../core/services/chat-store.service';
-import { ContactsApiService } from '../../../core/services/contacts-api.service';
+import { ContactsStoreService } from '../../../core/services/contacts-store.service';
 import { CryptoApiService } from '../../../core/services/crypto-api.service';
 import { DirectoryService } from '../../../core/services/directory.service';
 import { SessionService } from '../../../core/services/session.service';
@@ -98,6 +99,7 @@ export interface MemberRow {
         SafetyNumberComponent,
         LucideAngularModule,
         AvatarComponent,
+        NgTemplateOutlet,
         DatePipe,
         ExportDialogComponent,
         ContextMenuDirective,
@@ -109,7 +111,7 @@ export interface MemberRow {
 })
 export class ChatInfoComponent {
     private readonly chatApi = inject(ChatApiService);
-    private readonly contactsApi = inject(ContactsApiService);
+    private readonly contactsStore = inject(ContactsStoreService);
     private readonly cryptoApi = inject(CryptoApiService);
     private readonly directory = inject(DirectoryService);
     private readonly session = inject(SessionService);
@@ -143,8 +145,72 @@ export class ChatInfoComponent {
     readonly addOpen = signal(false);
     readonly addQuery = signal('');
     readonly addResults = signal<UserSearchResult[]>([]);
-    /** Ids saved as contacts during this visit, so the action can confirm itself. */
-    readonly contacted = signal(new Set<string>());
+    /** Derived from the shared contacts store, so it is right after a reload and updates at once. */
+    readonly savedIds = computed(() => new Set(this.contactsStore.contacts().map((c) => c.contact_id)));
+    /** The contact whose alias is being edited inline, and the draft text. */
+    readonly renamingContact = signal<string | null>(null);
+    readonly aliasDraft = signal('');
+
+    isSaved(userId: string): boolean {
+        return this.savedIds().has(userId);
+    }
+
+    startRenameContact(member: MemberRow): void {
+        this.aliasDraft.set(this.contactsStore.contactFor(member.userId)?.alias_name ?? '');
+        this.renamingContact.set(member.userId);
+    }
+
+    async commitRenameContact(member: MemberRow): Promise<void> {
+        if (this.renamingContact() !== member.userId) {
+            return;
+        }
+        this.renamingContact.set(null);
+        const contact = this.contactsStore.contactFor(member.userId);
+        if (!contact || (contact.alias_name ?? '') === this.aliasDraft().trim()) {
+            return;
+        }
+        if (await this.contactsStore.rename(contact, this.aliasDraft())) {
+            await this.directory.warm();
+            void this.store.loadChats();
+        } else {
+            this.actionError.set('Could not rename that contact.');
+        }
+    }
+
+    async removeContact(member: MemberRow): Promise<void> {
+        const contact = this.contactsStore.contactFor(member.userId);
+        if (!contact) {
+            return;
+        }
+        const confirmed = await this.confirm.ask({
+            title: 'Remove contact?',
+            message: `${member.name} is removed from your contacts. Your chat with them is not affected.`,
+            confirmLabel: 'Remove',
+            danger: true,
+        });
+        if (!confirmed) {
+            return;
+        }
+        if (await this.contactsStore.remove(contact)) {
+            await this.directory.warm();
+            void this.store.loadChats();
+        } else {
+            this.actionError.set('Could not remove that contact.');
+        }
+    }
+
+    /** The peer's picture. The detail endpoint leaves it NULL for private chats, so fall back to the list entry and the directory. */
+    readonly headerAvatarUrl = computed(() => {
+        const chat = this.chat();
+        if (!chat || chat.peer_is_deleted) {
+            return null;
+        }
+        if (chat.chat_type !== 'private') {
+            return chat.avatar_url;
+        }
+        const fromList = this.store.chats().find((c) => c.id === chat.id)?.avatar_url;
+        return chat.avatar_url ?? fromList ?? this.peer()?.avatarUrl ?? null;
+    });
 
     private addTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -830,9 +896,11 @@ export class ChatInfoComponent {
     async addContact(member: MemberRow): Promise<void> {
         this.busy.set(true);
         try {
-            await firstValueFrom(this.contactsApi.addContact(member.userId, member.name));
-            this.contacted.update((ids) => new Set(ids).add(member.userId));
+            if (!(await this.contactsStore.add(member.userId, member.name))) {
+                throw new Error('add failed');
+            }
             await this.directory.warm();
+            void this.store.loadChats();
         } catch {
             this.actionError.set('Could not add that contact.');
         } finally {
@@ -904,7 +972,7 @@ export class ChatInfoComponent {
                     action: () => void this.messageMember(member),
                 });
             }
-            if (!member.isMe && !member.deleted && !this.contacted().has(member.userId)) {
+            if (!member.isMe && !member.deleted && !this.isSaved(member.userId)) {
                 entries.push({
                     icon: BookmarkPlus,
                     label: 'Save as contact',

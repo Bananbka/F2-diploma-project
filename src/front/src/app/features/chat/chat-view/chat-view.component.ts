@@ -36,6 +36,7 @@ import {
 
 import { Chat } from '../../../core/models/chat.model';
 import { LocationPayload, PollPayload } from '../../../core/models/message-payload';
+import { AppearanceStore } from '../../../core/services/appearance-store.service';
 import { ChatPanelStoreService } from '../../../core/services/chat-panel-store.service';
 import {
     ChatStoreService,
@@ -53,6 +54,7 @@ import { ContextMenuService } from '../../../shared/ui/context-menu/context-menu
 import { DismissStackService } from '../../../shared/ui/dismiss/dismiss-layer.service';
 import { DismissOnEscapeDirective } from '../../../shared/ui/dismiss/dismiss-on-escape.directive';
 import { avatarKindFor, DELETED_USER_LABEL } from '../../../shared/utils/display';
+import { ChatBackgroundComponent } from '../chat-background/chat-background.component';
 import { ComposedMessage, ComposerComponent } from '../composer/composer.component';
 import { MessageBubbleComponent, MessageMenuRequest } from '../message-bubble/message-bubble.component';
 import { StickerPackViewerService } from '../stickers/sticker-pack-dialog/sticker-pack-viewer';
@@ -73,6 +75,7 @@ const DRAG_SELECT_THRESHOLD_PX = 8;
         AvatarComponent,
         MessageBubbleComponent,
         ComposerComponent,
+        ChatBackgroundComponent,
     ],
     templateUrl: './chat-view.component.html',
     styleUrl: './chat-view.component.scss',
@@ -197,6 +200,14 @@ export class ChatViewComponent {
 
     /** Channels are never end-to-end encrypted, so nothing about them may imply confidentiality. */
     readonly showChannelNotice = this.isChannel;
+
+    private readonly appearance = inject(AppearanceStore);
+    /** The picture behind the messages, only while the image background is the selected kind. */
+    readonly backgroundImage = computed(() => {
+        const background = this.appearance.value().background;
+        return background.kind === 'image' ? (background.image ?? null) : null;
+    });
+    readonly backgroundVersion = computed(() => this.appearance.value().background_image_version);
 
     private readonly scroller = viewChild<ElementRef<HTMLElement>>('scroller');
     private readonly dismissStack = inject(DismissStackService);

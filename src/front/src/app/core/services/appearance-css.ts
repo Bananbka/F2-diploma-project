@@ -1,4 +1,4 @@
-import { Appearance, FONT_STACKS, GRADIENT_CSS } from '../models/appearance.model';
+import { Appearance, BUBBLE_RADIUS_DEFAULT, FONT_STACKS, GRADIENT_CSS } from '../models/appearance.model';
 
 const NEAR_BLACK = '#111111';
 const WHITE = '#ffffff';
@@ -88,12 +88,35 @@ function accentVars(prefix: string, background: string): Record<string, string> 
  * CSS custom properties for an appearance. Colours and background are emitted only when set, so an
  * untouched profile leaves every `var(--x, fallback)` on its fallback and the look is unchanged.
  */
-export function appearanceVars(a: Appearance): Record<string, string> {
+/** A representative colour of whatever is behind the messages, or null for the default background. */
+export function baseColorOf(a: Appearance, imageColor: string | null): string | null {
+    const bg = a.background;
+    if (bg.kind === 'color') {
+        return bg.color;
+    }
+    if (bg.kind === 'gradient' && bg.gradient) {
+        return averageStops(GRADIENT_CSS[bg.gradient]);
+    }
+    if (bg.kind === 'image') {
+        // The picture's average, darkened by the veil over it; a safe dark base until it is known.
+        const dim = (bg.image?.dim ?? 0) / 100;
+        return mixHex(imageColor ?? '#101014', '#000000', dim);
+    }
+    return null;
+}
+
+export function appearanceVars(a: Appearance, imageColor: string | null = null): Record<string, string> {
     const vars: Record<string, string> = {
         '--chat-font-size': `${a.font_size}px`,
         '--chat-font-scale': String(a.font_size / 15),
         '--chat-font-family': FONT_STACKS[a.font_family],
     };
+    // Only when changed, so the default keeps the stylesheet's own radius.
+    if (a.bubble_radius !== BUBBLE_RADIUS_DEFAULT) {
+        vars['--bubble-radius'] = `${a.bubble_radius}px`;
+        // Media inside a bubble sits one padding in from its edge, so its corners follow the bubble's.
+        vars['--media-radius'] = `max(0px, calc(${a.bubble_radius}px - 0.625rem))`;
+    }
     if (a.own_bubble_color) {
         vars['--bubble-own-bg'] = a.own_bubble_color;
         vars['--bubble-own-fg'] = readableTextColor(a.own_bubble_color);
@@ -111,15 +134,23 @@ export function appearanceVars(a: Appearance): Record<string, string> {
         vars['--chat-bg'] = GRADIENT_CSS[bg.gradient];
     }
     // Time, ticks and quotes sit on the chat background rather than inside a bubble, so they follow it.
-    const base =
-        bg.kind === 'color'
-            ? bg.color
-            : bg.kind === 'gradient' && bg.gradient
-              ? averageStops(GRADIENT_CSS[bg.gradient])
-              : null;
+    const base = baseColorOf(a, imageColor);
     if (base && /^#[0-9a-f]{6}$/i.test(base)) {
         vars['--chat-meta-accent'] = readableTextColor(base);
         vars['--chat-meta-fg'] = mutedOn(base);
+        const [r, g, b] = parseHex(readableTextColor(base));
+        vars['--chat-chip-bg'] = `rgb(${r} ${g} ${b} / 12%)`;
+        vars['--chat-chip-border'] = mutedOn(base, 3);
+    }
+    // Reactions I made are tinted with my bubble colour when it stands out from the chat background,
+    // otherwise with the readable accent, so the "mine" state stays distinct and at least 3:1.
+    if (a.own_bubble_color) {
+        const backdrop = base && /^#[0-9a-f]{6}$/i.test(base) ? base : '#0a0a0c';
+        const tint =
+            contrastRatio(a.own_bubble_color, backdrop) >= 3 ? a.own_bubble_color : readableTextColor(backdrop);
+        const [r, g, b] = parseHex(tint);
+        vars['--chat-chip-mine-border'] = tint;
+        vars['--chat-chip-mine-bg'] = `rgb(${r} ${g} ${b} / 25%)`;
     }
     return vars;
 }

@@ -357,6 +357,11 @@ async def purge_outside_postgres(mongo_db, minio, settings, outcome: DeletionOut
             "avatar", minio.delete_file(outcome.avatar_url, settings.MINIO_AVATAR_BUCKET)
         )
 
+    await safely(
+        "chat background",
+        minio.delete_key(f"chat-backgrounds/{user_id}", settings.MINIO_MESSAGE_BUCKET),
+    )
+
     # Sticker objects of the packs this account owned go with the packs. A message that already
     # used one of those stickers will no longer render its image; that is the same behaviour as the
     # owner deleting the pack by hand.

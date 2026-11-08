@@ -1,0 +1,12 @@
+@if (layerStyle(); as style) {
+    <div
+        class="layer"
+        aria-hidden="true"
+        [style]="style"
+    ></div>
+    <div
+        class="dim"
+        aria-hidden="true"
+        [style]="dim()"
+    ></div>
+}

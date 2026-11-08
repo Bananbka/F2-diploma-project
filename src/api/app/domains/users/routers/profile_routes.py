@@ -1,5 +1,5 @@
 from loguru import logger
-from fastapi import APIRouter, Depends, Path, Request, Response
+from fastapi import APIRouter, Depends, File, Path, Request, Response, UploadFile
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from redis.asyncio import Redis
 from sqlalchemy import select
@@ -22,7 +22,7 @@ from app.domains.users.routers.auth_routes import (
     CHANGE_PASSWORD_WINDOW,
     REAUTH_SCOPE,
 )
-from app.domains.users.services import account_deletion_service
+from app.domains.users.services import account_deletion_service, background_image
 from app.domains.users.services.profile_service import is_username_taken
 from app.infrastructure.mongo import get_mongo_db
 from app.infrastructure.redis import get_events_redis, get_redis
@@ -77,7 +77,18 @@ async def put_appearance(
         limit=APPEARANCE_PER_USER,
         window_seconds=APPEARANCE_WINDOW,
     )
-    user.chat_appearance = data_in.model_dump(mode="json")
+    # The uploaded image is server state: a client can tune it but never choose which object, or
+    # which version, it points at.
+    stored_version = _appearance_of(user).background_image_version
+    doc = data_in.model_dump(mode="json")
+    doc["background_image_version"] = stored_version
+    if data_in.background.kind == "image":
+        if stored_version is None:
+            raise AppException(
+                422, "NO_BACKGROUND_IMAGE", "Upload a background image before selecting it."
+            )
+        doc["background"]["image"]["version"] = stored_version
+    user.chat_appearance = doc
     await db.commit()
     await db.refresh(user)
     return SuccessResponse(data=_appearance_of(user))
@@ -88,10 +99,126 @@ async def reset_appearance(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    had_image = _appearance_of(user).background_image_version is not None
     user.chat_appearance = None
     await db.commit()
     await db.refresh(user)
+    if had_image:
+        await minio_manager.delete_key(_background_key(user.id), settings.MINIO_MESSAGE_BUCKET)
     return SuccessResponse(data=AppearanceResponse())
+
+
+# One image per user, in the private message bucket under a reserved prefix. It is only ever
+# served by the endpoints below, keyed by the authenticated user, never by a URL.
+BACKGROUND_WRITES_PER_USER = 10
+BACKGROUND_WINDOW = 60
+BACKGROUND_UPLOAD_CHUNK = 1024 * 1024
+
+
+def _background_key(user_id) -> str:
+    return f"chat-backgrounds/{user_id}"
+
+
+async def _read_background(file: UploadFile) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while chunk := await file.read(BACKGROUND_UPLOAD_CHUNK):
+        total += len(chunk)
+        if total > background_image.MAX_BACKGROUND_BYTES:
+            raise AppException(
+                413, "FILE_SIZE_TOO_LARGE", "Background image must be 5 MB or smaller."
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def _limit_background_writes(redis: Redis, user: User) -> None:
+    await enforce_rate_limit(
+        redis,
+        scope="appearance-image",
+        identifier=str(user.id),
+        limit=BACKGROUND_WRITES_PER_USER,
+        window_seconds=BACKGROUND_WINDOW,
+    )
+
+
+@router.put(
+    "/me/appearance/background-image", response_model=SuccessResponse[AppearanceResponse]
+)
+async def upload_background_image(
+    file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+):
+    await _limit_background_writes(redis, user)
+    data = await _read_background(file)
+    try:
+        content_type, version = background_image.inspect(data)
+    except background_image.InvalidImage as exc:
+        raise AppException(415, "UNSUPPORTED_IMAGE", str(exc))
+
+    await minio_manager.put_object_at(
+        _background_key(user.id),
+        data,
+        content_type,
+        settings.MINIO_MESSAGE_BUCKET,
+        owner_id=str(user.id),
+    )
+
+    doc = _appearance_of(user).model_dump(mode="json")
+    doc["background_image_version"] = version
+    if doc["background"]["kind"] == "image":
+        doc["background"]["image"]["version"] = version
+    user.chat_appearance = doc
+    await db.commit()
+    await db.refresh(user)
+    return SuccessResponse(data=_appearance_of(user))
+
+
+@router.get("/me/appearance/background-image")
+async def get_background_image(request: Request, user: User = Depends(get_current_user)):
+    version = _appearance_of(user).background_image_version
+    if version is None:
+        raise AppException(404, "NO_BACKGROUND_IMAGE", "No background image uploaded.")
+
+    headers = {
+        "ETag": f'"{version}"',
+        "Cache-Control": "private, max-age=3600",
+        "X-Content-Type-Options": "nosniff",
+        "Vary": "Cookie",
+    }
+    if request.headers.get("if-none-match", "").strip() in (f'"{version}"', f'W/"{version}"'):
+        return Response(status_code=304, headers=headers)
+
+    try:
+        body, content_type, _ = await minio_manager.stream_object(
+            _background_key(user.id), settings.MINIO_MESSAGE_BUCKET
+        )
+    except Exception:
+        raise AppException(404, "NO_BACKGROUND_IMAGE", "No background image uploaded.")
+    return Response(content=body, media_type=content_type, headers=headers)
+
+
+@router.delete(
+    "/me/appearance/background-image", response_model=SuccessResponse[AppearanceResponse]
+)
+async def delete_background_image(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+):
+    await _limit_background_writes(redis, user)
+    await minio_manager.delete_key(_background_key(user.id), settings.MINIO_MESSAGE_BUCKET)
+
+    doc = _appearance_of(user).model_dump(mode="json")
+    doc["background_image_version"] = None
+    if doc["background"]["kind"] == "image":
+        doc["background"] = {"kind": "default", "color": None, "gradient": None, "image": None}
+    user.chat_appearance = doc
+    await db.commit()
+    await db.refresh(user)
+    return SuccessResponse(data=_appearance_of(user))
 
 
 @router.patch("/me", response_model=SuccessResponse[UserResponse])

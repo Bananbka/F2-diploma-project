@@ -4,7 +4,39 @@ export type AppearanceFontFamily = (typeof FONT_FAMILIES)[number];
 export const GRADIENT_PRESETS = ['aurora', 'dusk', 'ocean', 'forest', 'sunset'] as const;
 export type AppearanceGradient = (typeof GRADIENT_PRESETS)[number];
 
-export type AppearanceBackgroundKind = 'default' | 'color' | 'gradient';
+export type AppearanceBackgroundKind = 'default' | 'color' | 'gradient' | 'image';
+export type BackgroundImageFit = 'cover' | 'contain' | 'tile';
+
+export const BUBBLE_RADIUS_MIN = 0;
+export const BUBBLE_RADIUS_MAX = 28;
+export const BUBBLE_RADIUS_DEFAULT = 19;
+
+/** Upload limits, mirrored from the server so a bad file is refused before it is sent. */
+export const BACKGROUND_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'] as const;
+export const BACKGROUND_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+
+export interface BackgroundImageSettings {
+    fit: BackgroundImageFit;
+    position_x: number;
+    position_y: number;
+    /** Percent, 100 to 300. */
+    zoom: number;
+    /** Percent of black laid over the image, 0 to 80. */
+    dim: number;
+    /** Pixels, 0 to 20. */
+    blur: number;
+    version: string | null;
+}
+
+export const DEFAULT_BACKGROUND_IMAGE: BackgroundImageSettings = {
+    fit: 'cover',
+    position_x: 50,
+    position_y: 50,
+    zoom: 100,
+    dim: 0,
+    blur: 0,
+    version: null,
+};
 
 export const FONT_SIZE_MIN = 12;
 export const FONT_SIZE_MAX = 22;
@@ -14,26 +46,50 @@ export interface AppearanceBackground {
     kind: AppearanceBackgroundKind;
     color: string | null;
     gradient: AppearanceGradient | null;
+    image?: BackgroundImageSettings | null;
 }
 
 /** The document stored at `/profile/me/appearance`. Replace semantics: always sent whole. */
 export interface Appearance {
     font_size: number;
     font_family: AppearanceFontFamily;
+    bubble_radius: number;
     own_bubble_color: string | null;
     other_bubble_color: string | null;
     background: AppearanceBackground;
+    /** Set whenever an image has been uploaded, even while another background kind is selected. */
+    background_image_version: string | null;
     version: 1;
 }
 
 export const DEFAULT_APPEARANCE: Appearance = {
     font_size: FONT_SIZE_DEFAULT,
     font_family: 'inter',
+    bubble_radius: BUBBLE_RADIUS_DEFAULT,
     own_bubble_color: null,
     other_bubble_color: null,
-    background: { kind: 'default', color: null, gradient: null },
+    background: { kind: 'default', color: null, gradient: null, image: null },
+    background_image_version: null,
     version: 1,
 };
+
+/** Fill anything a stored or older document lacks, so a cached copy from before a field existed still loads. */
+export function normalizeAppearance(raw: Partial<Appearance> | null | undefined): Appearance {
+    const source = raw ?? {};
+    const image = source.background?.image;
+    return {
+        ...DEFAULT_APPEARANCE,
+        ...source,
+        bubble_radius: typeof source.bubble_radius === 'number' ? source.bubble_radius : BUBBLE_RADIUS_DEFAULT,
+        background: {
+            ...DEFAULT_APPEARANCE.background,
+            ...source.background,
+            image: image ? { ...DEFAULT_BACKGROUND_IMAGE, ...image } : null,
+        },
+        background_image_version: source.background_image_version ?? null,
+        version: 1,
+    };
+}
 
 /** Twemoji stays first in every stack so emoji render consistently whatever the text font is. */
 export const FONT_STACKS: Record<AppearanceFontFamily, string> = {

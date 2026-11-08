@@ -7,6 +7,9 @@
     min-width: 0;
     min-height: 0;
     background: var(--chat-bg, var(--background));
+    /* A stacking context of its own, so the background layer (z-index -1) stays behind the content but above this fill. */
+    position: relative;
+    isolation: isolate;
 }
 
 /* ── Header ───────────────────────────────────────────────────────────────────────────────── */
@@ -106,9 +109,6 @@
 .head-button {
     @include ui.icon-button(2.25rem);
 
-    width: calc(2.25rem * var(--chat-font-scale, 1));
-    height: calc(2.25rem * var(--chat-font-scale, 1));
-
     text-decoration: none;
 
     &.is-active {
@@ -116,8 +116,8 @@
     }
 
     lucide-icon {
-        width: calc(1.125rem * var(--chat-font-scale, 1));
-        height: calc(1.125rem * var(--chat-font-scale, 1));
+        width: 1.125rem;
+        height: 1.125rem;
     }
 }
 

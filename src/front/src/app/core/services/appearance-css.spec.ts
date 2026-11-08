@@ -43,6 +43,20 @@ describe('appearance-css', () => {
         }
     });
 
+    it('derives reaction chip colours from the background and the own bubble colour', () => {
+        const vars = appearanceVars({
+            ...DEFAULT_APPEARANCE,
+            own_bubble_color: '#ef4444',
+            background: { kind: 'color', color: '#7a1f4a', gradient: null },
+        });
+        expect(contrastRatio(vars['--chat-chip-border'], '#7a1f4a')).toBeGreaterThanOrEqual(3);
+        expect(vars['--chat-chip-mine-border']).toBeDefined();
+        expect(vars['--chat-chip-mine-bg']).toContain('/ 25%');
+        const defaults = appearanceVars(DEFAULT_APPEARANCE);
+        expect(defaults['--chat-chip-bg']).toBeUndefined();
+        expect(defaults['--chat-chip-mine-bg']).toBeUndefined();
+    });
+
     it('derives the other-bubble accents the same way and leaves them unset by default', () => {
         const vars = appearanceVars({ ...DEFAULT_APPEARANCE, other_bubble_color: '#f5e663' });
         expect(vars['--bubble-other-accent']).toBe('#111111');
@@ -62,5 +76,42 @@ describe('appearance-css', () => {
             background: { kind: 'gradient', color: null, gradient: 'sunset' },
         });
         expect(sunset['--chat-meta-accent']).toBe('#ffffff');
+    });
+
+    it('emits the bubble radius only when it differs from the default', () => {
+        expect(appearanceVars(DEFAULT_APPEARANCE)['--bubble-radius']).toBeUndefined();
+        const vars = appearanceVars({ ...DEFAULT_APPEARANCE, bubble_radius: 4 });
+        expect(vars['--bubble-radius']).toBe('4px');
+        expect(vars['--media-radius']).toContain('4px');
+    });
+
+    it('derives the meta colours from the picture average combined with the dim, with a dark fallback', () => {
+        const image = {
+            fit: 'cover',
+            position_x: 50,
+            position_y: 50,
+            zoom: 100,
+            dim: 0,
+            blur: 0,
+            version: 'v',
+        } as const;
+        const light = appearanceVars(
+            { ...DEFAULT_APPEARANCE, background: { kind: 'image', color: null, gradient: null, image } },
+            '#f0f0f0'
+        );
+        expect(light['--chat-meta-accent']).toBe('#111111');
+        const dimmed = appearanceVars(
+            {
+                ...DEFAULT_APPEARANCE,
+                background: { kind: 'image', color: null, gradient: null, image: { ...image, dim: 80 } },
+            },
+            '#f0f0f0'
+        );
+        expect(dimmed['--chat-meta-accent']).toBe('#ffffff');
+        const unknown = appearanceVars({
+            ...DEFAULT_APPEARANCE,
+            background: { kind: 'image', color: null, gradient: null, image },
+        });
+        expect(unknown['--chat-meta-accent']).toBe('#ffffff');
     });
 });

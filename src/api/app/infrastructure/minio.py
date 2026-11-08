@@ -147,6 +147,31 @@ class MinioClient:
 
         return body, response.get("ContentType", "application/octet-stream"), len(body)
 
+    async def put_object_at(
+        self, key: str, body: bytes, content_type: str, bucket_name: str, owner_id: str | None = None
+    ) -> None:
+        """Store one object under a caller-chosen key, overwriting any existing one.
+
+        Never returns a URL: objects stored this way are private and only ever served by an API
+        endpoint that authorises the caller.
+        """
+        async with self.get_client() as client:
+            await client.put_object(
+                Bucket=bucket_name,
+                Key=key,
+                Body=body,
+                ContentType=content_type,
+                Metadata={"owner-id": owner_id} if owner_id else {},
+            )
+
+    async def delete_key(self, key: str, bucket_name: str) -> None:
+        """Delete one object by its exact key. Never raises: a missing object is already deleted."""
+        try:
+            async with self.get_client() as client:
+                await client.delete_object(Bucket=bucket_name, Key=key)
+        except Exception as e:
+            print("ERROR WHILE DELETING OBJECT: ", e)
+
     async def delete_file(self, file_url: str, bucket_name) -> str:
         try:
             filename = file_url.split("/")[-1]
