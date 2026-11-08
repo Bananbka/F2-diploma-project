@@ -15,6 +15,7 @@ import {
 } from '../../../core/models/appearance.model';
 import { appearanceVars } from '../../../core/services/appearance-css';
 import { AppearanceStore } from '../../../core/services/appearance-store.service';
+import { ColorPickerComponent } from '../../../shared/ui/color-picker/color-picker.component';
 import { ConfirmService } from '../../../shared/ui/confirm-dialog/confirm.service';
 
 const DEFAULT_OWN_PICKER = '#a358f9';
@@ -28,6 +29,7 @@ const DEFAULT_BG_PICKER = '#0a0a0c';
  */
 @Component({
     selector: 'app-appearance',
+    imports: [ColorPickerComponent],
     templateUrl: './appearance.component.html',
     styleUrl: './appearance.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,

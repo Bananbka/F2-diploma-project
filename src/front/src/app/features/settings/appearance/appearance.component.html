@@ -93,12 +93,13 @@
             >Your messages</span
         >
         <div class="swatches">
-            <input
-                type="color"
-                class="picker"
-                aria-label="Your bubble colour"
-                [value]="ownPicker()"
-                (input)="setBubble('own', $any($event.target).value)"
+            <app-color-picker
+                [label]="'Your bubble colour'"
+                [color]="value().own_bubble_color"
+                [fallback]="ownPicker()"
+                [swatches]="bubbleSwatches"
+                (colorChange)="setBubble('own', $event)"
+                (cleared)="setBubble('own', null)"
             />
             @for (c of bubbleSwatches; track c) {
                 <button
@@ -132,12 +133,13 @@
             >Their messages</span
         >
         <div class="swatches">
-            <input
-                type="color"
-                class="picker"
-                aria-label="Their bubble colour"
-                [value]="otherPicker()"
-                (input)="setBubble('other', $any($event.target).value)"
+            <app-color-picker
+                [label]="'Their bubble colour'"
+                [color]="value().other_bubble_color"
+                [fallback]="otherPicker()"
+                [swatches]="bubbleSwatches"
+                (colorChange)="setBubble('other', $event)"
+                (cleared)="setBubble('other', null)"
             />
             @for (c of bubbleSwatches; track c) {
                 <button
@@ -175,12 +177,13 @@
             [attr.aria-pressed]="value().background.kind === 'default'"
             (click)="setBackgroundDefault()"
         ></button>
-        <input
-            type="color"
-            class="picker"
-            aria-label="Solid background colour"
-            [value]="bgPicker()"
-            (input)="setBackgroundColor($any($event.target).value)"
+        <app-color-picker
+            [label]="'Solid background colour'"
+            [color]="value().background.kind === 'color' ? value().background.color : null"
+            [fallback]="bgPicker()"
+            [swatches]="backgroundSwatches"
+            (colorChange)="setBackgroundColor($event)"
+            (cleared)="setBackgroundDefault()"
         />
         @for (c of backgroundSwatches; track c) {
             <button

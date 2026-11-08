@@ -28,6 +28,7 @@
             (click)="openProfile()"
         >
             <app-avatar
+                [scaled]="true"
                 [name]="title()"
                 [kind]="avatarKindFor(chat()!.chat_type)"
                 [seed]="chat()!.id"

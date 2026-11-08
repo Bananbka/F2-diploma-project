@@ -10,6 +10,11 @@
     border-right: 1px solid var(--border);
 }
 
+/* A host display rule outranks the UA's [hidden] rule, so without this the sidebar stays laid out and pushes the Contacts view out of the column. */
+:host([hidden]) {
+    display: none;
+}
+
 .head {
     display: flex;
     align-items: center;

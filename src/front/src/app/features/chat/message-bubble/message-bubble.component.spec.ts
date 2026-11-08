@@ -102,6 +102,30 @@ describe('MessageBubbleComponent', () => {
             expect(getComputedStyle(bubble).backgroundColor).toBe(before);
         });
 
+        it('derives the in-bubble accent from the own-bubble variables, and falls back without them', () => {
+            (TestBed.inject(DirectoryService).isMe as jasmine.Spy).and.returnValue(true);
+            const host = create(buildMessage());
+            const bubble = host.querySelector('.bubble') as HTMLElement;
+
+            host.style.setProperty('--bubble-own-accent', '#ffffff');
+            host.style.setProperty('--bubble-own-accent-fg', '#ef4444');
+            host.style.setProperty('--bubble-own-fg-muted', '#eeeeee');
+            const style = getComputedStyle(bubble);
+            expect(style.getPropertyValue('--bubble-accent').trim()).toBe('#ffffff');
+            expect(style.getPropertyValue('--bubble-accent-fg').trim()).toBe('#ef4444');
+            expect(style.getPropertyValue('--bubble-muted').trim()).toBe('#eeeeee');
+        });
+
+        it('draws time and ticks from --chat-meta-fg so they follow the chat background', () => {
+            const host = create(buildMessage());
+            const meta = host.querySelector('.meta') as HTMLElement;
+            const before = getComputedStyle(meta).color;
+            host.style.setProperty('--chat-meta-fg', '#123456');
+            expect(getComputedStyle(meta).color).toBe('rgb(18, 52, 86)');
+            host.style.removeProperty('--chat-meta-fg');
+            expect(getComputedStyle(meta).color).toBe(before);
+        });
+
         it('scales message text with --chat-font-scale', () => {
             const host = create(buildMessage());
             const text = host.querySelector('.text') as HTMLElement;

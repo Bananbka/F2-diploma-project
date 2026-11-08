@@ -56,6 +56,7 @@ import { avatarKindFor, DELETED_USER_LABEL } from '../../../shared/utils/display
 import { ComposedMessage, ComposerComponent } from '../composer/composer.component';
 import { MessageBubbleComponent, MessageMenuRequest } from '../message-bubble/message-bubble.component';
 import { StickerPackViewerService } from '../stickers/sticker-pack-dialog/sticker-pack-viewer';
+import { StickToBottom } from './stick-to-bottom';
 
 /**
  * How far the pointer must travel before a press becomes a message sweep rather than a click.
@@ -205,8 +206,8 @@ export class ChatViewComponent {
      * height, so entering or leaving selection mode does not resize the message list above it.
      */
     readonly composerHeight = signal(0);
-    /** Whether new rows should pull the view down. False once the user scrolls up to read back. */
-    private pinToBottom = true;
+    /** Keeps the pane on the newest message while the reader has not scrolled up, through late content growth. */
+    private stick: StickToBottom | null = null;
     /** Set once the opening scroll has actually landed on the newest message. */
     private atNewest = false;
 
@@ -259,8 +260,23 @@ export class ChatViewComponent {
             this.bannerDismissed.set(false);
             this.pinnedBannerDismissed.set(false);
             this.pinnedPanelOpen.set(false);
-            this.pinToBottom = true;
+            this.stick?.reset();
             this.atNewest = false;
+        });
+
+        // Attach once the scroll pane exists (it sits inside an @if on the loaded chat).
+        effect((onCleanup) => {
+            const element = this.scroller()?.nativeElement;
+            if (!element) {
+                return;
+            }
+            const stick = new StickToBottom(element);
+            stick.attach();
+            this.stick = stick;
+            onCleanup(() => {
+                stick.detach();
+                this.stick = null;
+            });
         });
 
         // Keep the newest message in view.
@@ -272,7 +288,7 @@ export class ChatViewComponent {
             const rows = this.conversation().length;
 
             untracked(() => {
-                if (rows > 0 && this.pinToBottom) {
+                if (rows > 0 && (this.stick?.isPinned ?? true)) {
                     this.scrollToBottomAfterRender();
                 }
             });
@@ -293,7 +309,7 @@ export class ChatViewComponent {
                     return;
                 }
 
-                element.scrollTop = element.scrollHeight;
+                this.stick?.scrollToBottomNow();
                 this.atNewest = true;
             })
         );
@@ -354,7 +370,7 @@ export class ChatViewComponent {
             return;
         }
 
-        this.pinToBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
+        this.stick?.onScroll();
 
         if (element.scrollTop < 120 && this.hasMoreHistory() && !this.loading()) {
             const before = element.scrollHeight;
@@ -569,7 +585,7 @@ export class ChatViewComponent {
             return;
         }
 
-        this.pinToBottom = false;
+        this.stick?.unpin();
         target.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
         target.classList.add('is-highlighted');
@@ -604,7 +620,7 @@ export class ChatViewComponent {
     }
 
     async send(composed: ComposedMessage): Promise<void> {
-        this.pinToBottom = true;
+        this.stick?.reset();
 
         const editing = this.editing();
         const replyTo = this.replyingTo();
@@ -623,12 +639,12 @@ export class ChatViewComponent {
     }
 
     async sendPoll(poll: PollPayload): Promise<void> {
-        this.pinToBottom = true;
+        this.stick?.reset();
         await this.store.sendPoll(poll);
     }
 
     async sendLocation(location: LocationPayload): Promise<void> {
-        this.pinToBottom = true;
+        this.stick?.reset();
         await this.store.sendLocation(location);
     }
 

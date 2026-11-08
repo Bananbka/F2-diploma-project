@@ -335,6 +335,21 @@ describe('ComposerComponent', () => {
         });
     });
 
+    describe('chat font scale', () => {
+        it('scales the side buttons, their icons and the send button with --chat-font-scale', () => {
+            const host = create();
+            const side = host.querySelector('.side') as HTMLElement;
+            const icon = side.querySelector('lucide-icon') as HTMLElement;
+            const baseButton = parseFloat(getComputedStyle(side).width);
+            const baseIcon = parseFloat(getComputedStyle(icon).width);
+
+            host.style.setProperty('--chat-font-scale', '2');
+            expect(parseFloat(getComputedStyle(side).width)).toBeCloseTo(baseButton * 2, 1);
+            expect(parseFloat(getComputedStyle(side).height)).toBeCloseTo(baseButton * 2, 1);
+            expect(parseFloat(getComputedStyle(icon).width)).toBeCloseTo(baseIcon * 2, 1);
+        });
+    });
+
     describe('row layout', () => {
         let panel: ChatPanelStoreService;
 

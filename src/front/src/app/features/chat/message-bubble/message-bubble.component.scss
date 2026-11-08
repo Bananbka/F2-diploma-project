@@ -98,7 +98,7 @@
     align-items: center;
     gap: 0.375rem;
     margin: 0 0 0.25rem 0.25rem;
-    color: var(--muted-foreground);
+    color: var(--chat-meta-fg, var(--muted-foreground));
     font-size: 0.75rem;
     font-weight: 500;
 }
@@ -120,8 +120,8 @@
     padding: 0.25rem 0.625rem;
     background: none;
     border: none;
-    border-left: 2px solid var(--primary);
-    color: var(--muted-foreground);
+    border-left: 2px solid var(--chat-meta-accent, var(--primary));
+    color: var(--chat-meta-fg, var(--muted-foreground));
     font-size: 0.75rem;
     text-align: left;
     transition: background-color 0.12s ease;
@@ -165,7 +165,7 @@
 }
 
 .quote-author {
-    color: var(--primary);
+    color: var(--chat-meta-accent, var(--primary));
     font-weight: 500;
 }
 
@@ -188,6 +188,9 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-2xl);
     color: var(--bubble-other-fg, inherit);
+    --bubble-accent: var(--bubble-other-accent, var(--primary));
+    --bubble-accent-fg: var(--bubble-other-accent-fg, #fff);
+    --bubble-muted: var(--bubble-other-fg-muted, var(--muted-foreground));
     font-family: var(--chat-font-family, inherit);
     border-top-left-radius: var(--radius-sm);
 }
@@ -198,6 +201,9 @@
     border-top-left-radius: var(--radius-2xl);
     border-top-right-radius: var(--radius-sm);
     color: var(--bubble-own-fg, #fff);
+    --bubble-accent: var(--bubble-own-accent, var(--primary));
+    --bubble-accent-fg: var(--bubble-own-accent-fg, #fff);
+    --bubble-muted: var(--bubble-own-fg-muted, var(--muted-foreground));
 }
 
 .content {
@@ -213,7 +219,7 @@
 }
 
 .text.is-placeholder {
-    color: var(--muted-foreground);
+    color: var(--bubble-muted, var(--muted-foreground));
     font-style: italic;
 }
 
@@ -381,10 +387,10 @@
     flex-shrink: 0;
     width: 2rem;
     height: 2rem;
-    background: var(--primary);
+    background: var(--bubble-accent, var(--primary));
     border: none;
     border-radius: 50%;
-    color: #fff;
+    color: var(--bubble-accent-fg, #fff);
 
     lucide-icon {
         width: 1rem;
@@ -524,7 +530,7 @@
     gap: 0.375rem;
     min-height: 1.125rem;
     margin: 0.25rem 0.25rem 0;
-    color: var(--muted-foreground);
+    color: var(--chat-meta-fg, var(--muted-foreground));
     font-size: 0.6875rem;
     line-height: 1;
 }
@@ -548,7 +554,7 @@
     }
 
     &.is-ok {
-        color: var(--primary);
+        color: var(--chat-meta-accent, var(--primary));
     }
 
     &.is-warn {
@@ -556,13 +562,13 @@
     }
 
     &.is-sent {
-        color: var(--muted-foreground);
+        color: var(--chat-meta-fg, var(--muted-foreground));
     }
 
     /* Read, not merely sent — the same colour the verified mark uses, so both read as "this claim
        is confirmed" rather than introducing a third accent colour. */
     &.is-sent.is-read {
-        color: var(--primary);
+        color: var(--chat-meta-accent, var(--primary));
     }
 }
 
@@ -780,7 +786,7 @@
     align-items: center;
     gap: 0.25rem;
     margin: 0.25rem 0.25rem 0;
-    color: var(--muted-foreground);
+    color: var(--chat-meta-fg, var(--muted-foreground));
     font-size: 0.6875rem;
 
     lucide-icon {
@@ -806,7 +812,7 @@
     }
 
     strong {
-        color: var(--primary);
+        color: var(--chat-meta-accent, var(--primary));
         font-style: normal;
         font-weight: 500;
     }
