@@ -1,0 +1,16 @@
+<button
+    type="button"
+    class="reaction-pill"
+    [class.is-mine]="mine()"
+    [class.is-static]="!interactive()"
+    [disabled]="!interactive()"
+    [attr.aria-pressed]="interactive() ? mine() : null"
+    [attr.aria-label]="label()"
+    (click)="chipClick.emit()"
+>
+    <span
+        class="reaction-emoji"
+        [innerHTML]="emoji() | twemoji"
+    ></span>
+    <span class="reaction-count">{{ count() }}</span>
+</button>

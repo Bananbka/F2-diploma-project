@@ -1,0 +1,33 @@
+<div
+    class="backdrop"
+    (click)="closed.emit()"
+></div>
+<div
+    #dialog
+    class="dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Chat info"
+    tabindex="-1"
+    (appDismissOnEscape)="closed.emit()"
+    (keydown)="onKeydown($event)"
+>
+    <header class="head">
+        <h2>Chat info</h2>
+        <button
+            type="button"
+            class="close"
+            aria-label="Close"
+            (click)="closed.emit()"
+        >
+            <lucide-icon [img]="closeIcon" />
+        </button>
+    </header>
+
+    <div class="body">
+        <app-chat-info
+            [chatId]="chatId()"
+            [embedded]="true"
+        />
+    </div>
+</div>

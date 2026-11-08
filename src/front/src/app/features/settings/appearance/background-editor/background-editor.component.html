@@ -1,0 +1,171 @@
+<div
+    class="backdrop"
+    (click)="cancel()"
+></div>
+<div
+    #dialog
+    class="dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Edit background"
+    tabindex="-1"
+    (appDismissOnEscape)="cancel()"
+    (keydown)="onKeydown($event)"
+>
+    <div class="head">
+        <h2>Edit background</h2>
+        <button
+            type="button"
+            class="close"
+            aria-label="Close"
+            (click)="cancel()"
+        >
+            <lucide-icon [img]="closeIcon" />
+        </button>
+    </div>
+
+    <div class="body">
+        <div
+            #frame
+            class="frame"
+            tabindex="0"
+            role="group"
+            aria-label="Background preview. Drag, or use the arrow keys, to move the picture."
+            [style]="previewStyle()"
+            (pointerdown)="startDrag($event)"
+            (pointermove)="dragTo($event)"
+            (pointerup)="endDrag()"
+            (pointercancel)="endDrag()"
+            (lostpointercapture)="endDrag()"
+            (keydown)="frameKey($event)"
+        >
+            <app-chat-background
+                [image]="draft()"
+                [version]="version()"
+            />
+            <div class="mock">
+                <div class="msg">
+                    <div class="b other">Hey, are we still on for tonight?</div>
+                    <span class="meta">12:41</span>
+                </div>
+                <div class="msg mine">
+                    <div class="b own">Yes! See you at eight.</div>
+                    <span class="meta">12:42</span>
+                    <div class="reactions">
+                        <app-reaction-chip
+                            emoji="👍"
+                            [count]="1"
+                            [interactive]="false"
+                        />
+                    </div>
+                </div>
+                <div class="msg">
+                    <div class="b other">Great, I will bring the photos.</div>
+                    <span class="meta">12:43</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="controls">
+            <div
+                class="fit"
+                role="radiogroup"
+                aria-label="Image fit"
+            >
+                @for (f of fits; track f.id) {
+                    <button
+                        type="button"
+                        role="radio"
+                        class="fit-option"
+                        [attr.aria-checked]="draft().fit === f.id"
+                        (click)="setFit(f.id)"
+                    >
+                        {{ f.label }}
+                    </button>
+                }
+            </div>
+
+            @for (t of tuning; track t.key) {
+                <div class="field">
+                    <label [for]="'bg-edit-' + t.key">{{ t.label }}</label>
+                    <input
+                        [id]="'bg-edit-' + t.key"
+                        type="range"
+                        [min]="t.min"
+                        [max]="t.max"
+                        step="1"
+                        [value]="draft()[t.key]"
+                        [attr.aria-valuetext]="draft()[t.key] + t.unit"
+                        (input)="setTuning(t.key, $any($event.target).value)"
+                    />
+                    <output
+                        class="value"
+                        [attr.for]="'bg-edit-' + t.key"
+                        >{{ draft()[t.key] }}{{ t.unit }}</output
+                    >
+                </div>
+            }
+
+            <div class="actions-row">
+                <input
+                    #file
+                    type="file"
+                    class="file-input"
+                    accept="image/jpeg,image/png,image/webp"
+                    aria-label="Choose a replacement image"
+                    (change)="onFileInput($event)"
+                />
+                <button
+                    type="button"
+                    class="link"
+                    [disabled]="busy()"
+                    (click)="file.click()"
+                >
+                    Replace image
+                </button>
+                <button
+                    type="button"
+                    class="link is-danger"
+                    [disabled]="busy()"
+                    (click)="remove()"
+                >
+                    Remove image
+                </button>
+                <button
+                    type="button"
+                    class="link"
+                    (click)="resetTuning()"
+                >
+                    Reset tuning
+                </button>
+            </div>
+
+            @if (error(); as message) {
+                <p
+                    class="error"
+                    role="alert"
+                >
+                    {{ message }}
+                </p>
+            }
+        </div>
+    </div>
+
+    <div class="foot">
+        <button
+            type="button"
+            class="btn"
+            (click)="cancel()"
+        >
+            Cancel
+        </button>
+        <button
+            type="button"
+            class="btn is-primary"
+            [disabled]="busy()"
+            (click)="apply()"
+        >
+            Apply
+        </button>
+    </div>
+</div>

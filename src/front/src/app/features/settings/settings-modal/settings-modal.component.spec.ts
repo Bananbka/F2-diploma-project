@@ -5,6 +5,8 @@ import { UserProfile } from '../../../core/models/chat.model';
 import { SessionService } from '../../../core/services/session.service';
 import { ConfirmService } from '../../../shared/ui/confirm-dialog/confirm.service';
 import { StickerPackManagerComponent } from '../../chat/stickers/sticker-pack-manager/sticker-pack-manager.component';
+import { AppearanceComponent } from '../appearance/appearance.component';
+import { FoldersSettingsComponent } from '../folders/folders-settings.component';
 import { PrivacyComponent } from '../privacy/privacy.component';
 import { ProfileComponent } from '../profile/profile.component';
 import { SecurityComponent } from '../security/security.component';
@@ -38,6 +40,19 @@ class StubStickersComponent {}
 })
 class StubPrivacyComponent {}
 
+@Component({
+    selector: 'app-appearance',
+    template: '<p id="stub-appearance">appearance</p>',
+})
+class StubAppearanceComponent {}
+
+@Component({
+    selector: 'app-folders-settings',
+    template: '<p id="stub-folders">folders</p>',
+    changeDetection: ChangeDetectionStrategy.OnPush,
+})
+class StubFoldersComponent {}
+
 describe('SettingsModalComponent', () => {
     let fixture: ComponentFixture<SettingsModalComponent>;
     let root: HTMLElement;
@@ -70,9 +85,25 @@ describe('SettingsModalComponent', () => {
             ],
         });
         TestBed.overrideComponent(SettingsModalComponent, {
-            remove: { imports: [ProfileComponent, SecurityComponent, StickerPackManagerComponent, PrivacyComponent] },
+            remove: {
+                imports: [
+                    ProfileComponent,
+                    SecurityComponent,
+                    StickerPackManagerComponent,
+                    AppearanceComponent,
+                    FoldersSettingsComponent,
+                    PrivacyComponent,
+                ],
+            },
             add: {
-                imports: [StubProfileComponent, StubSecurityComponent, StubStickersComponent, StubPrivacyComponent],
+                imports: [
+                    StubProfileComponent,
+                    StubSecurityComponent,
+                    StubStickersComponent,
+                    StubAppearanceComponent,
+                    StubFoldersComponent,
+                    StubPrivacyComponent,
+                ],
             },
         });
         await TestBed.compileComponents();
@@ -101,7 +132,14 @@ describe('SettingsModalComponent', () => {
         const dialog = root.querySelector('[role="dialog"]')!;
         expect(dialog.getAttribute('aria-modal')).toBe('true');
         expect(dialog.getAttribute('aria-labelledby')).toBe('settings-title');
-        expect(tabs().map((t) => t.textContent!.trim())).toEqual(['Profile', 'Security', 'Stickers', 'Privacy & data']);
+        expect(tabs().map((t) => t.textContent!.trim())).toEqual([
+            'Profile',
+            'Security',
+            'Stickers',
+            'Appearance',
+            'Folders',
+            'Privacy & data',
+        ]);
     });
 
     it('starts on Profile with the active tab focused and the others out of the tab order', () => {
@@ -117,7 +155,7 @@ describe('SettingsModalComponent', () => {
     });
 
     it('shows the matching section for each tab', async () => {
-        const expected = ['profile', 'security', 'stickers', 'privacy'];
+        const expected = ['profile', 'security', 'stickers', 'appearance', 'folders', 'privacy'];
         for (let i = 0; i < tabs().length; i++) {
             tabs()[i].click();
             await fixture.whenStable();
@@ -137,13 +175,13 @@ describe('SettingsModalComponent', () => {
 
         key(tabs()[1], { key: 'ArrowUp' });
         key(tabs()[0], { key: 'ArrowUp' });
-        expect(document.activeElement).toBe(tabs()[3]);
+        expect(document.activeElement).toBe(tabs()[tabs().length - 1]);
 
-        key(tabs()[3], { key: 'Home' });
+        key(tabs()[tabs().length - 1], { key: 'Home' });
         expect(document.activeElement).toBe(tabs()[0]);
         key(tabs()[0], { key: 'End' });
-        expect(document.activeElement).toBe(tabs()[3]);
-        key(tabs()[3], { key: 'ArrowRight' });
+        expect(document.activeElement).toBe(tabs()[tabs().length - 1]);
+        key(tabs()[tabs().length - 1], { key: 'ArrowRight' });
         expect(document.activeElement).toBe(tabs()[0]);
     });
 

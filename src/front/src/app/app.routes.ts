@@ -1,6 +1,8 @@
 import { Routes } from '@angular/router';
 
 import { authGuard, guestGuard, unlockGuard } from './core/guards/session.guards';
+import { createDialogDeepLinkGuard } from './features/chat/create-dialog.service';
+import { chatInfoDeepLinkGuard, safetyDeepLinkGuard } from './features/chat/info-dialog/info-dialog.service';
 import { settingsDeepLinkGuard } from './features/settings/settings.guard';
 
 export const routes: Routes = [
@@ -65,21 +67,19 @@ export const routes: Routes = [
             ),
     },
     {
-        path: 'new/group',
+        // Dialogs over the chat shell, not pages: the guard opens the dialog and keeps the user on the
+        // shell (see `createDialogDeepLinkGuard`). Nested so `authGuard` runs first.
+        path: '',
         canActivate: [authGuard],
-        loadComponent: () =>
-            import('./features/chat/create-group/create-group.component').then((m) => m.CreateGroupComponent),
-    },
-    {
-        path: 'new/channel',
-        canActivate: [authGuard],
-        loadComponent: () =>
-            import('./features/chat/create-channel/create-channel.component').then((m) => m.CreateChannelComponent),
-    },
-    {
-        path: 'chats/:chatId/info',
-        canActivate: [authGuard],
-        loadComponent: () => import('./features/chat/chat-info/chat-info.component').then((m) => m.ChatInfoComponent),
+        children: [
+            { path: 'new/group', canActivate: [createDialogDeepLinkGuard], data: { kind: 'group' }, children: [] },
+            {
+                path: 'new/channel',
+                canActivate: [createDialogDeepLinkGuard],
+                data: { kind: 'channel' },
+                children: [],
+            },
+        ],
     },
     {
         // What a shared invite link actually resolves to client-side. The server's own
@@ -96,12 +96,16 @@ export const routes: Routes = [
             import('./features/chat/join-invite/join-invite.component').then((m) => m.JoinInviteComponent),
     },
     {
-        // The safety number is the only defence against the server substituting a public key, so it
-        // gets a real route: reachable, linkable and bookmarkable rather than buried in a menu.
-        path: 'chats/:chatId/safety/:userId',
+        // Chat info and the safety number are dialogs over the chat shell, not pages. The guards open the
+        // dialog and keep the user on the chat (see `chatInfoDeepLinkGuard`); the safety number is
+        // still reachable and bookmarkable, it just appears over the conversation it is about. Nested
+        // so `authGuard` runs first.
+        path: '',
         canActivate: [authGuard],
-        loadComponent: () =>
-            import('./features/chat/safety-number/safety-number.component').then((m) => m.SafetyNumberComponent),
+        children: [
+            { path: 'chats/:chatId/info', canActivate: [chatInfoDeepLinkGuard], children: [] },
+            { path: 'chats/:chatId/safety/:userId', canActivate: [safetyDeepLinkGuard], children: [] },
+        ],
     },
     {
         path: '',

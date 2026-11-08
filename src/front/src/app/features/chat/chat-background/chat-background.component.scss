@@ -1,0 +1,14 @@
+/* Sits behind its siblings: the parent isolates its stacking context, and this host is the first layer in it. */
+:host {
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    overflow: hidden;
+    pointer-events: none;
+}
+
+.layer,
+.dim {
+    position: absolute;
+    inset: 0;
+}

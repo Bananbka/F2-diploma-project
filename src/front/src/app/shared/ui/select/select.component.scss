@@ -1,0 +1,81 @@
+@use 'ui';
+
+:host {
+    display: inline-block;
+    min-width: 0;
+}
+
+.trigger {
+    @include ui.field;
+
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    text-align: left;
+    cursor: pointer;
+
+    &:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+
+    &:focus-visible {
+        border-color: rgb(163 88 249 / 60%);
+    }
+}
+
+.trigger-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.placeholder {
+    color: var(--placeholder);
+}
+
+.chevron {
+    width: 1rem;
+    height: 1rem;
+    color: var(--muted-foreground);
+}
+
+.listbox {
+    padding: 0.25rem;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl);
+    box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
+    max-height: min(18rem, 60vh);
+    overflow-y: auto;
+    outline: none;
+}
+
+.option {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.5rem 0.625rem;
+    border-radius: var(--radius-lg);
+    color: var(--foreground);
+    font-size: 0.875rem;
+    cursor: pointer;
+    white-space: nowrap;
+
+    &.is-active {
+        background: var(--surface-raised);
+    }
+
+    &.is-selected {
+        font-weight: 500;
+    }
+}
+
+.check {
+    width: 0.875rem;
+    height: 0.875rem;
+    color: var(--primary);
+}

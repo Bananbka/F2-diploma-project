@@ -94,8 +94,60 @@ describe('EmojiPickerComponent', () => {
 
             const titles = Array.from(host.querySelectorAll('.section-title')).map((el) => el.textContent?.trim());
             expect(titles).toEqual(EMOJI_CATEGORIES.map((c) => c.label));
-            const total = EMOJI_CATEGORIES.reduce((n, c) => n + c.emoji.length, 0);
-            expect(host.querySelectorAll('.scroll .emoji').length).toBe(total);
+            // Only the first sections are rendered up front; the rest are sized placeholders.
+            expect(host.querySelectorAll('.scroll .emoji').length).toBe(
+                EMOJI_CATEGORIES[0].emoji.length + EMOJI_CATEGORIES[1].emoji.length
+            );
+            expect(host.querySelectorAll('.scroll .grid-placeholder').length).toBe(EMOJI_CATEGORIES.length - 2);
+        });
+
+        it('renders a later category once the bar jumps to it', async () => {
+            const host = createEmbedded();
+
+            host.querySelectorAll<HTMLButtonElement>('.bar .bar-item')[4].click();
+            fixture.detectChanges();
+            await new Promise((resolve) => setTimeout(resolve));
+            fixture.detectChanges();
+
+            expect(host.querySelectorAll('section[data-section="4"] .emoji').length).toBe(
+                EMOJI_CATEGORIES[4].emoji.length
+            );
+        });
+
+        it('has the full Unicode set, with every category populated', () => {
+            expect(EMOJI_CATEGORIES.map((c) => c.label)).toContain('Flags');
+            expect(EMOJI_CATEGORIES.every((c) => c.emoji.length > 0)).toBeTrue();
+            expect(EMOJI_CATEGORIES.reduce((n, c) => n + c.emoji.length, 0)).toBeGreaterThan(1500);
+        });
+
+        it('searches by Unicode name', () => {
+            const host = createEmbedded();
+
+            fixture.componentInstance.query.set('grinning face');
+            fixture.detectChanges();
+
+            const labels = Array.from(host.querySelectorAll('.scroll .emoji')).map((el) =>
+                el.getAttribute('aria-label')
+            );
+            expect(labels).toContain('grinning face');
+        });
+
+        it('applies the chosen skin tone to emoji that take one and emits the toned emoji', () => {
+            const host = createEmbedded();
+            const spy = jasmine.createSpy('pick');
+            fixture.componentInstance.pick.subscribe(spy);
+
+            fixture.componentInstance.tone.set(3);
+            fixture.detectChanges();
+            const wave = fixture.componentInstance.shown('\u{1F44B}');
+            expect(wave).toBe('\u{1F44B}\u{1F3FD}');
+            expect(fixture.componentInstance.shown('\u{1F600}')).toBe('\u{1F600}');
+
+            fixture.componentInstance.query.set('waving hand');
+            fixture.detectChanges();
+            host.querySelector<HTMLButtonElement>('.scroll .emoji')!.click();
+            expect(spy).toHaveBeenCalledWith(wave);
+            localStorage.removeItem('emoji-skin-tone');
         });
 
         it('never closes itself on outside clicks or Escape', () => {

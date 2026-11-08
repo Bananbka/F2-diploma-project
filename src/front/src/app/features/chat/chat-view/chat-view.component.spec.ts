@@ -174,6 +174,15 @@ describe('ChatViewComponent', () => {
         }).compileComponents();
     });
 
+    describe('appearance custom properties', () => {
+        it('paints the conversation with --chat-bg', () => {
+            const host = create();
+            host.style.setProperty('--chat-bg', '#102030');
+
+            expect(getComputedStyle(host).backgroundColor).toBe('rgb(16, 32, 48)');
+        });
+    });
+
     describe('conversation-level states — docs/ui-states.md', () => {
         it('renders the history-floor divider as a permanent notice, not a loading state', () => {
             store.conversation.set([{ kind: 'history-floor' }]);
@@ -315,6 +324,16 @@ describe('ChatViewComponent', () => {
             expect(panel.view()).toBe('profile');
         });
 
+        it('keeps the header avatar a fixed size whatever the chat font scale', () => {
+            const host = create();
+            document.body.appendChild(host);
+            const avatar = host.querySelector('.identity app-avatar') as HTMLElement;
+            const before = getComputedStyle(avatar).width;
+            host.style.setProperty('--chat-font-scale', '2');
+            expect(getComputedStyle(avatar).width).toBe(before);
+            host.remove();
+        });
+
         it('the member-verification banner opens the Profile view to review members', () => {
             store.memberVerificationError.set('member set hash mismatch');
             const host = create();
@@ -442,5 +461,26 @@ describe('ChatViewComponent', () => {
 
             expect(store.send).toHaveBeenCalledWith('hi', 'msg-5', []);
         });
+    });
+});
+
+describe('ChatViewComponent empty state on a custom background', () => {
+    it('draws the words in a backing card with colours from the chat variables', () => {
+        TestBed.configureTestingModule({
+            providers: [provideRouter([]), provideHttpClient(), provideHttpClientTesting()],
+        });
+        const fixture = TestBed.createComponent(ChatViewComponent);
+        fixture.detectChanges();
+        const host = fixture.nativeElement as HTMLElement;
+        document.body.appendChild(host);
+        const card = host.querySelector('.placeholder-card') as HTMLElement;
+        const title = host.querySelector('.placeholder-title') as HTMLElement;
+        expect(card).not.toBeNull();
+        expect(getComputedStyle(card).backgroundColor).toBe('rgba(0, 0, 0, 0)');
+        host.style.setProperty('--chat-overlay-bg', 'rgb(1 2 3 / 62%)');
+        host.style.setProperty('--chat-meta-accent', 'rgb(250 250 250)');
+        expect(getComputedStyle(card).backgroundColor).toContain('1, 2, 3');
+        expect(getComputedStyle(title).color).toBe('rgb(250, 250, 250)');
+        host.remove();
     });
 });

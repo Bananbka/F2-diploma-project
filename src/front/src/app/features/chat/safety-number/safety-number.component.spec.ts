@@ -61,6 +61,33 @@ describe('SafetyNumberComponent', () => {
 
     afterEach(() => localStorage.clear());
 
+    it('explains a contact with no published key instead of a generic error', async () => {
+        keyStore.computeSafetyNumber.and.rejectWith(
+            new Error('This contact has not published a verifiable identity key.')
+        );
+        fixture.componentRef.setInput('chatId', CHAT);
+        fixture.componentRef.setInput('userId', PEER);
+        fixture.detectChanges();
+        await fixture.whenStable();
+        fixture.detectChanges();
+        const text = (fixture.nativeElement as HTMLElement).querySelector('.error')?.textContent ?? '';
+        expect(text).toContain('has not published encryption keys yet');
+        expect(text).not.toContain('Could not compute');
+        expect(fixture.componentInstance.failure()).toBe('peer-no-keys');
+    });
+
+    it('explains the user own missing key separately', async () => {
+        keyStore.computeSafetyNumber.and.rejectWith(new Error('You have not published an identity key.'));
+        fixture.componentRef.setInput('chatId', CHAT);
+        fixture.componentRef.setInput('userId', PEER);
+        fixture.detectChanges();
+        await fixture.whenStable();
+        fixture.detectChanges();
+        expect((fixture.nativeElement as HTMLElement).querySelector('.error')?.textContent).toContain(
+            'You have not published'
+        );
+    });
+
     it('splits the fingerprint into twelve groups of five', async () => {
         await render(NUMBER_A);
 

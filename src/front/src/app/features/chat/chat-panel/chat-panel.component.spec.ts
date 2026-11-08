@@ -429,7 +429,7 @@ describe('ChatPanelComponent', () => {
             first.click();
             fixture.detectChanges();
 
-            expect(bridge.insertEmoji).toHaveBeenCalledOnceWith(first.getAttribute('aria-label')!);
+            expect(bridge.insertEmoji).toHaveBeenCalledOnceWith(first.querySelector('img')!.alt);
             expect(host.querySelector('.note')).toBeNull();
         });
 
@@ -439,7 +439,7 @@ describe('ChatPanelComponent', () => {
             const host = await openEmojiTab();
 
             const first = host.querySelector<HTMLButtonElement>('#chat-panel-body-emoji .scroll .emoji')!;
-            const emoji = first.getAttribute('aria-label')!;
+            const emoji = first.querySelector('img')!.alt;
             first.click();
             fixture.detectChanges();
 

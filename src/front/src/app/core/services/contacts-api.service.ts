@@ -35,4 +35,9 @@ export class ContactsApiService {
             .post<SuccessResponse<Contact>>(this.apiUrl, { target_user_id: targetUserId, alias: alias ?? null })
             .pipe(map((r) => r.data));
     }
+
+    /** `DELETE /contact/{contact_id}`, where the id is the contact's user id. 404s when not a contact. */
+    removeContact(contactUserId: string): Observable<void> {
+        return this.http.delete<SuccessResponse<unknown>>(this.apiUrl + contactUserId).pipe(map(() => undefined));
+    }
 }

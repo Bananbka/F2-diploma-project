@@ -1,23 +1,22 @@
 import { ChangeDetectionStrategy, Component, computed, inject, input, output, signal } from '@angular/core';
 import { Router } from '@angular/router';
 import {
-    Hash,
+    EyeOff,
+    FolderCog,
     KeyRound,
     LogOut,
     LucideAngularModule,
     LucideIconData,
-    Mail,
-    MessageSquare,
     Pencil,
     Plus,
     Settings,
-    Shield,
     SquarePen,
     Trash2,
     User,
-    Users,
 } from 'lucide-angular';
 
+import { HiddenViewId } from '../../../core/models/appearance.model';
+import { AppearanceStore } from '../../../core/services/appearance-store.service';
 import { ChatStoreService } from '../../../core/services/chat-store.service';
 import { Folder } from '../../../core/services/folder-api.service';
 import { FolderStoreService } from '../../../core/services/folder-store.service';
@@ -29,25 +28,10 @@ import { ConfirmService } from '../../../shared/ui/confirm-dialog/confirm.servic
 import { ContextMenuDirective, ContextMenuProvider } from '../../../shared/ui/context-menu/context-menu.directive';
 import { ContextMenuEntry } from '../../../shared/ui/context-menu/context-menu.model';
 import { SettingsService, SettingsTab } from '../../settings/settings.service';
-import {
-    chatsInFolder,
-    ChatViewKey,
-    folderKey,
-    inSystemView,
-    SYSTEM_VIEWS,
-    SystemViewId,
-    unreadTotal,
-} from '../chat-views';
+import { chatsInFolder, ChatViewKey, folderKey, inSystemView, unreadTotal } from '../chat-views';
+import { canHideView, DEFAULT_VIEWS, DefaultView } from '../default-views';
 import { FolderEditDialogComponent } from '../folder-edit-dialog/folder-edit-dialog.component';
 import { folderIconFor } from '../folder-icons';
-
-const SYSTEM_ICONS: Record<SystemViewId, LucideIconData> = {
-    all: MessageSquare,
-    unread: Mail,
-    direct: User,
-    group: Users,
-    channel: Hash,
-};
 
 export interface RailItem {
     key: ChatViewKey;
@@ -55,6 +39,8 @@ export interface RailItem {
     icon: LucideIconData | null;
     unread: number;
     folder: Folder | null;
+    /** The built-in view this is, so it can be hidden; absent for a folder. */
+    viewId?: HiddenViewId;
 }
 
 /**
@@ -83,12 +69,18 @@ export class NavigationRailComponent {
     private readonly folderStore = inject(FolderStoreService);
     private readonly confirm = inject(ConfirmService);
     private readonly toast = inject(ToastService);
+    private readonly appearance = inject(AppearanceStore);
 
     /** The selected view: a system view or `folder:<id>`. */
     readonly view = input.required<ChatViewKey>();
     readonly viewChange = output<ChatViewKey>();
-    /** Emitted by the shield: opens the safety number for whoever is on screen. */
-    readonly securityRequested = output<void>();
+    /** True while the Contacts view replaces the chat list; no chat view is then the current one. */
+    readonly contactsActive = input(false);
+    readonly contactsRequested = output<void>();
+    readonly contactsView = DEFAULT_VIEWS.find((v) => v.id === 'contacts')!;
+    readonly contactsIcon = this.contactsView.icon;
+    readonly hidden = computed(() => this.appearance.value().hidden_views);
+    readonly contactsHidden = computed(() => this.hidden().includes('contacts'));
 
     readonly menuOpen = signal(false);
 
@@ -98,13 +90,16 @@ export class NavigationRailComponent {
     /** The folder dialog: closed, creating, or editing one (and which part to land on). */
     readonly folderDialog = signal<{ folder: Folder | null; focus: 'name' | 'chats' } | null>(null);
 
+    /** The built-in chat views the user has not hidden. */
     readonly systemItems = computed<RailItem[]>(() =>
-        SYSTEM_VIEWS.map((view) => ({
-            key: view.id,
+        DEFAULT_VIEWS.filter((view) => view.chatView && !this.hidden().includes(view.id)).map((view) => ({
+            key: view.chatView!,
+            viewId: view.id,
             label: view.label,
-            icon: SYSTEM_ICONS[view.id],
+            icon: view.icon,
             // "All chats" would only repeat the total of the others, so it carries no badge.
-            unread: view.id === 'all' ? 0 : unreadTotal(this.chats().filter((c) => inSystemView(c, view.id))),
+            unread:
+                view.chatView === 'all' ? 0 : unreadTotal(this.chats().filter((c) => inSystemView(c, view.chatView!))),
             folder: null,
         }))
     );
@@ -120,7 +115,6 @@ export class NavigationRailComponent {
     );
 
     readonly plusIcon = Plus;
-    readonly shieldIcon = Shield;
     readonly settingsIcon = Settings;
     readonly logOutIcon = LogOut;
     readonly userIcon = User;
@@ -147,6 +141,36 @@ export class NavigationRailComponent {
         this.folderDialog.set({ folder: request?.folder ?? null, focus: request?.focus ?? 'name' });
     }
 
+    /** Right-click, long-press or the menu key on a built-in view. */
+    defaultViewMenu(view: Pick<DefaultView, 'id'>): ContextMenuProvider {
+        return (): ContextMenuEntry[] => {
+            const allowed = canHideView(this.hidden(), view.id);
+            return [
+                {
+                    icon: EyeOff,
+                    label: 'Hide from sidebar',
+                    disabled: !allowed,
+                    disabledReason: allowed ? undefined : 'At least one chat view must stay visible.',
+                    action: () => this.hideView(view.id),
+                },
+                { separator: true },
+                { icon: FolderCog, label: 'Manage folders…', action: () => this.manageFolders() },
+            ];
+        };
+    }
+
+    hideView(id: HiddenViewId): void {
+        if (!canHideView(this.hidden(), id) || this.hidden().includes(id)) {
+            return;
+        }
+        this.appearance.update({ hidden_views: [...this.hidden(), id] });
+    }
+
+    manageFolders(): void {
+        this.menuOpen.set(false);
+        this.settings.open('folders');
+    }
+
     folderMenu(folder: Folder): ContextMenuProvider {
         return (): ContextMenuEntry[] => [
             {
@@ -155,6 +179,7 @@ export class NavigationRailComponent {
                 action: () => this.openFolderDialog({ folder, focus: 'chats' }),
             },
             { icon: Pencil, label: 'Rename…', action: () => this.openFolderDialog({ folder, focus: 'name' }) },
+            { icon: FolderCog, label: 'Manage folders…', action: () => this.manageFolders() },
             { separator: true },
             { icon: Trash2, label: 'Delete folder', danger: true, action: () => void this.confirmDeleteFolder(folder) },
         ];

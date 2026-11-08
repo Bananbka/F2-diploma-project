@@ -1,3 +1,4 @@
+import { NgTemplateOutlet } from '@angular/common';
 import { DatePipe } from '@angular/common';
 import {
     afterNextRender,
@@ -11,7 +12,7 @@ import {
     input,
     signal,
 } from '@angular/core';
-import { Router, RouterLink } from '@angular/router';
+import { Router } from '@angular/router';
 import {
     ArrowLeft,
     Bell,
@@ -47,7 +48,7 @@ import { ChatRoster } from '../../../core/models/crypto.model';
 import { ChatApiService } from '../../../core/services/chat-api.service';
 import { ChatPanelStoreService } from '../../../core/services/chat-panel-store.service';
 import { ChatStoreService } from '../../../core/services/chat-store.service';
-import { ContactsApiService } from '../../../core/services/contacts-api.service';
+import { ContactsStoreService } from '../../../core/services/contacts-store.service';
 import { CryptoApiService } from '../../../core/services/crypto-api.service';
 import { DirectoryService } from '../../../core/services/directory.service';
 import { SessionService } from '../../../core/services/session.service';
@@ -55,7 +56,9 @@ import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
 import { ConfirmRequest, ConfirmService } from '../../../shared/ui/confirm-dialog/confirm.service';
 import { ContextMenuDirective, ContextMenuProvider } from '../../../shared/ui/context-menu/context-menu.directive';
 import { ContextMenuEntry } from '../../../shared/ui/context-menu/context-menu.model';
+import { SelectComponent, SelectOption } from '../../../shared/ui/select/select.component';
 import { avatarKindFor, DELETED_USER_LABEL, safetyNumberGroups } from '../../../shared/utils/display';
+import { EncryptionPanelComponent } from '../encryption-panel/encryption-panel.component';
 import { ExportDialogComponent } from '../export-dialog/export-dialog.component';
 import { SafetyNumberComponent } from '../safety-number/safety-number.component';
 
@@ -63,9 +66,9 @@ import { SafetyNumberComponent } from '../safety-number/safety-number.component'
 const MEMBER_RANK: Record<ParticipantRole, number> = { owner: 3, admin: 2, member: 1 };
 
 /** `main` is Members for a group or channel and Profile for a private chat. */
-export type InfoTab = 'main' | 'settings' | 'data';
+export type InfoTab = 'main' | 'encryption' | 'settings' | 'data';
 
-const INFO_TABS: readonly InfoTab[] = ['main', 'settings', 'data'];
+const INFO_TABS: readonly InfoTab[] = ['main', 'encryption', 'settings', 'data'];
 const TAB_KEY = 'chat-info-tab';
 
 function readStoredTab(): InfoTab {
@@ -94,10 +97,12 @@ export interface MemberRow {
 @Component({
     selector: 'app-chat-info',
     imports: [
-        RouterLink,
         SafetyNumberComponent,
         LucideAngularModule,
         AvatarComponent,
+        NgTemplateOutlet,
+        EncryptionPanelComponent,
+        SelectComponent,
         DatePipe,
         ExportDialogComponent,
         ContextMenuDirective,
@@ -109,7 +114,7 @@ export interface MemberRow {
 })
 export class ChatInfoComponent {
     private readonly chatApi = inject(ChatApiService);
-    private readonly contactsApi = inject(ContactsApiService);
+    private readonly contactsStore = inject(ContactsStoreService);
     private readonly cryptoApi = inject(CryptoApiService);
     private readonly directory = inject(DirectoryService);
     private readonly session = inject(SessionService);
@@ -143,8 +148,72 @@ export class ChatInfoComponent {
     readonly addOpen = signal(false);
     readonly addQuery = signal('');
     readonly addResults = signal<UserSearchResult[]>([]);
-    /** Ids saved as contacts during this visit, so the action can confirm itself. */
-    readonly contacted = signal(new Set<string>());
+    /** Derived from the shared contacts store, so it is right after a reload and updates at once. */
+    readonly savedIds = computed(() => new Set(this.contactsStore.contacts().map((c) => c.contact_id)));
+    /** The contact whose alias is being edited inline, and the draft text. */
+    readonly renamingContact = signal<string | null>(null);
+    readonly aliasDraft = signal('');
+
+    isSaved(userId: string): boolean {
+        return this.savedIds().has(userId);
+    }
+
+    startRenameContact(member: MemberRow): void {
+        this.aliasDraft.set(this.contactsStore.contactFor(member.userId)?.alias_name ?? '');
+        this.renamingContact.set(member.userId);
+    }
+
+    async commitRenameContact(member: MemberRow): Promise<void> {
+        if (this.renamingContact() !== member.userId) {
+            return;
+        }
+        this.renamingContact.set(null);
+        const contact = this.contactsStore.contactFor(member.userId);
+        if (!contact || (contact.alias_name ?? '') === this.aliasDraft().trim()) {
+            return;
+        }
+        if (await this.contactsStore.rename(contact, this.aliasDraft())) {
+            await this.directory.warm();
+            void this.store.loadChats();
+        } else {
+            this.actionError.set('Could not rename that contact.');
+        }
+    }
+
+    async removeContact(member: MemberRow): Promise<void> {
+        const contact = this.contactsStore.contactFor(member.userId);
+        if (!contact) {
+            return;
+        }
+        const confirmed = await this.confirm.ask({
+            title: 'Remove contact?',
+            message: `${member.name} is removed from your contacts. Your chat with them is not affected.`,
+            confirmLabel: 'Remove',
+            danger: true,
+        });
+        if (!confirmed) {
+            return;
+        }
+        if (await this.contactsStore.remove(contact)) {
+            await this.directory.warm();
+            void this.store.loadChats();
+        } else {
+            this.actionError.set('Could not remove that contact.');
+        }
+    }
+
+    /** The peer's picture. The detail endpoint leaves it NULL for private chats, so fall back to the list entry and the directory. */
+    readonly headerAvatarUrl = computed(() => {
+        const chat = this.chat();
+        if (!chat || chat.peer_is_deleted) {
+            return null;
+        }
+        if (chat.chat_type !== 'private') {
+            return chat.avatar_url;
+        }
+        const fromList = this.store.chats().find((c) => c.id === chat.id)?.avatar_url;
+        return chat.avatar_url ?? fromList ?? this.peer()?.avatarUrl ?? null;
+    });
 
     private addTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -207,9 +276,19 @@ export class ChatInfoComponent {
 
     readonly tabs = computed<{ id: InfoTab; label: string }[]>(() => [
         { id: 'main', label: this.isPrivate() ? 'Profile' : this.isChannel() ? 'Subscribers' : 'Members' },
+        // A private chat keeps its Encryption card on the Profile tab, next to the one person it concerns.
+        ...(this.isPrivate() ? [] : [{ id: 'encryption' as const, label: 'Encryption' }]),
         { id: 'settings', label: 'Settings' },
         { id: 'data', label: 'Data' },
     ]);
+
+    /** From the Encryption tab: open that member's safety number inline, with the usual back arrow. */
+    openSafetyFor(userId: string): void {
+        const member = this.members().find((m) => m.userId === userId);
+        if (member) {
+            this.openSafety(member);
+        }
+    }
 
     readonly isPrivate = computed(() => this.chat()?.chat_type === 'private');
     readonly isChannel = computed(() => this.chat()?.chat_type === 'channel');
@@ -352,6 +431,20 @@ export class ChatInfoComponent {
     readonly activeInviteLinks = computed(() => this.inviteLinks().filter((l) => l.is_active));
 
     /** A couple of presets rather than a raw date/number input — this is a rare, low-stakes action. */
+    readonly expiryOptions: readonly SelectOption[] = [
+        { value: 'none', label: 'Never' },
+        { value: '1d', label: 'In 1 day' },
+        { value: '7d', label: 'In 7 days' },
+    ];
+    readonly usesOptions: readonly SelectOption[] = [
+        { value: 'none', label: 'No limit' },
+        { value: '1', label: '1 use' },
+        { value: '10', label: '10 uses' },
+    ];
+    readonly roleOptions: readonly SelectOption[] = [
+        { value: 'admin', label: 'Admin' },
+        { value: 'member', label: 'Member' },
+    ];
     readonly expiryPreset = signal<'none' | '1d' | '7d'>('none');
     readonly maxUsesPreset = signal<'none' | '1' | '10'>('none');
 
@@ -830,9 +923,11 @@ export class ChatInfoComponent {
     async addContact(member: MemberRow): Promise<void> {
         this.busy.set(true);
         try {
-            await firstValueFrom(this.contactsApi.addContact(member.userId, member.name));
-            this.contacted.update((ids) => new Set(ids).add(member.userId));
+            if (!(await this.contactsStore.add(member.userId, member.name))) {
+                throw new Error('add failed');
+            }
             await this.directory.warm();
+            void this.store.loadChats();
         } catch {
             this.actionError.set('Could not add that contact.');
         } finally {
@@ -904,7 +999,7 @@ export class ChatInfoComponent {
                     action: () => void this.messageMember(member),
                 });
             }
-            if (!member.isMe && !member.deleted && !this.contacted().has(member.userId)) {
+            if (!member.isMe && !member.deleted && !this.isSaved(member.userId)) {
                 entries.push({
                     icon: BookmarkPlus,
                     label: 'Save as contact',

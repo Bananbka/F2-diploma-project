@@ -14,6 +14,7 @@ from app.domains.users.models import User
 from app.infrastructure.minio import minio_manager
 
 ORPHAN_AGE = timedelta(hours=24)
+RESERVED_KEY_PREFIXES = ("chat-backgrounds/",)
 
 
 async def _sweep_bucket(bucket_name: str, active_keys: set[str]) -> int:
@@ -28,6 +29,10 @@ async def _sweep_bucket(bucket_name: str, active_keys: set[str]) -> int:
 
             for obj in page['Contents']:
                 key = obj['Key']
+                # Private per-user objects live under reserved prefixes and are tracked in
+                # Postgres, not by message attachments; the sweep must never treat them as orphans.
+                if key.startswith(RESERVED_KEY_PREFIXES):
+                    continue
                 last_modified = obj['LastModified']
 
                 age = datetime.now(timezone.utc) - last_modified

@@ -26,11 +26,3 @@
         height: 1rem;
     }
 }
-
-/* The picker is anchored above by default; fields sit near the top of dialogs, so open downward. */
-:host ::ng-deep app-emoji-picker {
-    top: calc(100% + 0.25rem);
-    right: 0;
-    bottom: auto;
-    left: auto;
-}

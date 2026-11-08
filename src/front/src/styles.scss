@@ -216,6 +216,13 @@ textarea {
     font-family: var(--font-mono);
 }
 
+/* Marks a required field. The asterisk is decorative (empty alt text keeps it out of the accessible
+   name); the control itself carries aria-required. Works on a label or on a label's text span. */
+.required::after {
+    content: ' *' / '';
+    color: var(--danger);
+}
+
 /* Visually hidden, still announced. */
 .sr-only {
     position: absolute;

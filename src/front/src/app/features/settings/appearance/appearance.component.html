@@ -1,0 +1,335 @@
+<section class="group">
+    <p class="section">Preview</p>
+    <div
+        class="preview"
+        [style]="previewStyle()"
+        role="img"
+        aria-label="Preview of a conversation with your current appearance settings"
+    >
+        <app-chat-background
+            [image]="previewImage()"
+            [version]="value().background_image_version"
+        />
+        <div class="msg">
+            <div class="b other">Hey, are we still on for tonight?</div>
+            <span class="meta">12:41</span>
+            <div class="reactions">
+                <app-reaction-chip
+                    emoji="❤️"
+                    [count]="2"
+                    [mine]="true"
+                    [interactive]="false"
+                />
+            </div>
+        </div>
+        <div class="msg mine">
+            <div class="b own">Yes! See you at eight.</div>
+            <span class="meta">12:42</span>
+            <div class="reactions">
+                <app-reaction-chip
+                    emoji="👍"
+                    [count]="1"
+                    [interactive]="false"
+                />
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="group">
+    <p class="section">Text</p>
+
+    <div class="field">
+        <label for="appearance-size">Message text size</label>
+        <div class="stepper">
+            <button
+                type="button"
+                class="step"
+                aria-label="Decrease text size"
+                [disabled]="value().font_size <= min"
+                (click)="stepFontSize(-1)"
+            >
+                &minus;
+            </button>
+            <input
+                id="appearance-size"
+                type="range"
+                [min]="min"
+                [max]="max"
+                step="1"
+                [value]="value().font_size"
+                [attr.aria-valuetext]="value().font_size + ' pixels'"
+                (input)="setFontSize($any($event.target).value)"
+            />
+            <button
+                type="button"
+                class="step"
+                aria-label="Increase text size"
+                [disabled]="value().font_size >= max"
+                (click)="stepFontSize(1)"
+            >
+                +
+            </button>
+            <output
+                class="size-value"
+                for="appearance-size"
+                >{{ value().font_size }} px</output
+            >
+        </div>
+    </div>
+
+    <div class="field">
+        <span class="font-label">Font</span>
+        <app-select
+            label="Font"
+            [options]="fontOptions"
+            [value]="value().font_family"
+            [optionTemplate]="fontOption"
+            (valueChange)="setFontFamily($event)"
+        />
+        <ng-template
+            #fontOption
+            let-option
+        >
+            <span [style.font-family]="fontStack(option.value)">{{ option.label }}</span>
+        </ng-template>
+    </div>
+</section>
+
+<section class="group">
+    <p class="section">Bubble colours</p>
+
+    <div
+        class="field"
+        role="group"
+        aria-labelledby="own-label"
+    >
+        <span
+            id="own-label"
+            class="label"
+            >Your messages</span
+        >
+        <div class="swatches">
+            <app-color-picker
+                [label]="'Your bubble colour'"
+                [color]="value().own_bubble_color"
+                [fallback]="ownPicker()"
+                [swatches]="bubbleSwatches"
+                (colorChange)="setBubble('own', $event)"
+                (cleared)="setBubble('own', null)"
+            />
+            @for (c of bubbleSwatches; track c) {
+                <button
+                    type="button"
+                    class="swatch"
+                    [style.background]="c"
+                    [attr.aria-label]="'Your bubble colour ' + c"
+                    [attr.aria-pressed]="value().own_bubble_color === c"
+                    (click)="setBubble('own', c)"
+                ></button>
+            }
+            <button
+                type="button"
+                class="link"
+                [disabled]="value().own_bubble_color === null"
+                (click)="setBubble('own', null)"
+            >
+                Default
+            </button>
+        </div>
+    </div>
+
+    <div
+        class="field"
+        role="group"
+        aria-labelledby="other-label"
+    >
+        <span
+            id="other-label"
+            class="label"
+            >Their messages</span
+        >
+        <div class="swatches">
+            <app-color-picker
+                [label]="'Their bubble colour'"
+                [color]="value().other_bubble_color"
+                [fallback]="otherPicker()"
+                [swatches]="bubbleSwatches"
+                (colorChange)="setBubble('other', $event)"
+                (cleared)="setBubble('other', null)"
+            />
+            @for (c of bubbleSwatches; track c) {
+                <button
+                    type="button"
+                    class="swatch"
+                    [style.background]="c"
+                    [attr.aria-label]="'Their bubble colour ' + c"
+                    [attr.aria-pressed]="value().other_bubble_color === c"
+                    (click)="setBubble('other', c)"
+                ></button>
+            }
+            <button
+                type="button"
+                class="link"
+                [disabled]="value().other_bubble_color === null"
+                (click)="setBubble('other', null)"
+            >
+                Default
+            </button>
+        </div>
+    </div>
+</section>
+
+<section class="group">
+    <p class="section">Message shape</p>
+    <div class="field">
+        <label for="appearance-radius">Corner roundness</label>
+        <div class="stepper">
+            <button
+                type="button"
+                class="step"
+                aria-label="Less rounded"
+                [disabled]="value().bubble_radius <= radiusMin"
+                (click)="stepRadius(-1)"
+            >
+                &minus;
+            </button>
+            <input
+                id="appearance-radius"
+                type="range"
+                [min]="radiusMin"
+                [max]="radiusMax"
+                step="1"
+                [value]="value().bubble_radius"
+                [attr.aria-valuetext]="value().bubble_radius + ' pixels'"
+                (input)="setRadius($any($event.target).value)"
+            />
+            <button
+                type="button"
+                class="step"
+                aria-label="More rounded"
+                [disabled]="value().bubble_radius >= radiusMax"
+                (click)="stepRadius(1)"
+            >
+                +
+            </button>
+            <output
+                class="size-value"
+                for="appearance-radius"
+                >{{ value().bubble_radius }} px</output
+            >
+        </div>
+    </div>
+</section>
+
+<section class="group">
+    <p class="section">Chat background</p>
+    <div
+        class="swatches"
+        role="group"
+        aria-label="Chat background"
+    >
+        <button
+            type="button"
+            class="swatch is-default"
+            aria-label="Default background"
+            [attr.aria-pressed]="value().background.kind === 'default'"
+            (click)="setBackgroundDefault()"
+        ></button>
+        <app-color-picker
+            [label]="'Solid background colour'"
+            [color]="value().background.kind === 'color' ? value().background.color : null"
+            [fallback]="bgPicker()"
+            [swatches]="backgroundSwatches"
+            (colorChange)="setBackgroundColor($event)"
+            (cleared)="setBackgroundDefault()"
+        />
+        @for (c of backgroundSwatches; track c) {
+            <button
+                type="button"
+                class="swatch"
+                [style.background]="c"
+                [attr.aria-label]="'Background colour ' + c"
+                [attr.aria-pressed]="value().background.kind === 'color' && value().background.color === c"
+                (click)="setBackgroundColor(c)"
+            ></button>
+        }
+        @for (g of gradients; track g.id) {
+            <button
+                type="button"
+                class="swatch"
+                [style.background]="g.css"
+                [attr.aria-label]="'Gradient ' + g.id"
+                [attr.aria-pressed]="value().background.gradient === g.id"
+                (click)="setBackgroundGradient(g.id)"
+            ></button>
+        }
+    </div>
+
+    <input
+        #imageInput
+        type="file"
+        class="file-input"
+        accept="image/jpeg,image/png,image/webp"
+        aria-label="Choose a background image"
+        (change)="onFileInput($event)"
+    />
+    <div
+        class="dropzone"
+        [class.is-over]="dragOver()"
+        (dragover)="onDragOver($event)"
+        (dragleave)="dragOver.set(false)"
+        (drop)="onDrop($event)"
+    >
+        <button
+            type="button"
+            class="link"
+            [disabled]="uploading()"
+            [attr.aria-pressed]="value().background.kind === 'image'"
+            (click)="useImage(imageInput)"
+        >
+            {{ hasUploadedImage() ? 'Use my image' : 'Upload an image' }}
+        </button>
+        <span class="hint">JPEG, PNG or WebP, up to 5 MB. You can also drop a file here.</span>
+    </div>
+    @if (imageError(); as message) {
+        <p
+            class="image-error"
+            role="alert"
+        >
+            {{ message }}
+        </p>
+    }
+
+    @if (value().background.kind === 'image' && image()) {
+        <div class="image-row">
+            <div class="thumb">
+                <app-chat-background
+                    [image]="image()"
+                    [version]="value().background_image_version"
+                />
+            </div>
+            <button
+                type="button"
+                class="link"
+                (click)="editorOpen.set(true)"
+            >
+                Edit image&hellip;
+            </button>
+        </div>
+    }
+
+    @if (editorOpen()) {
+        <app-background-editor (closed)="editorOpen.set(false)" />
+    }
+</section>
+
+<section class="group">
+    <button
+        type="button"
+        class="reset"
+        (click)="reset()"
+    >
+        Reset to defaults
+    </button>
+</section>

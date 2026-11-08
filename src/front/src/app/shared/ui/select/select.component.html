@@ -1,0 +1,66 @@
+<button
+    #trigger
+    type="button"
+    class="trigger"
+    aria-haspopup="listbox"
+    [attr.aria-expanded]="open()"
+    [attr.aria-label]="label()"
+    [disabled]="disabled()"
+    (click)="toggle()"
+    (keydown)="onTriggerKeydown($event)"
+>
+    <span class="trigger-text">
+        @if (selected(); as current) {
+            @if (optionTemplate(); as tpl) {
+                <ng-container *ngTemplateOutlet="tpl; context: { $implicit: current }" />
+            } @else {
+                {{ current.label }}
+            }
+        } @else {
+            <span class="placeholder">{{ placeholder() }}</span>
+        }
+    </span>
+    <lucide-icon
+        class="chevron"
+        [img]="chevronIcon"
+    />
+</button>
+
+@if (open()) {
+    <div
+        #listbox
+        class="listbox"
+        role="listbox"
+        tabindex="-1"
+        [attr.aria-label]="label()"
+        [attr.aria-activedescendant]="optionId(active())"
+        (keydown)="onListKeydown($event)"
+    >
+        @for (option of options(); track option.value; let i = $index) {
+            <div
+                role="option"
+                class="option"
+                [id]="optionId(i)"
+                [class.is-active]="active() === i"
+                [class.is-selected]="option.value === value()"
+                [attr.aria-selected]="option.value === value()"
+                (mouseenter)="active.set(i)"
+                (click)="pick(i)"
+            >
+                <span class="option-text">
+                    @if (optionTemplate(); as tpl) {
+                        <ng-container *ngTemplateOutlet="tpl; context: { $implicit: option }" />
+                    } @else {
+                        {{ option.label }}
+                    }
+                </span>
+                @if (option.value === value()) {
+                    <lucide-icon
+                        class="check"
+                        [img]="checkIcon"
+                    />
+                }
+            </div>
+        }
+    </div>
+}

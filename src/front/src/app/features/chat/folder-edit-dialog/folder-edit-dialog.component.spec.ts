@@ -169,7 +169,10 @@ describe('FolderEditDialogComponent', () => {
         type(field('input[type="text"]'), 'Work');
         host.querySelector<HTMLButtonElement>('app-emoji-button .trigger')!.click();
         fixture.detectChanges();
-        host.querySelector<HTMLButtonElement>('app-emoji-picker button.emoji')!.click();
+        await fixture.whenStable();
+        fixture.detectChanges();
+        // The popover is portalled to <body>, outside the dialog's own DOM.
+        document.body.querySelector<HTMLButtonElement>('app-emoji-picker button.emoji')!.click();
         fixture.detectChanges();
         expect(field('input[type="text"]').value.length).toBeGreaterThan('Work'.length);
     });

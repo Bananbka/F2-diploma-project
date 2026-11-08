@@ -1,14 +1,21 @@
+<app-chat-background
+    [image]="backgroundImage()"
+    [version]="backgroundVersion()"
+/>
+
 @if (!chat()) {
     <div class="placeholder">
-        @if (chatId()) {
-            <!-- Deep link: the id is known but the chat list is still in flight, so this is loading
+        <div class="placeholder-card">
+            @if (chatId()) {
+                <!-- Deep link: the id is known but the chat list is still in flight, so this is loading
                  rather than "nothing selected". -->
-            <p class="placeholder-note">Opening conversation…</p>
-        } @else {
-            <lucide-icon [img]="messageSquareIcon" />
-            <p class="placeholder-title">No conversation selected</p>
-            <p class="placeholder-note">Pick a chat from the list, or start a new one.</p>
-        }
+                <p class="placeholder-note">Opening conversation…</p>
+            } @else {
+                <lucide-icon [img]="messageSquareIcon" />
+                <p class="placeholder-title">No conversation selected</p>
+                <p class="placeholder-note">Pick a chat from the list, or start a new one.</p>
+            }
+        </div>
     </div>
 } @else {
     <header class="head">
@@ -49,17 +56,6 @@
         </button>
 
         <div class="head-actions">
-            @if (peerId()) {
-                <button
-                    type="button"
-                    class="head-button"
-                    aria-label="Safety number"
-                    title="Safety number"
-                    (click)="openSafetyNumber()"
-                >
-                    <lucide-icon [img]="shieldIcon" />
-                </button>
-            }
             <button
                 type="button"
                 class="head-button"
@@ -229,6 +225,7 @@
                     <app-message-bubble
                         [message]="item.message"
                         [showSender]="isGroupLike()"
+                        [broadcast]="isChannel()"
                         [canDelete]="canDelete(item.message.senderId)"
                         [replyTo]="quotedFor(item.message)"
                         [selecting]="isSelecting()"
@@ -252,6 +249,7 @@
                     <app-message-bubble
                         [message]="pendingAsMessage(item.pending)"
                         [showSender]="false"
+                        [broadcast]="isChannel()"
                         [delivery]="item.pending.status"
                     />
 
@@ -324,7 +322,10 @@
     @if (isSelecting()) {
         <!-- Replaces the composer rather than sitting beside it: while picking messages the only
              actions that make sense are the bulk ones. -->
-        <div class="selection-bar">
+        <div
+            class="selection-bar"
+            [style.min-height.px]="composerHeight() || null"
+        >
             <button
                 type="button"
                 class="selection-cancel"
@@ -410,6 +411,7 @@
             class="picker"
             role="dialog"
             aria-label="Forward to"
+            (appDismissOnEscape)="forwardPickerOpen.set(false)"
         >
             <p class="picker-title">
                 Forward {{ forwardableCount() }} message{{ forwardableCount() === 1 ? '' : 's' }}

@@ -1,0 +1,145 @@
+@use 'ui';
+
+:host {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.muted {
+    margin: 0;
+    color: var(--muted-foreground);
+    font-size: 0.8125rem;
+    line-height: 1.5;
+}
+
+.error {
+    margin: 0;
+    color: var(--danger);
+    font-size: 0.8125rem;
+}
+
+.status {
+    display: flex;
+    gap: 0.75rem;
+    padding: 1rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-2xl);
+
+    > lucide-icon {
+        width: 1.25rem;
+        height: 1.25rem;
+        color: var(--ok);
+    }
+
+    &.is-alert {
+        border-color: var(--danger-border);
+
+        > lucide-icon {
+            color: var(--danger);
+        }
+    }
+
+    &.is-neutral > lucide-icon {
+        color: var(--muted-foreground);
+    }
+}
+
+.status-title {
+    margin: 0 0 0.25rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+}
+
+.facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    margin: 0.5rem 0 0;
+
+    dt {
+        color: var(--muted-foreground);
+        font-size: 0.6875rem;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+    }
+
+    dd {
+        margin: 0;
+        font-size: 0.8125rem;
+    }
+}
+
+.section {
+    margin: 0.5rem 0 0;
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.members {
+    @include ui.panel;
+
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.625rem 1rem;
+}
+
+.name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    font-size: 0.875rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.badge {
+    padding: 0.125rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--muted-foreground);
+    font-size: 0.6875rem;
+    white-space: nowrap;
+
+    &.is-verified {
+        color: var(--ok);
+    }
+
+    &.is-changed,
+    &.is-error {
+        color: var(--danger);
+    }
+
+    &.is-no-keys {
+        color: var(--warn);
+    }
+}
+
+.link {
+    padding: 0;
+    background: none;
+    border: none;
+    color: var(--primary);
+    font-size: 0.8125rem;
+    cursor: pointer;
+
+    &:disabled {
+        color: var(--muted-foreground);
+        cursor: default;
+    }
+
+    &:focus-visible {
+        outline: 2px solid var(--primary);
+    }
+}

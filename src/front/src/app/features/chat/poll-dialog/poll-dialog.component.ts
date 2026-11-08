@@ -11,11 +11,12 @@ import {
     PollPayload,
     validatePoll,
 } from '../../../core/models/message-payload';
+import { DismissOnEscapeDirective } from '../../../shared/ui/dismiss/dismiss-on-escape.directive';
 import { EmojiButtonComponent } from '../../../shared/ui/emoji-field/emoji-button.component';
 
 @Component({
     selector: 'app-poll-dialog',
-    imports: [LucideAngularModule, EmojiButtonComponent],
+    imports: [DismissOnEscapeDirective, LucideAngularModule, EmojiButtonComponent],
     templateUrl: './poll-dialog.component.html',
     styleUrl: './poll-dialog.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,

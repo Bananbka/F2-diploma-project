@@ -2,6 +2,7 @@ import { ChangeDetectionStrategy, Component, DestroyRef, inject, input, output, 
 import { LucideAngularModule, ShieldAlert, X } from 'lucide-angular';
 
 import { ChatExportService, ExportCancelledError, ExportProgress } from '../../../core/services/chat-export.service';
+import { DismissOnEscapeDirective } from '../../../shared/ui/dismiss/dismiss-on-escape.directive';
 
 type Phase = 'confirm' | 'running' | 'done' | 'cancelled' | 'error';
 
@@ -11,7 +12,7 @@ type Phase = 'confirm' | 'running' | 'done' | 'cancelled' | 'error';
  */
 @Component({
     selector: 'app-export-dialog',
-    imports: [LucideAngularModule],
+    imports: [DismissOnEscapeDirective, LucideAngularModule],
     templateUrl: './export-dialog.component.html',
     styleUrl: './export-dialog.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,

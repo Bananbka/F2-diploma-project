@@ -9,6 +9,20 @@ import { SessionService } from '../../../core/services/session.service';
 import { TrustStoreService } from '../../../core/services/trust-store.service';
 import { safetyNumberGroups } from '../../../shared/utils/display';
 
+/** Why a safety number could not be produced, so each case can say what is actually wrong. */
+export type SafetyFailure = 'peer-no-keys' | 'self-no-keys' | 'failed';
+
+export function classifySafetyError(error: unknown): SafetyFailure {
+    const message = error instanceof Error ? error.message : '';
+    if (message.includes('This contact has not published')) {
+        return 'peer-no-keys';
+    }
+    if (message.includes('You have not published')) {
+        return 'self-no-keys';
+    }
+    return 'failed';
+}
+
 @Component({
     selector: 'app-safety-number',
     imports: [LucideAngularModule],
@@ -33,6 +47,7 @@ export class SafetyNumberComponent {
     readonly qrDataUrl = signal<string | null>(null);
     readonly loading = signal(true);
     readonly error = signal<string | null>(null);
+    readonly failure = signal<SafetyFailure | null>(null);
     readonly copied = signal(false);
     /** Bumped on every trust write so the derived state recomputes. */
     private readonly trustEpoch = signal(0);
@@ -64,6 +79,7 @@ export class SafetyNumberComponent {
     private async load(userId: string): Promise<void> {
         this.loading.set(true);
         this.error.set(null);
+        this.failure.set(null);
         this.qrDataUrl.set(null);
 
         try {
@@ -72,8 +88,16 @@ export class SafetyNumberComponent {
             const number = await this.keyStore.computeSafetyNumber(userId);
             this.safetyNumber.set(number);
             await this.renderQr(number);
-        } catch {
-            this.error.set('Could not compute a safety number for this contact.');
+        } catch (error) {
+            const failure = classifySafetyError(error);
+            this.failure.set(failure);
+            this.error.set(
+                failure === 'peer-no-keys'
+                    ? `${this.peer().name} has not published encryption keys yet, so there is no safety number.`
+                    : failure === 'self-no-keys'
+                      ? 'You have not published encryption keys yet, so there is no safety number to compare.'
+                      : 'Could not compute a safety number for this contact.'
+            );
             this.safetyNumber.set(null);
         } finally {
             this.loading.set(false);

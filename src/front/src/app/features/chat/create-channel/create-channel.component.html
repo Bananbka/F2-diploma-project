@@ -1,161 +1,188 @@
-<header class="head">
-    <button
-        type="button"
-        class="back"
-        aria-label="Cancel"
-        (click)="cancel()"
-    >
-        <lucide-icon [img]="arrowLeftIcon" />
-    </button>
-    <h2>New channel</h2>
-</header>
+<div
+    class="backdrop"
+    (click)="cancel()"
+></div>
+<div
+    class="dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="create-channel-title"
+    (keydown)="onKeydown($event)"
+>
+    <header class="head">
+        <h2 id="create-channel-title">New channel</h2>
+        <button
+            type="button"
+            class="close"
+            aria-label="Close"
+            (click)="cancel()"
+        >
+            <lucide-icon [img]="closeIcon" />
+        </button>
+    </header>
 
-<div class="body">
-    <form
-        [formGroup]="form"
-        (ngSubmit)="create()"
-    >
-        <div class="fields">
-            <div class="field">
-                <label for="title">Channel name</label>
-                <div class="emoji-input-wrap">
-                    <input
-                        #titleField
-                        id="title"
-                        type="text"
-                        placeholder="announcements"
-                        formControlName="title"
-                        [attr.aria-invalid]="!!titleError()"
-                    />
-                    <app-emoji-button [target]="titleField" />
+    <div class="body">
+        <form
+            [formGroup]="form"
+            (ngSubmit)="create()"
+        >
+            <div class="fields">
+                <div class="field">
+                    <label
+                        for="title"
+                        class="required"
+                        >Channel name</label
+                    >
+                    <div class="emoji-input-wrap">
+                        <input
+                            #titleField
+                            id="title"
+                            aria-required="true"
+                            type="text"
+                            placeholder="announcements"
+                            formControlName="title"
+                            [attr.aria-invalid]="!!titleError()"
+                        />
+                        <app-emoji-button [target]="titleField" />
+                    </div>
+                    @if (titleError(); as message) {
+                        <p class="hint is-error">{{ message }}</p>
+                    } @else if (slug()) {
+                        <p class="hint">
+                            Shown as
+                            <span class="mono handle">#{{ slug() }}</span>
+                        </p>
+                    }
                 </div>
-                @if (titleError(); as message) {
-                    <p class="hint is-error">{{ message }}</p>
-                } @else if (slug()) {
-                    <p class="hint">
-                        Shown as
-                        <span class="mono handle">#{{ slug() }}</span>
-                    </p>
-                }
+
+                <div class="field">
+                    <label for="description">Description</label>
+                    <div class="emoji-input-wrap is-multiline">
+                        <textarea
+                            #descriptionField
+                            id="description"
+                            rows="3"
+                            placeholder="What is this channel about?"
+                            formControlName="description"
+                        ></textarea>
+                        <app-emoji-button [target]="descriptionField" />
+                    </div>
+                </div>
             </div>
 
-            <div class="field">
-                <label for="description">Description</label>
-                <div class="emoji-input-wrap is-multiline">
-                    <textarea
-                        #descriptionField
-                        id="description"
-                        rows="3"
-                        placeholder="What is this channel about?"
-                        formControlName="description"
-                    ></textarea>
-                    <app-emoji-button [target]="descriptionField" />
-                </div>
-            </div>
-        </div>
-
-        <!-- The design offered this as a toggle. It is not one: §6 of the wire spec makes broadcast
+            <!-- The design offered this as a toggle. It is not one: §6 of the wire spec makes broadcast
              channels signed-but-unencrypted unconditionally, because confidentiality is unachievable
              for open enrollment and sender-key distribution does not scale to channel membership.
              Rendering a switch here would offer a choice the protocol does not have. -->
-        <div class="declaration">
-            <div class="declaration-head">
-                <lucide-icon [img]="shieldOffIcon" />
-                <p class="declaration-title">Signed, not encrypted</p>
-                <span class="badge">Always</span>
+            <div class="declaration">
+                <div class="declaration-head">
+                    <lucide-icon [img]="shieldOffIcon" />
+                    <p class="declaration-title">Signed, not encrypted</p>
+                    <span class="badge">Always</span>
+                </div>
+                <p class="declaration-note">
+                    Every post is signed with your identity key, so subscribers can verify that you wrote it and that it
+                    was not altered. The content itself is <strong>not</strong> end-to-end encrypted: the server and
+                    every subscriber can read it. This is not configurable — use a group if you need confidentiality.
+                </p>
             </div>
-            <p class="declaration-note">
-                Every post is signed with your identity key, so subscribers can verify that you wrote it and that it was
-                not altered. The content itself is <strong>not</strong> end-to-end encrypted: the server and every
-                subscriber can read it. This is not configurable — use a group if you need confidentiality.
-            </p>
-        </div>
 
-        <p class="section">Subscribers</p>
+            <p class="section">Subscribers</p>
 
-        <div class="search">
-            <lucide-icon [img]="searchIcon" />
-            <input
-                type="search"
-                placeholder="Search people by username…"
-                aria-label="Search people"
-                [value]="query()"
-                (input)="onQuery($any($event.target).value)"
-            />
-        </div>
+            <div class="search">
+                <lucide-icon [img]="searchIcon" />
+                <input
+                    type="search"
+                    placeholder="Search people by username…"
+                    aria-label="Search people"
+                    [value]="query()"
+                    (input)="onQuery($any($event.target).value)"
+                />
+            </div>
 
-        @if (selected().length > 0) {
-            <ul class="chips">
-                @for (person of selected(); track person.id) {
-                    <li>
-                        <button
-                            type="button"
-                            class="chip"
-                            (click)="toggle(person)"
-                        >
-                            {{ person.full_name }}
-                            <span aria-hidden="true">×</span>
-                            <span class="sr-only">Remove</span>
-                        </button>
-                    </li>
+            @if (selected().length > 0) {
+                <ul class="chips">
+                    @for (person of selected(); track person.id) {
+                        <li>
+                            <button
+                                type="button"
+                                class="chip"
+                                (click)="toggle(person)"
+                            >
+                                {{ person.full_name }}
+                                <span aria-hidden="true">×</span>
+                                <span class="sr-only">Remove</span>
+                            </button>
+                        </li>
+                    }
+                </ul>
+            }
+
+            <div class="people">
+                @if (searching()) {
+                    <p class="muted">Searching…</p>
+                } @else if (results().length === 0 && query().trim().length >= 2) {
+                    <p class="muted">Nobody matches “{{ query() }}”.</p>
+                } @else if (results().length === 0) {
+                    <p class="muted">Optional — you can add subscribers later.</p>
                 }
-            </ul>
-        }
 
-        <div class="people">
-            @if (searching()) {
-                <p class="muted">Searching…</p>
-            } @else if (results().length === 0 && query().trim().length >= 2) {
-                <p class="muted">Nobody matches “{{ query() }}”.</p>
-            } @else if (results().length === 0) {
-                <p class="muted">Optional — you can add subscribers later.</p>
-            }
-
-            @for (person of results(); track person.id) {
-                <button
-                    type="button"
-                    class="person"
-                    [class.is-selected]="isSelected(person)"
-                    (click)="toggle(person)"
-                >
-                    <app-avatar
-                        size="sm"
-                        [name]="person.full_name"
-                        [seed]="person.id"
-                        [imageUrl]="person.avatar_url"
-                    />
-                    <span class="person-text">
-                        <span class="person-name">{{ person.full_name }}</span>
-                        <span class="person-username">&#64;{{ person.username }}</span>
-                    </span>
-                    <span
-                        class="tick"
-                        [class.is-on]="isSelected(person)"
+                @for (person of results(); track person.id) {
+                    <button
+                        type="button"
+                        class="person"
+                        [class.is-selected]="isSelected(person)"
+                        (click)="toggle(person)"
                     >
-                        @if (isSelected(person)) {
-                            <lucide-icon [img]="checkIcon" />
-                        }
-                    </span>
-                </button>
+                        <app-avatar
+                            size="sm"
+                            [name]="person.full_name"
+                            [seed]="person.id"
+                            [imageUrl]="person.avatar_url"
+                        />
+                        <span class="person-text">
+                            <span class="person-name">{{ person.full_name }}</span>
+                            <span class="person-username">&#64;{{ person.username }}</span>
+                        </span>
+                        <span
+                            class="tick"
+                            [class.is-on]="isSelected(person)"
+                        >
+                            @if (isSelected(person)) {
+                                <lucide-icon [img]="checkIcon" />
+                            }
+                        </span>
+                    </button>
+                }
+            </div>
+
+            @if (error()) {
+                <p
+                    class="error"
+                    role="alert"
+                >
+                    {{ error() }}
+                </p>
             }
-        </div>
 
-        @if (error()) {
-            <p
-                class="error"
-                role="alert"
+            @if (titleMissing()) {
+                <p
+                    class="hint"
+                    id="create-channel-reason"
+                >
+                    Give the channel a name to continue.
+                </p>
+            }
+
+            <button
+                type="submit"
+                class="submit"
+                [attr.aria-describedby]="titleMissing() ? 'create-channel-reason' : null"
+                [disabled]="!canCreate()"
             >
-                {{ error() }}
-            </p>
-        }
-
-        <button
-            type="submit"
-            class="submit"
-            [disabled]="!canCreate()"
-        >
-            <lucide-icon [img]="hashIcon" />
-            {{ submitting() ? 'Creating…' : 'Create channel' }}
-        </button>
-    </form>
+                <lucide-icon [img]="hashIcon" />
+                {{ submitting() ? 'Creating…' : 'Create channel' }}
+            </button>
+        </form>
+    </div>
 </div>

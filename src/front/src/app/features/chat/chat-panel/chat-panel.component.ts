@@ -81,11 +81,15 @@ export class ChatPanelComponent {
     /** Bodies shown at least once. The sticker tab fetches on creation, so build lazily and keep. */
     readonly visited = signal<ReadonlySet<string>>(new Set());
 
-    /** Why the sticker/emoji tabs cannot be used right now, or null. */
-    readonly unavailableReason = computed(() => {
-        const composer = this.panel.composer();
-        return composer ? composer.unavailableReason() : 'Open a conversation to use this.';
-    });
+    /**
+     * Why the sticker/emoji tabs cannot be used right now, or null. While messages are being
+     * selected there is no composer; that state is deliberately silent (no notice is inserted, so
+     * the layout cannot shift) and only disables the pickers, see `locked`.
+     */
+    readonly unavailableReason = computed(() => this.panel.composer()?.unavailableReason() ?? null);
+
+    /** The insert actions are inert: the composer refuses them, or there is no composer (selection mode). */
+    readonly locked = computed(() => this.panel.composer() === null || this.unavailableReason() !== null);
 
     /** Set after a pick the composer turned down in the instant between render and click. */
     readonly refused = signal(false);

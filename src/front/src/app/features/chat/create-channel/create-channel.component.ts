@@ -1,16 +1,27 @@
-import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import {
+    afterNextRender,
+    ChangeDetectionStrategy,
+    Component,
+    computed,
+    ElementRef,
+    inject,
+    signal,
+} from '@angular/core';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { Router } from '@angular/router';
-import { ArrowLeft, Check, Hash, LucideAngularModule, Search, ShieldOff } from 'lucide-angular';
+import { Check, Hash, LucideAngularModule, Search, ShieldOff, X } from 'lucide-angular';
 import { firstValueFrom } from 'rxjs';
 
 import { UserSearchResult } from '../../../core/models/chat.model';
 import { ChatApiService } from '../../../core/services/chat-api.service';
 import { ChatStoreService } from '../../../core/services/chat-store.service';
 import { DirectoryService } from '../../../core/services/directory.service';
+import { formSnapshot } from '../../../shared/forms/form-signal';
 import { applyServerErrors, errorTextFor } from '../../../shared/forms/server-errors';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
 import { EmojiButtonComponent } from '../../../shared/ui/emoji-field/emoji-button.component';
+import { trapTab } from '../../../shared/ui/focus-trap';
+import { CreateDialogService } from '../create-dialog.service';
 
 @Component({
     selector: 'app-create-channel',
@@ -25,6 +36,13 @@ export class CreateChannelComponent {
     private readonly store = inject(ChatStoreService);
     private readonly router = inject(Router);
     private readonly fb = inject(FormBuilder);
+    private readonly dialogs = inject(CreateDialogService);
+    private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
+    private readonly opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+    constructor() {
+        afterNextRender(() => this.host.nativeElement.querySelector<HTMLElement>('#title')?.focus());
+    }
 
     readonly query = signal('');
     readonly results = signal<UserSearchResult[]>([]);
@@ -38,8 +56,11 @@ export class CreateChannelComponent {
         description: [''],
     });
 
-    readonly slug = computed(() => this.form.controls.title.value.trim().toLowerCase().replace(/\s+/g, '-'));
-    readonly canCreate = computed(() => this.form.valid && !this.submitting());
+    private readonly snapshot = formSnapshot(this.form);
+
+    readonly slug = computed(() => this.snapshot().value.title.trim().toLowerCase().replace(/\s+/g, '-'));
+    readonly titleMissing = computed(() => this.snapshot().value.title.trim().length === 0);
+    readonly canCreate = computed(() => this.snapshot().valid && !this.submitting());
 
     titleError(): string | null {
         return errorTextFor(this.form.controls.title, {
@@ -48,7 +69,7 @@ export class CreateChannelComponent {
         });
     }
 
-    readonly arrowLeftIcon = ArrowLeft;
+    readonly closeIcon = X;
     readonly searchIcon = Search;
     readonly checkIcon = Check;
     readonly hashIcon = Hash;
@@ -111,6 +132,7 @@ export class CreateChannelComponent {
             );
 
             await this.store.loadChats();
+            this.dialogs.close();
             await this.router.navigate(['/chats', chat.id]);
         } catch (error) {
             this.error.set(applyServerErrors(this.form, error) ?? 'Could not create the channel.');
@@ -119,7 +141,19 @@ export class CreateChannelComponent {
         }
     }
 
-    async cancel(): Promise<void> {
-        await this.router.navigate(['/chats']);
+    cancel(): void {
+        this.dialogs.close();
+        this.opener?.focus();
+    }
+
+    /** Escape closes this dialog only; Tab is kept inside it. */
+    onKeydown(event: KeyboardEvent): void {
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            event.stopPropagation();
+            this.cancel();
+            return;
+        }
+        trapTab(event, this.host.nativeElement);
     }
 }

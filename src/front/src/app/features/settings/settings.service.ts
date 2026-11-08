@@ -2,12 +2,14 @@ import { computed, inject, Injectable, signal } from '@angular/core';
 
 import { ConfirmService } from '../../shared/ui/confirm-dialog/confirm.service';
 
-export type SettingsTab = 'profile' | 'security' | 'stickers' | 'privacy';
+export type SettingsTab = 'profile' | 'security' | 'stickers' | 'appearance' | 'folders' | 'privacy';
 
 export const SETTINGS_TABS: readonly { id: SettingsTab; label: string }[] = [
     { id: 'profile', label: 'Profile' },
     { id: 'security', label: 'Security' },
     { id: 'stickers', label: 'Stickers' },
+    { id: 'appearance', label: 'Appearance' },
+    { id: 'folders', label: 'Folders' },
     { id: 'privacy', label: 'Privacy & data' },
 ];
 
@@ -19,6 +21,10 @@ export function tabFromSegment(segment: string | null | undefined): SettingsTab 
             return 'security';
         case 'stickers':
             return 'stickers';
+        case 'appearance':
+            return 'appearance';
+        case 'folders':
+            return 'folders';
         case 'privacy':
             return 'privacy';
         default:

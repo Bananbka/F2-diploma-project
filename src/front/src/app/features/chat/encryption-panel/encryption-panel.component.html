@@ -1,0 +1,88 @@
+@if (loading()) {
+    <p class="muted">Loading&hellip;</p>
+} @else if (error()) {
+    <p
+        class="error"
+        role="alert"
+    >
+        {{ error() }}
+    </p>
+} @else if (isChannel()) {
+    <section class="status is-neutral">
+        <lucide-icon [img]="offIcon" />
+        <div>
+            <p class="status-title">Signed, not encrypted</p>
+            <p class="muted">
+                Posts in this channel are signed so you can verify who wrote them, but they are not encrypted: the
+                server and every subscriber can read them.
+            </p>
+        </div>
+    </section>
+} @else {
+    <section
+        class="status"
+        [class.is-alert]="verificationError()"
+    >
+        <lucide-icon [img]="verificationError() ? alertIcon : okIcon" />
+        <div>
+            <p class="status-title">
+                {{ verificationError() ? 'Member set could not be verified' : 'End-to-end encrypted' }}
+            </p>
+            <p class="muted">
+                @if (verificationError()) {
+                    {{ verificationError() }}
+                } @else {
+                    The member list matches the commitment for the current keys.
+                }
+            </p>
+            <dl class="facts">
+                @if (epoch() !== null) {
+                    <div>
+                        <dt>Key epoch</dt>
+                        <dd>{{ epoch() }}</dd>
+                    </div>
+                }
+                @if (rotatedAt(); as when) {
+                    <div>
+                        <dt>Last key rotation</dt>
+                        <dd>{{ when }}</dd>
+                    </div>
+                }
+            </dl>
+        </div>
+    </section>
+
+    <p class="section">Members</p>
+    <ul class="members">
+        @for (member of members(); track member.userId) {
+            <li class="row">
+                <app-avatar
+                    size="sm"
+                    [name]="member.name"
+                    [seed]="member.userId"
+                    [imageUrl]="member.avatarUrl"
+                />
+                <span class="name">{{ member.name }}</span>
+                <span
+                    class="badge"
+                    [class]="'badge is-' + member.status"
+                    >{{ labels[member.status] }}</span
+                >
+                <button
+                    type="button"
+                    class="link"
+                    [disabled]="member.status === 'no-keys'"
+                    [attr.aria-label]="'Safety number for ' + member.name"
+                    (click)="openMember(member.userId)"
+                >
+                    Safety number
+                </button>
+                @if (member.status === 'no-keys') {
+                    <span class="sr-only"
+                        >{{ member.name }} has not published encryption keys yet, so there is no safety number.</span
+                    >
+                }
+            </li>
+        }
+    </ul>
+}

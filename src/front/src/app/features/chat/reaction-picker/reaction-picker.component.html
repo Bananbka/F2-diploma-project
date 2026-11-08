@@ -1,0 +1,83 @@
+<div
+    #root
+    class="reactions-picker"
+    role="dialog"
+    aria-label="Add a reaction"
+    [class.is-full]="mode() === 'full'"
+    (keydown)="onKeydown($event)"
+>
+    @if (mode() === 'full') {
+        <app-emoji-picker
+            class="full"
+            [embedded]="true"
+            (pick)="pick($event)"
+        />
+    } @else {
+        <div
+            class="quick"
+            role="group"
+            aria-label="Recent reactions"
+        >
+            @for (emoji of quick; track emoji) {
+                <button
+                    type="button"
+                    class="emoji"
+                    data-nav
+                    [attr.data-emoji]="emoji"
+                    [class.is-mine]="isMine(emoji)"
+                    [attr.aria-pressed]="isMine(emoji)"
+                    [attr.aria-label]="label(emoji)"
+                    [title]="label(emoji)"
+                    (click)="pick(emoji)"
+                    [innerHTML]="emoji | twemoji"
+                ></button>
+            }
+            @if (mode() === 'quick') {
+                <button
+                    type="button"
+                    class="expand"
+                    data-nav
+                    aria-label="More reactions"
+                    title="More reactions"
+                    aria-expanded="false"
+                    (click)="expand()"
+                >
+                    <lucide-icon [img]="plusIcon" />
+                </button>
+            }
+        </div>
+
+        @if (mode() === 'grid') {
+            <div class="more">
+                <div
+                    class="grid"
+                    role="group"
+                    aria-label="Reactions"
+                >
+                    @for (emoji of builtIn; track emoji) {
+                        <button
+                            type="button"
+                            class="emoji"
+                            data-nav
+                            [class.is-mine]="isMine(emoji)"
+                            [attr.aria-pressed]="isMine(emoji)"
+                            [attr.aria-label]="label(emoji)"
+                            [title]="label(emoji)"
+                            (click)="pick(emoji)"
+                            [innerHTML]="emoji | twemoji"
+                        ></button>
+                    }
+                </div>
+                <button
+                    type="button"
+                    class="more-emoji"
+                    data-nav
+                    (click)="openFull()"
+                >
+                    <lucide-icon [img]="smileIcon" />
+                    More emoji&hellip;
+                </button>
+            </div>
+        }
+    }
+</div>

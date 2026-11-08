@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, input, signal } from '@angular/core';
 import { Hash, LucideAngularModule, Users, UserX } from 'lucide-angular';
 
 import { avatarColor, groupInitials, initials } from '../../utils/display';
@@ -14,7 +14,7 @@ export type AvatarKind = 'person' | 'group' | 'channel';
     templateUrl: './avatar.component.html',
     styleUrl: './avatar.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
-    host: { '[class]': 'size()' },
+    host: { '[class]': 'size()', '[class.scaled]': 'scaled()' },
 })
 export class AvatarComponent {
     readonly name = input.required<string>();
@@ -22,6 +22,8 @@ export class AvatarComponent {
     readonly seed = input<string>('');
     readonly imageUrl = input<string | null>(null);
     readonly size = input<AvatarSize>('md');
+    /** Follow the chat font size (`--chat-font-scale`); for avatars inside the conversation only. */
+    readonly scaled = input(false);
     /** Omit entirely to render no presence dot — absent and offline are different things. */
     readonly online = input<boolean | undefined>(undefined);
     /** A deleted account: a neutral grey face with no initials, never a stale photo or colour. */
@@ -29,6 +31,9 @@ export class AvatarComponent {
 
     /** People and groups share the same coloured circle; only how the letters are chosen differs. */
     readonly kind = input<AvatarKind>('person');
+
+    /** The last URL that failed to load; while `imageUrl` is still that value the monogram shows instead. */
+    readonly failedUrl = signal<string | null>(null);
 
     /** Letters (or a lone emoji) for the circle. Empty means "no letters": the kind's icon is shown. */
     readonly monogram = computed(() => (this.kind() === 'person' ? initials(this.name()) : groupInitials(this.name())));

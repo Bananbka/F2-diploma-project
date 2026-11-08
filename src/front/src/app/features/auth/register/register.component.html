@@ -10,9 +10,14 @@
     >
         <div class="fields">
             <div class="field">
-                <label for="fullName">Full name</label>
+                <label
+                    for="fullName"
+                    class="required"
+                    >Full name</label
+                >
                 <input
                     id="fullName"
+                    aria-required="true"
                     type="text"
                     autocomplete="name"
                     placeholder="Alice Kowalski"
@@ -31,9 +36,14 @@
             </div>
 
             <div class="field">
-                <label for="username">Username</label>
+                <label
+                    for="username"
+                    class="required"
+                    >Username</label
+                >
                 <input
                     id="username"
+                    aria-required="true"
                     type="text"
                     autocomplete="username"
                     placeholder="alice_k"
@@ -52,9 +62,14 @@
             </div>
 
             <div class="field">
-                <label for="email">Email</label>
+                <label
+                    for="email"
+                    class="required"
+                    >Email</label
+                >
                 <input
                     id="email"
+                    aria-required="true"
                     type="email"
                     autocomplete="email"
                     placeholder="alice@example.com"
@@ -73,9 +88,14 @@
             </div>
 
             <div class="field">
-                <label for="phone">Phone number</label>
+                <label
+                    for="phone"
+                    class="required"
+                    >Phone number</label
+                >
                 <input
                     id="phone"
+                    aria-required="true"
                     type="tel"
                     autocomplete="tel"
                     placeholder="+380501234567"
@@ -101,10 +121,15 @@
             </div>
 
             <div class="field">
-                <label for="password">Password</label>
+                <label
+                    for="password"
+                    class="required"
+                    >Password</label
+                >
                 <div class="with-affix">
                     <input
                         id="password"
+                        aria-required="true"
                         [type]="showPassword() ? 'text' : 'password'"
                         autocomplete="new-password"
                         placeholder="12+ characters"

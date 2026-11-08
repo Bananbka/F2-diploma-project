@@ -127,6 +127,16 @@ describe('ChatSidebarComponent views', () => {
         return fixture;
     }
 
+    it('is not displayed while its host carries [hidden], so Contacts can take the column', () => {
+        const fixture = render();
+        const host = fixture.nativeElement as HTMLElement;
+        document.body.appendChild(host);
+        expect(getComputedStyle(host).display).not.toBe('none');
+        host.setAttribute('hidden', '');
+        expect(getComputedStyle(host).display).toBe('none');
+        host.remove();
+    });
+
     const titles = (fixture: ReturnType<typeof render>) =>
         Array.from((fixture.nativeElement as HTMLElement).querySelectorAll('.row .title')).map((t) =>
             t.textContent?.trim()
@@ -149,16 +159,26 @@ describe('ChatSidebarComponent views', () => {
         expect(host.querySelector('app-folder-edit-dialog')).toBeNull();
     });
 
+    it('has a 60px search row and no view title', async () => {
+        const fixture = render('all', []);
+        await fixture.whenStable();
+        const host = fixture.nativeElement as HTMLElement;
+
+        expect(host.querySelector('h2')).toBeNull();
+        expect(host.querySelector<HTMLElement>('.head')!.getBoundingClientRect().height).toBe(60);
+    });
+
     it('filters the list by the selected view and titles it', async () => {
         const fixture = render('all', [{ id: 'f1', title: 'Work', items: [{ chat_id: 'g1' }] }]);
         await fixture.whenStable();
         const host = fixture.nativeElement as HTMLElement;
-        const heading = () => host.querySelector('h2.view-title')!.textContent!.trim();
+        const heading = () => host.querySelector('.list')!.getAttribute('aria-label');
         const show = (view: ChatViewKey) => {
             fixture.componentRef.setInput('view', view);
             fixture.detectChanges();
         };
 
+        expect(host.querySelector('h2.view-title')).toBeNull();
         expect(heading()).toBe('All chats');
         expect(titles(fixture).length).toBe(3);
 

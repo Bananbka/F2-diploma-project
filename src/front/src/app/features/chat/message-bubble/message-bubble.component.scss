@@ -1,14 +1,42 @@
 :host {
     display: flex;
+    align-items: flex-start;
     gap: 0.625rem;
     padding: 0.375rem 1rem;
 }
 
-:host(.is-outgoing) {
+:host(.is-outgoing:not(.is-broadcast)) {
     justify-content: flex-end;
 }
 
 /* ── Bulk selection ───────────────────────────────────────────────────────────────────────── */
+
+:host {
+    transition: background-color 0.15s ease;
+}
+
+@keyframes pick-in {
+    from {
+        opacity: 0;
+        transform: translateX(-0.5rem) scale(0.7);
+    }
+
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    :host {
+        transition: none;
+    }
+
+    .pick {
+        animation: none;
+        transition: none;
+    }
+}
 
 :host(.is-selectable) {
     cursor: pointer;
@@ -35,6 +63,10 @@
     border: 2px solid rgb(139 139 154 / 40%);
     border-radius: 50%;
     color: #fff;
+    animation: pick-in 0.18s ease-out;
+    transition:
+        background-color 0.15s ease,
+        border-color 0.15s ease;
 
     &.is-on {
         background: var(--primary);
@@ -47,8 +79,25 @@
     }
 }
 
+/* The avatar and the bubble form one row; the avatar's bottom edge is the bubble's bottom edge. */
+.bubble-row {
+    display: flex;
+    align-items: flex-end;
+    gap: 0.625rem;
+    min-width: 0;
+}
+
 .who {
-    margin-top: 1.25rem;
+    flex-shrink: 0;
+}
+
+/* Everything else in an incoming message lines up with the bubble, not under the avatar. */
+:host {
+    --who-offset: calc(2rem * var(--chat-font-scale, 1) + 0.625rem);
+}
+
+:host(.is-leading) .stack > :not(.bubble-row) {
+    margin-left: var(--who-offset);
 }
 
 .stack {
@@ -58,7 +107,7 @@
     min-width: 0;
 }
 
-:host(.is-outgoing) .stack {
+:host(.is-outgoing:not(.is-broadcast)) .stack {
     align-items: flex-end;
 }
 
@@ -67,7 +116,7 @@
     align-items: center;
     gap: 0.375rem;
     margin: 0 0 0.25rem 0.25rem;
-    color: var(--muted-foreground);
+    color: var(--chat-meta-fg, var(--muted-foreground));
     font-size: 0.75rem;
     font-weight: 500;
 }
@@ -89,8 +138,8 @@
     padding: 0.25rem 0.625rem;
     background: none;
     border: none;
-    border-left: 2px solid var(--primary);
-    color: var(--muted-foreground);
+    border-left: 2px solid var(--chat-meta-accent, var(--primary));
+    color: var(--chat-meta-fg, var(--muted-foreground));
     font-size: 0.75rem;
     text-align: left;
     transition: background-color 0.12s ease;
@@ -134,7 +183,7 @@
 }
 
 .quote-author {
-    color: var(--primary);
+    color: var(--chat-meta-accent, var(--primary));
     font-weight: 500;
 }
 
@@ -153,18 +202,26 @@
     align-items: flex-start;
     gap: 0.625rem;
     padding: 0.625rem 1rem;
-    background: var(--surface-raised);
+    background: var(--bubble-other-bg, var(--surface-raised));
     border: 1px solid var(--border);
-    border-radius: var(--radius-2xl);
-    border-top-left-radius: var(--radius-sm);
+    border-radius: var(--bubble-radius, var(--radius-2xl));
+    color: var(--bubble-other-fg, inherit);
+    --bubble-accent: var(--bubble-other-accent, var(--primary));
+    --bubble-accent-fg: var(--bubble-other-accent-fg, #fff);
+    --bubble-muted: var(--bubble-other-fg-muted, var(--muted-foreground));
+    font-family: var(--chat-font-family, inherit);
+    border-top-left-radius: min(var(--radius-sm), var(--bubble-radius, var(--radius-sm)));
 }
 
 :host(.is-outgoing) .bubble {
-    background: var(--primary);
+    background: var(--bubble-own-bg, var(--primary));
     border-color: transparent;
-    border-top-left-radius: var(--radius-2xl);
-    border-top-right-radius: var(--radius-sm);
-    color: #fff;
+    border-top-left-radius: var(--bubble-radius, var(--radius-2xl));
+    border-top-right-radius: min(var(--radius-sm), var(--bubble-radius, var(--radius-sm)));
+    color: var(--bubble-own-fg, #fff);
+    --bubble-accent: var(--bubble-own-accent, var(--primary));
+    --bubble-accent-fg: var(--bubble-own-accent-fg, #fff);
+    --bubble-muted: var(--bubble-own-fg-muted, var(--muted-foreground));
 }
 
 .content {
@@ -173,20 +230,20 @@
 
 .text {
     margin: 0;
-    font-size: 0.875rem;
+    font-size: calc(0.875rem * var(--chat-font-scale, 1));
     line-height: 1.55;
     overflow-wrap: anywhere;
     white-space: pre-wrap;
 }
 
 .text.is-placeholder {
-    color: var(--muted-foreground);
+    color: var(--bubble-muted, var(--muted-foreground));
     font-style: italic;
 }
 
 .detail {
     margin: 0.25rem 0 0;
-    font-size: 0.6875rem;
+    font-size: calc(0.6875rem * var(--chat-font-scale, 1));
     line-height: 1.45;
     opacity: 0.85;
 }
@@ -205,6 +262,18 @@
     margin: 0.5rem 0 0;
     padding: 0;
     list-style: none;
+
+    /* Nothing above it to separate from: the gap belongs between text and attachments, and a leading
+       one would sit above a bare voice row and push it off the bubble's centre. */
+    &:first-child,
+    .text:empty + & {
+        margin-top: 0;
+    }
+}
+
+/* A message with no text (voice, bare attachment) carries an empty paragraph; keep it out of layout. */
+.text:empty {
+    display: none;
 }
 
 .attachment {
@@ -250,7 +319,7 @@
     max-width: 18rem;
     min-height: 6rem;
     overflow: hidden;
-    border-radius: var(--radius-lg);
+    border-radius: var(--media-radius, var(--radius-lg));
 }
 
 .media-image {
@@ -348,10 +417,10 @@
     flex-shrink: 0;
     width: 2rem;
     height: 2rem;
-    background: var(--primary);
+    background: var(--bubble-accent, var(--primary));
     border: none;
     border-radius: 50%;
-    color: #fff;
+    color: var(--bubble-accent-fg, #fff);
 
     lucide-icon {
         width: 1rem;
@@ -382,6 +451,7 @@
 
 .audio-time {
     flex-shrink: 0;
+    line-height: 1;
     font-size: 0.6875rem;
     opacity: 0.8;
 }
@@ -491,13 +561,28 @@
     gap: 0.375rem;
     min-height: 1.125rem;
     margin: 0.25rem 0.25rem 0;
-    color: var(--muted-foreground);
+    color: var(--chat-meta-fg, var(--muted-foreground));
     font-size: 0.6875rem;
     line-height: 1;
 }
 
-:host(.is-outgoing) .meta {
+:host(.is-outgoing:not(.is-broadcast)) .meta {
     flex-direction: row-reverse;
+}
+
+/* Incoming: the row hugs the left edge of the column and reads [react][time][actions]. The two buttons
+   hold their space at all times (hover only changes opacity), so the time never shifts. */
+:host(.is-leading) .meta {
+    justify-content: flex-start;
+    margin-left: 0;
+}
+
+:host(.is-leading) .meta .reaction-add-wrap {
+    order: -1;
+}
+
+:host(.is-leading) .meta .action {
+    order: 1;
 }
 
 .edited {
@@ -515,7 +600,7 @@
     }
 
     &.is-ok {
-        color: var(--primary);
+        color: var(--chat-meta-accent, var(--primary));
     }
 
     &.is-warn {
@@ -523,13 +608,13 @@
     }
 
     &.is-sent {
-        color: var(--muted-foreground);
+        color: var(--chat-meta-fg, var(--muted-foreground));
     }
 
     /* Read, not merely sent — the same colour the verified mark uses, so both read as "this claim
        is confirmed" rather than introducing a third accent colour. */
     &.is-sent.is-read {
-        color: var(--primary);
+        color: var(--chat-meta-accent, var(--primary));
     }
 }
 
@@ -562,7 +647,7 @@
     padding: 0;
     background: none;
     border: none;
-    color: var(--muted-foreground);
+    color: var(--chat-meta-fg, var(--muted-foreground));
     opacity: 0;
     transition:
         opacity 0.15s ease,
@@ -600,42 +685,8 @@
     margin: 0.25rem 0.25rem 0;
 }
 
-:host(.is-outgoing) .reactions {
+:host(.is-outgoing:not(.is-broadcast)) .reactions {
     justify-content: flex-end;
-}
-
-.reaction-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.25rem;
-    padding: 0.125rem 0.4375rem;
-    background: var(--surface-raised);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    color: var(--foreground);
-    font-size: 0.75rem;
-    line-height: 1.3;
-    transition:
-        background-color 0.12s ease,
-        border-color 0.12s ease;
-
-    &:hover {
-        border-color: rgb(163 88 249 / 60%);
-    }
-
-    &.is-mine {
-        background: rgb(163 88 249 / 18%);
-        border-color: var(--primary);
-    }
-}
-
-.reaction-count {
-    color: var(--muted-foreground);
-    font-size: 0.6875rem;
-}
-
-.reaction-pill.is-mine .reaction-count {
-    color: var(--primary);
 }
 
 .reaction-add-wrap {
@@ -645,7 +696,7 @@
 
 /* Incoming rows read left to right, so the control goes first; outgoing rows are reversed, where
    its place after the actions button already puts it on the far left. */
-:host(:not(.is-outgoing)) .reaction-add-wrap {
+:host(.is-leading) .reaction-add-wrap {
     order: -1;
 }
 
@@ -656,9 +707,9 @@
     width: 1.25rem;
     height: 1.25rem;
     background: none;
-    border: 1px dashed var(--border);
+    border: 1px dashed var(--chat-chip-border, var(--border));
     border-radius: 50%;
-    color: var(--muted-foreground);
+    color: var(--chat-meta-fg, var(--muted-foreground));
     opacity: 0;
     transition:
         opacity 0.15s ease,
@@ -687,67 +738,12 @@
     }
 }
 
-.reactions-picker {
-    position: absolute;
-    bottom: calc(100% + 0.375rem);
-    left: 0;
-    z-index: 20;
-    display: flex;
-    align-items: center;
-    gap: 0.125rem;
-    padding: 0.375rem;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    box-shadow: 0 4px 16px rgb(0 0 0 / 40%);
-    white-space: nowrap;
-}
-
-:host(.is-outgoing) .reactions-picker {
-    right: 0;
-    left: auto;
-}
-
-.picker-emoji {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 1.75rem;
-    height: 1.75rem;
-    background: none;
-    border: none;
-    border-radius: var(--radius-sm);
-    font-size: 1rem;
-    transition: background-color 0.12s ease;
-
-    &:hover,
-    &:focus-visible {
-        background: rgb(163 88 249 / 16%);
-        outline: none;
-    }
-}
-
-.picker-custom {
-    width: 3.5rem;
-    padding: 0.25rem 0.375rem;
-    background: var(--surface-raised);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    color: var(--foreground);
-    font-size: 0.75rem;
-    outline: none;
-
-    &:focus {
-        border-color: rgb(163 88 249 / 60%);
-    }
-}
-
 .pinned-tag {
     display: flex;
     align-items: center;
     gap: 0.25rem;
     margin: 0.25rem 0.25rem 0;
-    color: var(--muted-foreground);
+    color: var(--chat-meta-fg, var(--muted-foreground));
     font-size: 0.6875rem;
 
     lucide-icon {
@@ -773,8 +769,93 @@
     }
 
     strong {
-        color: var(--primary);
+        color: var(--chat-meta-accent, var(--primary));
         font-style: normal;
         font-weight: 500;
     }
+}
+
+/* ── Media bubbles ────────────────────────────────────────────────────────────────────────────
+   A message of only pictures or video: no padding around the media. Without a caption the picture is
+   the bubble (the time overlays it); with one, the media runs edge to edge on top and the caption sits
+   in the bubble-coloured strip below. */
+
+.bubble.is-media-only,
+.bubble.is-media-captioned {
+    padding: 0;
+    gap: 0;
+    overflow: hidden;
+
+    .content {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        width: 100%;
+    }
+
+    .attachments {
+        order: -1;
+        gap: 0.125rem;
+        margin: 0;
+    }
+
+    .media-tile {
+        max-width: 18rem;
+        border-radius: 0;
+    }
+}
+
+.bubble.is-media-only {
+    background: transparent;
+    border: none;
+}
+
+.bubble.is-media-captioned .text {
+    padding: 0.625rem 1rem;
+}
+
+.media-time {
+    position: absolute;
+    right: 0.5rem;
+    bottom: 0.5rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.125rem 0.5rem;
+    background: rgb(0 0 0 / 50%);
+    backdrop-filter: blur(6px);
+    border-radius: 999px;
+    color: #fff;
+    font-size: calc(0.6875rem * var(--chat-font-scale, 1));
+    line-height: 1.4;
+}
+
+.media-tick {
+    width: 0.875rem;
+    height: 0.875rem;
+}
+
+/* The time already sits on the picture, so the footer keeps only its buttons. */
+:host(.is-media-only) .meta .time,
+:host(.is-media-only) .meta .receipt {
+    display: none;
+}
+
+/* A picture with transparent pixels shows on white, not on the bubble or the chat background. The box
+   takes the picture's own ratio once known, so nothing but the picture is ever visible in it. */
+.media-tile.is-viewable {
+    cursor: zoom-in;
+
+    &:focus-visible {
+        outline: 2px solid var(--primary);
+        outline-offset: -2px;
+    }
+}
+
+.media-tile.is-sized {
+    min-height: 0;
+}
+
+.media-tile.has-alpha {
+    background: #fff;
 }

@@ -45,11 +45,16 @@
 
     <div class="fields">
         <div class="field">
-            <label for="fullName">Full name</label>
+            <label
+                for="fullName"
+                class="required"
+                >Full name</label
+            >
             <div class="emoji-input-wrap">
                 <input
                     #fullNameField
                     id="fullName"
+                    aria-required="true"
                     type="text"
                     autocomplete="name"
                     formControlName="fullName"
@@ -63,9 +68,14 @@
         </div>
 
         <div class="field">
-            <label for="username">Username</label>
+            <label
+                for="username"
+                class="required"
+                >Username</label
+            >
             <input
                 id="username"
+                aria-required="true"
                 type="text"
                 autocomplete="username"
                 formControlName="username"

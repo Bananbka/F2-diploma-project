@@ -1,0 +1,43 @@
+:host {
+    display: inline-flex;
+}
+
+.reaction-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.125rem 0.4375rem;
+    background: var(--chat-chip-bg, var(--surface-raised));
+    border: 1px solid var(--chat-chip-border, var(--border));
+    border-radius: var(--radius-lg);
+    color: var(--chat-meta-accent, var(--foreground));
+    font-size: 0.75rem;
+    line-height: 1.3;
+    transition:
+        background-color 0.12s ease,
+        border-color 0.12s ease;
+
+    &:hover:not(:disabled) {
+        border-color: var(--chat-chip-mine-border, rgb(163 88 249 / 60%));
+    }
+
+    &.is-mine {
+        background: var(--chat-chip-mine-bg, rgb(163 88 249 / 18%));
+        border-color: var(--chat-chip-mine-border, var(--primary));
+    }
+
+    /* A preview chip is not pressable but must not look disabled. */
+    &.is-static:disabled {
+        opacity: 1;
+        cursor: default;
+    }
+}
+
+.reaction-count {
+    color: var(--chat-meta-fg, var(--muted-foreground));
+    font-size: 0.6875rem;
+}
+
+.reaction-pill.is-mine .reaction-count {
+    color: var(--chat-meta-accent, var(--primary));
+}

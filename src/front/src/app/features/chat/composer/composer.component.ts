@@ -39,6 +39,7 @@ import { Sticker as StickerModel } from '../../../core/models/sticker.model';
 import { ChatPanelStoreService, ComposerBridge } from '../../../core/services/chat-panel-store.service';
 import { ProfileApiService } from '../../../core/services/profile-api.service';
 import { VoiceRecorderService } from '../../../core/services/voice-recorder.service';
+import { readMediaSize } from '../../../shared/utils/image-meta';
 import { LocationDialogComponent } from '../location-dialog/location-dialog.component';
 import { PollDialogComponent } from '../poll-dialog/poll-dialog.component';
 
@@ -316,10 +317,17 @@ export class ComposerComponent {
             this.profileApi.upload(new Blob([blob as BufferSource]), 'message', file.name)
         );
 
+        // The upload is an opaque ciphertext, so the server records it as application/octet-stream. The
+        // descriptor carries what the file really is, and its pixel size, so every client can type it and
+        // reserve its box before decrypting. Both are display metadata outside the sealed envelope
+        // (docs/crypto-spec-v1.md section 4.5), not part of the signed or encrypted payload.
+        const size = kind === 'image' || kind === 'gif' || kind === 'video' ? await readMediaSize(file) : null;
         const staged: StagedAttachment = {
             file: {
                 ...uploaded,
+                content_type: file.type || uploaded.content_type,
                 kind,
+                ...(size ?? {}),
                 decryptionKey: key,
             },
             previewUrl,

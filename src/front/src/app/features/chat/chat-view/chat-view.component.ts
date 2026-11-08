@@ -25,7 +25,6 @@ import {
     PinOff,
     RefreshCw,
     Reply,
-    Shield,
     ShieldAlert,
     ShieldOff,
     SkipForward,
@@ -36,6 +35,7 @@ import {
 
 import { Chat } from '../../../core/models/chat.model';
 import { LocationPayload, PollPayload } from '../../../core/models/message-payload';
+import { AppearanceStore } from '../../../core/services/appearance-store.service';
 import { ChatPanelStoreService } from '../../../core/services/chat-panel-store.service';
 import {
     ChatStoreService,
@@ -50,10 +50,14 @@ import { VoiceRecorderService } from '../../../core/services/voice-recorder.serv
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
 import { ContextMenuItem } from '../../../shared/ui/context-menu/context-menu.model';
 import { ContextMenuService } from '../../../shared/ui/context-menu/context-menu.service';
+import { DismissStackService } from '../../../shared/ui/dismiss/dismiss-layer.service';
+import { DismissOnEscapeDirective } from '../../../shared/ui/dismiss/dismiss-on-escape.directive';
 import { avatarKindFor, DELETED_USER_LABEL } from '../../../shared/utils/display';
+import { ChatBackgroundComponent } from '../chat-background/chat-background.component';
 import { ComposedMessage, ComposerComponent } from '../composer/composer.component';
 import { MessageBubbleComponent, MessageMenuRequest } from '../message-bubble/message-bubble.component';
 import { StickerPackViewerService } from '../stickers/sticker-pack-dialog/sticker-pack-viewer';
+import { StickToBottom } from './stick-to-bottom';
 
 /**
  * How far the pointer must travel before a press becomes a message sweep rather than a click.
@@ -64,7 +68,14 @@ const DRAG_SELECT_THRESHOLD_PX = 8;
 
 @Component({
     selector: 'app-chat-view',
-    imports: [LucideAngularModule, AvatarComponent, MessageBubbleComponent, ComposerComponent],
+    imports: [
+        DismissOnEscapeDirective,
+        LucideAngularModule,
+        AvatarComponent,
+        MessageBubbleComponent,
+        ComposerComponent,
+        ChatBackgroundComponent,
+    ],
     templateUrl: './chat-view.component.html',
     styleUrl: './chat-view.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
@@ -178,20 +189,27 @@ export class ChatViewComponent {
         return count ? `${count} members` : 'Group';
     });
 
-    readonly peerId = computed(() => {
-        const chat = this.chat();
-        if (chat?.chat_type !== 'private') {
-            return null;
-        }
-        return chat.participants.find((p) => p.user_id !== this.session.user()?.id)?.user_id ?? null;
-    });
-
     /** Channels are never end-to-end encrypted, so nothing about them may imply confidentiality. */
     readonly showChannelNotice = this.isChannel;
 
+    private readonly appearance = inject(AppearanceStore);
+    /** The picture behind the messages, only while the image background is the selected kind. */
+    readonly backgroundImage = computed(() => {
+        const background = this.appearance.value().background;
+        return background.kind === 'image' ? (background.image ?? null) : null;
+    });
+    readonly backgroundVersion = computed(() => this.appearance.value().background_image_version);
+
     private readonly scroller = viewChild<ElementRef<HTMLElement>>('scroller');
-    /** Whether new rows should pull the view down. False once the user scrolls up to read back. */
-    private pinToBottom = true;
+    private readonly dismissStack = inject(DismissStackService);
+    private readonly composerEl = viewChild(ComposerComponent, { read: ElementRef });
+    /**
+     * The composer's last measured height. The selection bar takes its place and is given the same
+     * height, so entering or leaving selection mode does not resize the message list above it.
+     */
+    readonly composerHeight = signal(0);
+    /** Keeps the pane on the newest message while the reader has not scrolled up, through late content growth. */
+    private stick: StickToBottom | null = null;
     /** Set once the opening scroll has actually landed on the newest message. */
     private atNewest = false;
 
@@ -199,7 +217,6 @@ export class ChatViewComponent {
     readonly infoIcon = Info;
     /** True only while the panel is showing chat info, which is what the header button controls. */
     readonly profileOpen = computed(() => this.panel.open() && this.panel.view() === 'profile');
-    readonly shieldIcon = Shield;
     readonly shieldAlertIcon = ShieldAlert;
     readonly shieldOffIcon = ShieldOff;
     readonly skipForwardIcon = SkipForward;
@@ -220,14 +237,47 @@ export class ChatViewComponent {
     }
 
     constructor() {
+        // Escape leaves selection mode (and, being a later layer, a forward picker above it closes first).
+        effect((onCleanup) => {
+            if (this.isSelecting()) {
+                onCleanup(this.dismissStack.push({ close: () => this.cancelSelection() }));
+            }
+        });
+
+        effect((onCleanup) => {
+            const element = this.composerEl()?.nativeElement as HTMLElement | undefined;
+            if (!element || typeof ResizeObserver === 'undefined') {
+                return;
+            }
+            const observer = new ResizeObserver(() => this.composerHeight.set(element.offsetHeight));
+            observer.observe(element);
+            this.composerHeight.set(element.offsetHeight);
+            onCleanup(() => observer.disconnect());
+        });
+
         effect(() => {
             const id = this.chatId() ?? null;
             this.store.activeChatId.set(id);
             this.bannerDismissed.set(false);
             this.pinnedBannerDismissed.set(false);
             this.pinnedPanelOpen.set(false);
-            this.pinToBottom = true;
+            this.stick?.reset();
             this.atNewest = false;
+        });
+
+        // Attach once the scroll pane exists (it sits inside an @if on the loaded chat).
+        effect((onCleanup) => {
+            const element = this.scroller()?.nativeElement;
+            if (!element) {
+                return;
+            }
+            const stick = new StickToBottom(element);
+            stick.attach();
+            this.stick = stick;
+            onCleanup(() => {
+                stick.detach();
+                this.stick = null;
+            });
         });
 
         // Keep the newest message in view.
@@ -239,7 +289,7 @@ export class ChatViewComponent {
             const rows = this.conversation().length;
 
             untracked(() => {
-                if (rows > 0 && this.pinToBottom) {
+                if (rows > 0 && (this.stick?.isPinned ?? true)) {
                     this.scrollToBottomAfterRender();
                 }
             });
@@ -260,7 +310,7 @@ export class ChatViewComponent {
                     return;
                 }
 
-                element.scrollTop = element.scrollHeight;
+                this.stick?.scrollToBottomNow();
                 this.atNewest = true;
             })
         );
@@ -321,7 +371,7 @@ export class ChatViewComponent {
             return;
         }
 
-        this.pinToBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
+        this.stick?.onScroll();
 
         if (element.scrollTop < 120 && this.hasMoreHistory() && !this.loading()) {
             const before = element.scrollHeight;
@@ -536,7 +586,7 @@ export class ChatViewComponent {
             return;
         }
 
-        this.pinToBottom = false;
+        this.stick?.unpin();
         target.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
         target.classList.add('is-highlighted');
@@ -571,7 +621,7 @@ export class ChatViewComponent {
     }
 
     async send(composed: ComposedMessage): Promise<void> {
-        this.pinToBottom = true;
+        this.stick?.reset();
 
         const editing = this.editing();
         const replyTo = this.replyingTo();
@@ -590,12 +640,12 @@ export class ChatViewComponent {
     }
 
     async sendPoll(poll: PollPayload): Promise<void> {
-        this.pinToBottom = true;
+        this.stick?.reset();
         await this.store.sendPoll(poll);
     }
 
     async sendLocation(location: LocationPayload): Promise<void> {
-        this.pinToBottom = true;
+        this.stick?.reset();
         await this.store.sendLocation(location);
     }
 
@@ -659,18 +709,10 @@ export class ChatViewComponent {
 
     /**
      * The chat-info entry points (header identity, member-verification banner) open the side panel
-     * on its chat-info view. The standalone `/chats/:id/info` route still exists for deep links.
+     * on its chat-info view. The `/chats/:id/info` deep link opens the same thing as a dialog.
      */
     openProfile(): void {
         this.panel.showProfile();
-    }
-
-    async openSafetyNumber(): Promise<void> {
-        const chat = this.chat();
-        const peer = this.peerId();
-        if (chat && peer) {
-            await this.router.navigate(['/chats', chat.id, 'safety', peer]);
-        }
     }
 
     async backToList(): Promise<void> {

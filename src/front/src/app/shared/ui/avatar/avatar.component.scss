@@ -10,6 +10,16 @@
     height: var(--avatar-size);
 }
 
+/* Scales size and monogram together; the variable is unset outside the chat shell, so this is 1. */
+:host(.scaled) {
+    width: calc(var(--avatar-size) * var(--chat-font-scale, 1));
+    height: calc(var(--avatar-size) * var(--chat-font-scale, 1));
+}
+
+:host(.scaled) .monogram {
+    font-size: calc(var(--avatar-font) * var(--chat-font-scale, 1));
+}
+
 :host(.xs) {
     --avatar-size: 1.5rem;
     --avatar-font: 0.625rem;

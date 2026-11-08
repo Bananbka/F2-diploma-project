@@ -1,0 +1,104 @@
+<button
+    #trigger
+    type="button"
+    class="trigger"
+    aria-haspopup="dialog"
+    [attr.aria-expanded]="open()"
+    [attr.aria-label]="label()"
+    [style.background]="color() ?? null"
+    [class.is-unset]="!color()"
+    (click)="toggle()"
+></button>
+
+@if (open()) {
+    <div
+        #popover
+        class="popover"
+        role="dialog"
+        [attr.aria-label]="label()"
+    >
+        <div
+            #square
+            class="square"
+            role="slider"
+            tabindex="0"
+            aria-label="Saturation and brightness"
+            [attr.aria-valuetext]="'Saturation ' + percent(hsv().s) + '%, brightness ' + percent(hsv().v) + '%'"
+            [style.background-color]="'hsl(' + hsv().h + ' 100% 50%)'"
+            (pointerdown)="startDrag($event, 'square')"
+            (pointermove)="dragTo($event)"
+            (pointerup)="endDrag()"
+            (pointercancel)="endDrag()"
+            (lostpointercapture)="endDrag()"
+            (keydown)="squareKey($event)"
+        >
+            <span
+                class="thumb"
+                [style.left.%]="hsv().s * 100"
+                [style.top.%]="(1 - hsv().v) * 100"
+                [style.background]="hex()"
+            ></span>
+        </div>
+
+        <div
+            class="hue"
+            role="slider"
+            tabindex="0"
+            aria-label="Hue"
+            aria-valuemin="0"
+            aria-valuemax="360"
+            [attr.aria-valuenow]="percent(hsv().h / 100)"
+            (pointerdown)="startDrag($event, 'hue')"
+            (pointermove)="dragTo($event)"
+            (pointerup)="endDrag()"
+            (pointercancel)="endDrag()"
+            (lostpointercapture)="endDrag()"
+            (keydown)="hueKey($event)"
+        >
+            <span
+                class="thumb"
+                [style.left.%]="(hsv().h / 360) * 100"
+            ></span>
+        </div>
+
+        <label class="hex">
+            <span class="hex-label">Hex</span>
+            <input
+                type="text"
+                class="hex-input"
+                maxlength="7"
+                spellcheck="false"
+                autocomplete="off"
+                aria-label="Hex colour"
+                [attr.aria-invalid]="draftInvalid()"
+                [class.is-invalid]="draftInvalid()"
+                [value]="draft()"
+                (input)="onHexInput($any($event.target).value)"
+                (blur)="onHexBlur()"
+            />
+        </label>
+
+        @if (swatches().length) {
+            <div class="presets">
+                @for (c of swatches(); track c) {
+                    <button
+                        type="button"
+                        class="preset"
+                        [style.background]="c"
+                        [attr.aria-label]="label() + ' preset ' + c"
+                        (click)="pickSwatch(c)"
+                    ></button>
+                }
+            </div>
+        }
+
+        <button
+            type="button"
+            class="default"
+            [disabled]="!color()"
+            (click)="clear()"
+        >
+            Default
+        </button>
+    </div>
+}

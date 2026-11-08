@@ -11,8 +11,12 @@ import {
 import { Router, RouterOutlet } from '@angular/router';
 import { LucideAngularModule, WifiOff } from 'lucide-angular';
 
+import { appearanceVars } from '../../../core/services/appearance-css';
+import { AppearanceStore } from '../../../core/services/appearance-store.service';
+import { BackgroundImageService } from '../../../core/services/background-image.service';
 import { ChatPanelStoreService } from '../../../core/services/chat-panel-store.service';
 import { ChatStoreService } from '../../../core/services/chat-store.service';
+import { ContactsStoreService } from '../../../core/services/contacts-store.service';
 import { DirectoryService } from '../../../core/services/directory.service';
 import { FolderStoreService } from '../../../core/services/folder-store.service';
 import { SessionService } from '../../../core/services/session.service';
@@ -20,6 +24,14 @@ import { ResizablePanelComponent } from '../../../shared/ui/resizable-panel/resi
 import { ChatPanelComponent } from '../chat-panel/chat-panel.component';
 import { ChatSidebarComponent } from '../chat-sidebar/chat-sidebar.component';
 import { ChatViewKey, folderKey } from '../chat-views';
+import { ContactsListComponent } from '../contacts-list/contacts-list.component';
+import { CreateChannelComponent } from '../create-channel/create-channel.component';
+import { CreateDialogService } from '../create-dialog.service';
+import { CreateGroupComponent } from '../create-group/create-group.component';
+import { firstVisibleChatView, isHiddenSelection } from '../default-views';
+import { InfoDialogComponent } from '../info-dialog/info-dialog.component';
+import { InfoDialogService } from '../info-dialog/info-dialog.service';
+import { MediaViewerComponent } from '../media-viewer/media-viewer.component';
 import { NavigationRailComponent } from '../navigation-rail/navigation-rail.component';
 
 /** Matches the `@media (width < 48rem)` breakpoint in the shell's own stylesheet. */
@@ -34,12 +46,27 @@ const NARROW_QUERY = '(width < 48rem)';
         ChatSidebarComponent,
         ResizablePanelComponent,
         ChatPanelComponent,
+        ContactsListComponent,
+        CreateGroupComponent,
+        CreateChannelComponent,
+        InfoDialogComponent,
+        MediaViewerComponent,
     ],
     templateUrl: './chat-shell.component.html',
     styleUrl: './chat-shell.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
+    host: { '[style]': 'appearanceStyle()' },
 })
 export class ChatShellComponent {
+    private readonly appearance = inject(AppearanceStore);
+
+    /** The user's chat appearance as custom properties scoped to the chat, not to the whole page. */
+    private readonly backgroundImages = inject(BackgroundImageService);
+    /** Average colour of the background picture, sampled once per version; null until known. */
+    private readonly imageColor = signal<string | null>(null);
+
+    readonly appearanceStyle = computed(() => appearanceVars(this.appearance.value(), this.imageColor()));
+
     private readonly store = inject(ChatStoreService);
     private readonly directory = inject(DirectoryService);
     private readonly session = inject(SessionService);
@@ -49,10 +76,21 @@ export class ChatShellComponent {
     private readonly panel = inject(ChatPanelStoreService);
 
     private readonly folderStore = inject(FolderStoreService);
+    private readonly contactsStore = inject(ContactsStoreService);
+    readonly infoDialog = inject(InfoDialogService);
 
     /** The selected view of the chat list: chosen on the rail, applied by the sidebar. */
     readonly view = signal<ChatViewKey>('all');
     readonly panelOpen = this.panel.open;
+
+    /** The Contacts view takes the chat list's place in the sidebar column while it is on. */
+    readonly contactsOpen = signal(false);
+    readonly createDialog = inject(CreateDialogService).open;
+
+    selectView(key: ChatViewKey): void {
+        this.contactsOpen.set(false);
+        this.view.set(key);
+    }
 
     readonly isOnline = this.store.isOnline;
     readonly activeChatId = this.store.activeChatId;
@@ -75,6 +113,20 @@ export class ChatShellComponent {
     readonly wifiOffIcon = WifiOff;
 
     constructor() {
+        // Hiding the view that is on screen moves to the first one still visible; Contacts closes if hidden.
+        effect(() => {
+            const hidden = this.appearance.value().hidden_views;
+            if (isHiddenSelection(hidden, this.view())) {
+                this.view.set(firstVisibleChatView(hidden));
+            }
+            if (hidden.includes('contacts') && this.contactsOpen()) {
+                this.contactsOpen.set(false);
+            }
+        });
+
+        // Contacts are needed by chat info ("saved" state) long before the Contacts view opens.
+        void this.contactsStore.load();
+
         // A selected folder that is gone (deleted here or elsewhere) must not leave the list
         // filtered by nothing while the rail shows no selection: fall back to everything.
         effect(() => {
@@ -88,6 +140,23 @@ export class ChatShellComponent {
             }
         });
 
+        void this.appearance.load();
+
+        effect((onCleanup) => {
+            const value = this.appearance.value();
+            const version = value.background.image?.version ?? value.background_image_version;
+            this.imageColor.set(null);
+            if (value.background.kind !== 'image' || !version) {
+                return;
+            }
+            let cancelled = false;
+            onCleanup(() => (cancelled = true));
+            void this.backgroundImages.colorFor(version).then((color) => {
+                if (!cancelled) {
+                    this.imageColor.set(color);
+                }
+            });
+        });
         this.store.bindRealtime();
         void this.store.loadChats();
         void this.directory.warm();
@@ -100,23 +169,5 @@ export class ChatShellComponent {
 
     private matchNarrow(): MediaQueryList {
         return window.matchMedia(NARROW_QUERY);
-    }
-
-    /**
-     * The rail's shield opens the safety number for the current conversation's counterpart.
-     *
-     * With no conversation open there is no peer to compare against, so this falls through to the
-     * chat info screen rather than inventing a target.
-     */
-    async openSecurity(): Promise<void> {
-        const chat = this.store.activeChat();
-        const me = this.session.user()?.id;
-
-        if (!chat) {
-            return;
-        }
-
-        const peer = chat.participants.find((p) => p.user_id !== me);
-        await this.router.navigate(peer ? ['/chats', chat.id, 'safety', peer.user_id] : ['/chats', chat.id, 'info']);
     }
 }

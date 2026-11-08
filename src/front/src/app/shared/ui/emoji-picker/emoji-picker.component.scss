@@ -75,9 +75,31 @@
         pointer-events: none;
     }
 
+    .tone {
+        position: absolute;
+        top: 50%;
+        right: 1.125rem;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 1.75rem;
+        height: 1.75rem;
+        background: none;
+        border: none;
+        border-radius: var(--radius-lg);
+        font-size: 1rem;
+        transform: translateY(-50%);
+
+        &:hover,
+        &:focus-visible {
+            background: rgb(163 88 249 / 12%);
+            outline: none;
+        }
+    }
+
     input {
         width: 100%;
-        padding: 0.5rem 0.75rem 0.5rem 2rem;
+        padding: 0.5rem 2.5rem 0.5rem 2rem;
         background: var(--surface-raised);
         border: 1px solid var(--border);
         border-radius: var(--radius-lg);
@@ -183,9 +205,16 @@
     background: var(--surface-raised);
     border: 1px solid transparent;
     border-radius: var(--radius-lg);
+    color: var(--muted-foreground);
     font-size: 1rem;
 
+    lucide-icon {
+        width: 1.125rem;
+        height: 1.125rem;
+    }
+
     &.is-active {
+        color: var(--foreground);
         border-color: rgb(163 88 249 / 60%);
     }
 }

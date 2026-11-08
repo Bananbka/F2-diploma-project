@@ -1,11 +1,16 @@
 <div class="manager">
     <div class="field create">
-        <label for="newTitle">New pack</label>
+        <label
+            for="newTitle"
+            class="required"
+            >New pack</label
+        >
         <div class="create-row">
             <div class="emoji-input-wrap">
                 <input
                     #newTitleField
                     id="newTitle"
+                    aria-required="true"
                     type="text"
                     placeholder="Pack name"
                     [value]="newTitle()"
@@ -68,11 +73,16 @@
                                 <p class="muted small">Loading…</p>
                             } @else if (packDetail()) {
                                 <div class="field">
-                                    <label [for]="'title-' + pack.id">Title</label>
+                                    <label
+                                        [for]="'title-' + pack.id"
+                                        class="required"
+                                        >Title</label
+                                    >
                                     <div class="create-row">
                                         <div class="emoji-input-wrap">
                                             <input
                                                 #titleDraftField
+                                                aria-required="true"
                                                 [id]="'title-' + pack.id"
                                                 type="text"
                                                 [value]="titleDraft()"
@@ -101,7 +111,7 @@
                                     <lucide-icon [img]="packDetail()!.is_public ? globeIcon : lockIcon" />
                                     {{
                                         packDetail()!.is_public
-                                            ? 'Public — anyone can find and subscribe to it'
+                                            ? 'Public — anyone can find and add it'
                                             : 'Private — only visible to you'
                                     }}
                                 </button>

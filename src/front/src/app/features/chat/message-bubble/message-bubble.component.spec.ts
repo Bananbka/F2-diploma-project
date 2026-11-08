@@ -5,6 +5,8 @@ import { AttachmentBatchService } from '../../../core/services/attachment-batch.
 import { ChatApiService } from '../../../core/services/chat-api.service';
 import { DirectoryService } from '../../../core/services/directory.service';
 import { DecryptedMessage, DecryptStatus } from '../../../core/services/message.service';
+import { SessionService } from '../../../core/services/session.service';
+import { MediaViewerService } from '../media-viewer/media-viewer.service';
 import { MessageBubbleComponent } from './message-bubble.component';
 
 const CHAT_ID = 'a0000000-0000-4000-8000-000000000001';
@@ -76,8 +78,65 @@ describe('MessageBubbleComponent', () => {
                 { provide: DirectoryService, useValue: directory },
                 { provide: ChatApiService, useValue: chatApi },
                 { provide: AttachmentBatchService, useValue: attachmentBatch },
+                { provide: SessionService, useValue: { user: () => ({ id: 'me' }) } },
             ],
         }).compileComponents();
+    });
+
+    describe('appearance custom properties', () => {
+        it('uses --bubble-own-bg on an outgoing bubble', () => {
+            (TestBed.inject(DirectoryService).isMe as jasmine.Spy).and.returnValue(true);
+            const host = create(buildMessage());
+            host.style.setProperty('--bubble-own-bg', '#123456');
+            host.style.setProperty('--bubble-own-fg', '#ffffff');
+
+            const style = getComputedStyle(host.querySelector('.bubble') as HTMLElement);
+            expect(style.backgroundColor).toBe('rgb(18, 52, 86)');
+        });
+
+        it('uses --bubble-other-bg on an incoming bubble and falls back without it', () => {
+            const host = create(buildMessage());
+            const bubble = host.querySelector('.bubble') as HTMLElement;
+            const before = getComputedStyle(bubble).backgroundColor;
+
+            host.style.setProperty('--bubble-other-bg', '#654321');
+            expect(getComputedStyle(bubble).backgroundColor).toBe('rgb(101, 67, 33)');
+            host.style.removeProperty('--bubble-other-bg');
+            expect(getComputedStyle(bubble).backgroundColor).toBe(before);
+        });
+
+        it('derives the in-bubble accent from the own-bubble variables, and falls back without them', () => {
+            (TestBed.inject(DirectoryService).isMe as jasmine.Spy).and.returnValue(true);
+            const host = create(buildMessage());
+            const bubble = host.querySelector('.bubble') as HTMLElement;
+
+            host.style.setProperty('--bubble-own-accent', '#ffffff');
+            host.style.setProperty('--bubble-own-accent-fg', '#ef4444');
+            host.style.setProperty('--bubble-own-fg-muted', '#eeeeee');
+            const style = getComputedStyle(bubble);
+            expect(style.getPropertyValue('--bubble-accent').trim()).toBe('#ffffff');
+            expect(style.getPropertyValue('--bubble-accent-fg').trim()).toBe('#ef4444');
+            expect(style.getPropertyValue('--bubble-muted').trim()).toBe('#eeeeee');
+        });
+
+        it('draws time and ticks from --chat-meta-fg so they follow the chat background', () => {
+            const host = create(buildMessage());
+            const meta = host.querySelector('.meta') as HTMLElement;
+            const before = getComputedStyle(meta).color;
+            host.style.setProperty('--chat-meta-fg', '#123456');
+            expect(getComputedStyle(meta).color).toBe('rgb(18, 52, 86)');
+            host.style.removeProperty('--chat-meta-fg');
+            expect(getComputedStyle(meta).color).toBe(before);
+        });
+
+        it('scales message text with --chat-font-scale', () => {
+            const host = create(buildMessage());
+            const text = host.querySelector('.text') as HTMLElement;
+            const base = parseFloat(getComputedStyle(text).fontSize);
+
+            host.style.setProperty('--chat-font-scale', '2');
+            expect(parseFloat(getComputedStyle(text).fontSize)).toBeCloseTo(base * 2, 1);
+        });
     });
 
     describe('per-status rendering — docs/ui-states.md "Message-level states"', () => {
@@ -136,6 +195,298 @@ describe('MessageBubbleComponent', () => {
             expect(host.querySelector('.is-placeholder')?.textContent).toContain('Permanently unreadable');
             expect(host.textContent).not.toContain('Decrypting');
             expect(fixture.componentInstance.view().tone).toBe('inert');
+        });
+    });
+
+    describe('bubble corners follow --bubble-radius', () => {
+        for (const own of [false, true]) {
+            it(`${own ? 'own' : 'other'}: every corner is square at radius 0`, () => {
+                (TestBed.inject(DirectoryService).isMe as jasmine.Spy).and.returnValue(own);
+                const host = create(buildMessage());
+                document.body.appendChild(host);
+                host.style.setProperty('--bubble-radius', '0px');
+                const style = getComputedStyle(host.querySelector('.bubble') as HTMLElement);
+                for (const corner of ['TopLeft', 'TopRight', 'BottomLeft', 'BottomRight']) {
+                    expect(
+                        parseFloat(
+                            style.getPropertyValue(
+                                `border-${corner.replace(/([a-z])([A-Z])/, '$1-$2').toLowerCase()}-radius`
+                            )
+                        )
+                    ).toBe(0);
+                }
+                host.remove();
+            });
+        }
+
+        it('keeps the tail corner no larger than the chosen radius', () => {
+            (TestBed.inject(DirectoryService).isMe as jasmine.Spy).and.returnValue(false);
+            const host = create(buildMessage());
+            document.body.appendChild(host);
+            host.style.setProperty('--bubble-radius', '3px');
+            const style = getComputedStyle(host.querySelector('.bubble') as HTMLElement);
+            expect(parseFloat(style.borderTopLeftRadius)).toBeLessThanOrEqual(3);
+            host.remove();
+        });
+    });
+
+    describe('broadcast (channel) layout', () => {
+        it('left-aligns my own post, with the meta row hugging the left edge', () => {
+            (TestBed.inject(DirectoryService).isMe as jasmine.Spy).and.returnValue(true);
+            fixture = TestBed.createComponent(MessageBubbleComponent);
+            fixture.componentRef.setInput('message', buildMessage());
+            fixture.componentRef.setInput('broadcast', true);
+            fixture.detectChanges();
+            const host = fixture.nativeElement as HTMLElement;
+            document.body.appendChild(host);
+            host.style.display = 'block';
+            host.style.width = '900px';
+            expect(getComputedStyle(host).justifyContent).toBe('normal');
+            const bubble = (host.querySelector('.bubble') as HTMLElement).getBoundingClientRect();
+            expect(bubble.left - host.getBoundingClientRect().left).toBeLessThan(200);
+            const left = (selector: string) =>
+                (host.querySelector(selector) as HTMLElement).getBoundingClientRect().left;
+            expect(left('.react-trigger')).toBeLessThan(left('.meta .time'));
+            expect(left('.meta .time')).toBeLessThan(left('.meta .action'));
+            expect(host.querySelector('.bubble-row > .who')).not.toBeNull();
+            host.remove();
+        });
+
+        it('keeps my own post in my own bubble colour', () => {
+            (TestBed.inject(DirectoryService).isMe as jasmine.Spy).and.returnValue(true);
+            fixture = TestBed.createComponent(MessageBubbleComponent);
+            fixture.componentRef.setInput('message', buildMessage());
+            fixture.componentRef.setInput('broadcast', true);
+            fixture.detectChanges();
+            const host = fixture.nativeElement as HTMLElement;
+            host.style.setProperty('--bubble-own-bg', '#123456');
+            expect(getComputedStyle(host.querySelector('.bubble') as HTMLElement).backgroundColor).toBe(
+                'rgb(18, 52, 86)'
+            );
+        });
+
+        it('says so instead of rendering an empty bubble for a post with nothing to show', () => {
+            const host = create(buildMessage({ status: 'plaintext', text: '', attachments: [] }));
+            expect(host.querySelector('.empty-post')?.textContent).toContain('no text or attachment');
+        });
+
+        it('shows no placeholder for a post that has text', () => {
+            const host = create(buildMessage({ status: 'plaintext', text: 'hello' }));
+            expect(host.querySelector('.empty-post')).toBeNull();
+        });
+    });
+
+    describe('media bubbles', () => {
+        const image = (extra: Partial<MessageAttachment> = {}) =>
+            buildAttachment({ kind: 'image', content_type: 'image/png', ...extra });
+
+        it('a plain picture is the bubble: no padding or background, time overlaid on it', () => {
+            const host = create(buildMessage({ status: 'ok', text: '', attachments: [image()] }));
+            document.body.appendChild(host);
+            const bubble = host.querySelector('.bubble') as HTMLElement;
+            expect(bubble.classList.contains('is-media-only')).toBeTrue();
+            const style = getComputedStyle(bubble);
+            expect(style.paddingTop).toBe('0px');
+            expect(style.backgroundColor).toBe('rgba(0, 0, 0, 0)');
+            expect(host.querySelector('.media-time')?.textContent).toContain(fixture.componentInstance.time());
+            expect(getComputedStyle(host.querySelector('.meta .time') as HTMLElement).display).toBe('none');
+            host.remove();
+        });
+
+        it('a captioned picture runs edge to edge on top and keeps the bubble colour for the caption strip', () => {
+            const host = create(buildMessage({ status: 'ok', text: 'look at this', attachments: [image()] }));
+            document.body.appendChild(host);
+            const bubble = host.querySelector('.bubble') as HTMLElement;
+            expect(bubble.classList.contains('is-media-captioned')).toBeTrue();
+            expect(getComputedStyle(bubble).paddingLeft).toBe('0px');
+            expect(host.querySelector('.media-time')).toBeNull();
+            const text = host.querySelector('.text') as HTMLElement;
+            expect(parseFloat(getComputedStyle(text).paddingLeft)).toBeGreaterThan(0);
+            const media = (host.querySelector('.attachments') as HTMLElement).getBoundingClientRect();
+            expect(media.top).toBeLessThanOrEqual(text.getBoundingClientRect().top);
+            host.remove();
+        });
+
+        it('keeps the ordinary padded bubble for text, files and voice', () => {
+            for (const attachments of [[], [buildAttachment({ kind: 'file' })], [buildAttachment({ kind: 'audio' })]]) {
+                const host = create(
+                    buildMessage({ status: 'ok', text: attachments.length ? '' : 'hello', attachments })
+                );
+                const bubble = host.querySelector('.bubble') as HTMLElement;
+                expect(bubble.classList.contains('is-media-only')).toBeFalse();
+                expect(bubble.classList.contains('is-media-captioned')).toBeFalse();
+            }
+        });
+
+        it('reserves the picture box when the size is known', () => {
+            const host = create(
+                buildMessage({ status: 'ok', text: '', attachments: [image({ width: 800, height: 400 })] })
+            );
+            expect((host.querySelector('.media-tile') as HTMLElement).style.aspectRatio).toContain('800 / 400');
+        });
+    });
+
+    describe('picture tiles', () => {
+        it('gets a white backing for transparent formats only', () => {
+            const png = create(
+                buildMessage({
+                    status: 'ok',
+                    text: '',
+                    attachments: [buildAttachment({ kind: 'image', content_type: 'image/png' })],
+                })
+            );
+            expect(png.querySelector('.media-tile')?.classList.contains('has-alpha')).toBeTrue();
+            const jpeg = create(
+                buildMessage({
+                    status: 'ok',
+                    text: '',
+                    attachments: [buildAttachment({ kind: 'image', content_type: 'image/jpeg' })],
+                })
+            );
+            expect(jpeg.querySelector('.media-tile')?.classList.contains('has-alpha')).toBeFalse();
+        });
+
+        it('treats whitespace-only text as no caption, so the picture is still the whole bubble', () => {
+            const host = create(
+                buildMessage({ status: 'ok', text: '  ', attachments: [buildAttachment({ kind: 'image' })] })
+            );
+            expect(host.querySelector('.bubble')?.classList.contains('is-media-only')).toBeTrue();
+        });
+
+        it('takes the natural ratio of the decoded picture when the sender gave no size', () => {
+            const host = create(
+                buildMessage({ status: 'ok', text: '', attachments: [buildAttachment({ kind: 'image' })] })
+            );
+            fixture.componentInstance.onImageLoad({ url: buildAttachment({ kind: 'image' }).url }, {
+                target: { naturalWidth: 300, naturalHeight: 300 },
+            } as unknown as Event);
+            fixture.detectChanges();
+            expect(fixture.componentInstance.aspectOf(buildAttachment({ kind: 'image' }))).toBe('300 / 300');
+            expect(host.querySelector('.media-tile')).not.toBeNull();
+        });
+    });
+
+    describe('transparent picture with an unhelpful declared type', () => {
+        it('gets the white backing from the file name or the decrypted bytes, and the bubble stays transparent', () => {
+            // What an encrypted upload is recorded as by the server: no hint about the picture inside.
+            const file = buildAttachment({
+                kind: 'image',
+                content_type: 'application/octet-stream',
+                name: 'circle.png',
+            });
+            const host = create(buildMessage({ status: 'ok', text: '', attachments: [file] }));
+            document.body.appendChild(host);
+            fixture.componentInstance.mediaState.set(
+                new Map([[file.url, { status: 'ready' as const, objectUrl: 'blob:x' }]])
+            );
+            fixture.detectChanges();
+            const tile = host.querySelector('.media-tile') as HTMLElement;
+            expect(tile.classList.contains('has-alpha')).toBeTrue();
+            expect(getComputedStyle(tile).backgroundColor).toBe('rgb(255, 255, 255)');
+            const bubble = host.querySelector('.bubble') as HTMLElement;
+            expect(bubble.classList.contains('is-media-only')).toBeTrue();
+            expect(getComputedStyle(bubble).backgroundColor).toBe('rgba(0, 0, 0, 0)');
+            expect(getComputedStyle(bubble).paddingLeft).toBe('0px');
+            host.remove();
+        });
+
+        it('uses the sniffed type when the name gives nothing away', () => {
+            const file = buildAttachment({ kind: 'image', content_type: 'application/octet-stream', name: 'blob' });
+            const host = create(buildMessage({ status: 'ok', text: '', attachments: [file] }));
+            fixture.componentInstance.mediaState.set(
+                new Map([[file.url, { status: 'ready' as const, objectUrl: 'blob:x', mime: 'image/png' }]])
+            );
+            fixture.detectChanges();
+            expect(host.querySelector('.media-tile')?.classList.contains('has-alpha')).toBeTrue();
+        });
+
+        it('keeps JPEG on the plain tile', () => {
+            const file = buildAttachment({
+                kind: 'image',
+                content_type: 'application/octet-stream',
+                name: 'photo.jpg',
+            });
+            const host = create(buildMessage({ status: 'ok', text: '', attachments: [file] }));
+            expect(host.querySelector('.media-tile')?.classList.contains('has-alpha')).toBeFalse();
+        });
+    });
+
+    describe('opening the viewer', () => {
+        it('a decrypted picture is a labelled button that opens the viewer on click and Enter', () => {
+            const host = create(
+                buildMessage({ status: 'ok', text: '', attachments: [buildAttachment({ kind: 'image' })] })
+            );
+            const url = buildAttachment({ kind: 'image' }).url;
+            fixture.componentInstance.mediaState.set(new Map([[url, { status: 'ready', objectUrl: 'blob:abc' }]]));
+            fixture.detectChanges();
+            const tile = host.querySelector('.media-tile') as HTMLElement;
+            expect(tile.getAttribute('role')).toBe('button');
+            expect(tile.getAttribute('aria-label')).toBe('Open image');
+            expect(tile.tabIndex).toBe(0);
+            const viewer = TestBed.inject(MediaViewerService);
+            tile.click();
+            expect(viewer.current()?.key).toBe(url);
+            viewer.close();
+            tile.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+            expect(viewer.current()?.key).toBe(url);
+        });
+
+        it('does not open while it is still decrypting', () => {
+            const host = create(
+                buildMessage({ status: 'ok', text: '', attachments: [buildAttachment({ kind: 'image' })] })
+            );
+            (host.querySelector('.media-tile') as HTMLElement).click();
+            expect(TestBed.inject(MediaViewerService).current()).toBeNull();
+        });
+    });
+
+    describe('avatar alignment', () => {
+        it('shares a row with the bubble and lines its bottom edge up with the bubble, at any font scale', () => {
+            (TestBed.inject(DirectoryService).isMe as jasmine.Spy).and.returnValue(false);
+            for (const scale of ['1', '1.6']) {
+                const host = create(
+                    buildMessage({ reactions: [{ emoji: '👍', user_id: 'u9', created_at: '2024-01-01T00:00:00Z' }] })
+                );
+                document.body.appendChild(host);
+                host.style.setProperty('--chat-font-scale', scale);
+                const row = host.querySelector('.bubble-row') as HTMLElement;
+                const avatar = host.querySelector('.bubble-row > .who') as HTMLElement;
+                const bubble = host.querySelector('.bubble-row > .bubble') as HTMLElement;
+                expect(row).not.toBeNull();
+                expect(avatar).not.toBeNull();
+                expect(bubble).not.toBeNull();
+                expect(
+                    Math.abs(avatar.getBoundingClientRect().bottom - bubble.getBoundingClientRect().bottom)
+                ).toBeLessThanOrEqual(1);
+                host.remove();
+            }
+        });
+    });
+
+    describe('voice message layout', () => {
+        it('centres the audio row: equal space above and below, at any font scale', () => {
+            for (const owner of [false, true]) {
+                (TestBed.inject(DirectoryService).isMe as jasmine.Spy).and.returnValue(owner);
+                for (const scale of ['1', '1.6']) {
+                    const host = create(
+                        buildMessage({
+                            status: 'ok',
+                            text: '',
+                            attachments: [buildAttachment({ kind: 'audio', duration_ms: 4000 })],
+                        })
+                    );
+                    document.body.appendChild(host);
+                    host.style.setProperty('--chat-font-scale', scale);
+                    const bubble = (host.querySelector('.bubble') as HTMLElement).getBoundingClientRect();
+                    const play = (host.querySelector('.audio-play') as HTMLElement).getBoundingClientRect();
+                    const time = (host.querySelector('.audio-time') as HTMLElement).getBoundingClientRect();
+                    const above = play.top - bubble.top;
+                    const below = bubble.bottom - play.bottom;
+                    expect(Math.abs(above - below)).toBeLessThanOrEqual(1);
+                    expect(Math.abs(time.top + time.height / 2 - (play.top + play.height / 2))).toBeLessThanOrEqual(1);
+                    host.remove();
+                }
+            }
         });
     });
 
@@ -325,7 +676,7 @@ describe('MessageBubbleComponent', () => {
             trigger.click();
             fixture.detectChanges();
 
-            const picker = host.querySelector<HTMLElement>('.reactions-picker')!;
+            const picker = document.body.querySelector<HTMLElement>('.reactions-picker')!;
             picker.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
             fixture.detectChanges();
 
@@ -374,6 +725,34 @@ describe('MessageBubbleComponent', () => {
             expect(footer.querySelector('.react-trigger')).not.toBeNull();
         });
 
+        it('incoming: reads [react][time][actions] from the left edge, and the time does not move on hover', () => {
+            (TestBed.inject(DirectoryService).isMe as jasmine.Spy).and.returnValue(false);
+            const host = create(buildMessage());
+            document.body.appendChild(host);
+            const left = (selector: string) =>
+                (host.querySelector(selector) as HTMLElement).getBoundingClientRect().left;
+            expect(left('.react-trigger')).toBeLessThan(left('.meta .time'));
+            expect(left('.meta .time')).toBeLessThan(left('.meta .action'));
+            const bubble = (host.querySelector('.bubble') as HTMLElement).getBoundingClientRect();
+            expect(left('.react-trigger') - bubble.left).toBeLessThanOrEqual(4);
+            const timeBefore = left('.meta .time');
+            host.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+            expect(left('.meta .time')).toBe(timeBefore);
+            host.remove();
+        });
+
+        it('own: keeps [react][actions][ticks][time] hugging the right edge', () => {
+            (TestBed.inject(DirectoryService).isMe as jasmine.Spy).and.returnValue(true);
+            const host = create(buildMessage());
+            document.body.appendChild(host);
+            const left = (selector: string) =>
+                (host.querySelector(selector) as HTMLElement).getBoundingClientRect().left;
+            expect(left('.react-trigger')).toBeLessThan(left('.meta .action'));
+            expect(left('.meta .action')).toBeLessThan(left('.meta .receipt'));
+            expect(left('.meta .receipt')).toBeLessThan(left('.meta .time'));
+            host.remove();
+        });
+
         it('renders chips in their own row only when reactions exist, with the add control still in the footer', () => {
             const host = create(
                 buildMessage({ reactions: [{ emoji: '👍', user_id: 'u1', created_at: '2024-01-01T00:00:00Z' }] })
@@ -382,6 +761,35 @@ describe('MessageBubbleComponent', () => {
             expect(host.querySelectorAll('.reactions .reaction-pill').length).toBe(1);
             expect(host.querySelector('.reactions .react-trigger')).toBeNull();
             expect(footerOf(host).querySelector('.react-trigger')).not.toBeNull();
+        });
+
+        it('draws chips and the actions icon from the chat-background variables', () => {
+            const host = create(
+                buildMessage({ reactions: [{ emoji: '👍', user_id: 'u1', created_at: '2024-01-01T00:00:00Z' }] })
+            );
+            const pill = host.querySelector('.reaction-pill') as HTMLElement;
+            const count = host.querySelector('.reaction-count') as HTMLElement;
+            // The chip eases between colours; read the end state rather than a frame of the transition.
+            pill.style.transition = 'none';
+            const before = getComputedStyle(pill).backgroundColor;
+            host.style.setProperty('--chat-chip-bg', 'rgb(1 2 3)');
+            host.style.setProperty('--chat-chip-border', 'rgb(4 5 6)');
+            host.style.setProperty('--chat-meta-fg', 'rgb(7 8 9)');
+            expect(getComputedStyle(pill).backgroundColor).toBe('rgb(1, 2, 3)');
+            expect(getComputedStyle(pill).borderTopColor).toBe('rgb(4, 5, 6)');
+            expect(getComputedStyle(count).color).toBe('rgb(7, 8, 9)');
+            host.style.removeProperty('--chat-chip-bg');
+            expect(getComputedStyle(pill).backgroundColor).toBe(before);
+        });
+
+        it('places the reaction chips below the time/status footer, not above it', () => {
+            const host = create(
+                buildMessage({ reactions: [{ emoji: '👍', user_id: 'u1', created_at: '2024-01-01T00:00:00Z' }] })
+            );
+
+            const footer = footerOf(host);
+            const chips = host.querySelector('.reactions')!;
+            expect(footer.compareDocumentPosition(chips) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
         });
 
         it('keeps the accessible names', () => {

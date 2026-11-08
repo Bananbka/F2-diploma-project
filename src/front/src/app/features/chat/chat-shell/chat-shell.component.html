@@ -14,8 +14,9 @@
     <app-navigation-rail
         class="rail"
         [view]="view()"
-        (viewChange)="view.set($event)"
-        (securityRequested)="openSecurity()"
+        [contactsActive]="contactsOpen()"
+        (viewChange)="selectView($event)"
+        (contactsRequested)="contactsOpen.set(true)"
     />
 
     <app-resizable-panel
@@ -27,7 +28,14 @@
         [defaultWidth]="320"
         [disabled]="isNarrow()"
     >
-        <app-chat-sidebar [view]="view()" />
+        <!-- Hidden rather than removed while Contacts is showing, so the list keeps its search and scroll. -->
+        <app-chat-sidebar
+            [hidden]="contactsOpen()"
+            [view]="view()"
+        />
+        @if (contactsOpen()) {
+            <app-contacts-list />
+        }
     </app-resizable-panel>
 
     <main
@@ -41,3 +49,21 @@
         <app-chat-panel [chatId]="chatId" />
     }
 </div>
+
+@switch (createDialog()) {
+    @case ('group') {
+        <app-create-group />
+    }
+    @case ('channel') {
+        <app-create-channel />
+    }
+}
+
+@if (infoDialog.chatId(); as infoChatId) {
+    <app-info-dialog
+        [chatId]="infoChatId"
+        (closed)="infoDialog.close()"
+    />
+}
+
+<app-media-viewer />

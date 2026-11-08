@@ -96,7 +96,8 @@
                 }
                 <fieldset
                     class="locked"
-                    [disabled]="unavailableReason() !== null"
+                    [disabled]="locked()"
+                    [attr.aria-disabled]="locked()"
                 >
                     <app-emoji-picker
                         [embedded]="true"
@@ -133,7 +134,8 @@
                 }
                 <fieldset
                     class="locked"
-                    [disabled]="unavailableReason() !== null"
+                    [disabled]="locked()"
+                    [attr.aria-disabled]="locked()"
                 >
                     <app-sticker-picker
                         [recentIds]="recentStickerIds()"

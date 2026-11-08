@@ -1,0 +1,85 @@
+<div class="head">
+    <div class="search">
+        <lucide-icon [img]="searchIcon" />
+        <input
+            type="search"
+            placeholder="Search contacts…"
+            aria-label="Search contacts"
+            [value]="query()"
+            (input)="query.set($any($event.target).value)"
+        />
+    </div>
+</div>
+
+<ul
+    class="list"
+    aria-label="Contacts"
+>
+    @for (contact of visible(); track contact.contact_id) {
+        <li class="item">
+            @if (renaming() === contact.contact_id) {
+                <div class="row is-editing">
+                    <app-avatar
+                        [name]="contactName(contact)"
+                        [seed]="contact.contact_id"
+                        [imageUrl]="contact.user.avatar_url"
+                        [deleted]="contact.user.is_deleted === true"
+                    />
+                    <input
+                        type="text"
+                        class="alias-input"
+                        maxlength="255"
+                        [attr.aria-label]="'Name for ' + contact.user.full_name"
+                        [placeholder]="contact.user.full_name"
+                        [value]="draft()"
+                        (input)="draft.set($any($event.target).value)"
+                        (keydown.enter)="commitRename(contact)"
+                        (keydown.escape)="$event.stopPropagation(); cancelRename()"
+                        (blur)="commitRename(contact)"
+                    />
+                </div>
+            } @else {
+                <button
+                    type="button"
+                    class="row"
+                    [attr.aria-label]="'Message ' + contactName(contact)"
+                    [appContextMenu]="menu(contact)"
+                    (click)="message(contact)"
+                >
+                    <app-avatar
+                        [name]="contactName(contact)"
+                        [seed]="contact.contact_id"
+                        [imageUrl]="contact.user.is_deleted ? null : contact.user.avatar_url"
+                        [deleted]="contact.user.is_deleted === true"
+                    />
+                    <span class="body">
+                        <span class="name">{{ contactName(contact) }}</span>
+                        @if (!contact.user.is_deleted) {
+                            <span class="username">
+                                &#64;{{ contact.user.username }}
+                                @if (contact.alias_name) {
+                                    · {{ contact.user.full_name }}
+                                }
+                            </span>
+                        }
+                    </span>
+                </button>
+            }
+        </li>
+    }
+</ul>
+
+@if (loading() && total() === 0) {
+    <p class="empty">Loading contacts…</p>
+} @else if (error()) {
+    <p
+        class="empty is-error"
+        role="alert"
+    >
+        {{ error() }}
+    </p>
+} @else if (total() === 0) {
+    <p class="empty">No contacts yet. Open someone's profile in a chat and choose “Save as contact”.</p>
+} @else if (visible().length === 0) {
+    <p class="empty">Nobody matches “{{ query() }}”.</p>
+}

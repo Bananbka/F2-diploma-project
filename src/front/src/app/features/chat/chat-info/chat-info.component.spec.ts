@@ -6,6 +6,7 @@ import { Chat, InviteLink } from '../../../core/models/chat.model';
 import { ChatApiService } from '../../../core/services/chat-api.service';
 import { ChatStoreService } from '../../../core/services/chat-store.service';
 import { ContactsApiService } from '../../../core/services/contacts-api.service';
+import { ContactsStoreService } from '../../../core/services/contacts-store.service';
 import { CryptoApiService } from '../../../core/services/crypto-api.service';
 import { DirectoryService } from '../../../core/services/directory.service';
 import { KeyStoreService } from '../../../core/services/key-store.service';
@@ -238,9 +239,58 @@ describe('ChatInfoComponent', () => {
 
         it('offers Members, Settings and Data for a group', async () => {
             const host = await open(GROUP);
-            expect(tabLabels(host)).toEqual(['Members', 'Settings', 'Data']);
+            expect(tabLabels(host)).toEqual(['Members', 'Encryption', 'Settings', 'Data']);
             expect(host.querySelector('.members')).not.toBeNull();
             expect(host.querySelector('.invite-create')).toBeNull();
+        });
+
+        it('a group has an Encryption tab; a private chat keeps its Encryption card on Profile', async () => {
+            const group = await open(GROUP);
+            fixture.componentInstance.selectTab('encryption');
+            fixture.detectChanges();
+            expect(group.querySelector('app-encryption-panel')).not.toBeNull();
+            const privateHost = await open(PRIVATE);
+            expect(tabLabels(privateHost)).not.toContain('Encryption');
+            expect(
+                Array.from(privateHost.querySelectorAll('.section')).some((e) => e.textContent?.trim() === 'Encryption')
+            ).toBeTrue();
+        });
+
+        it('openSafetyFor opens that member safety number inline, as the member profile does', async () => {
+            await open(GROUP);
+            fixture.componentInstance.openSafetyFor(PEER_ID);
+            expect(fixture.componentInstance.selectedMemberId()).toBe(PEER_ID);
+            expect(fixture.componentInstance.safetyOpen()).toBeTrue();
+        });
+
+        it('after a reload, a preloaded contact shows as saved instead of offering Save', async () => {
+            TestBed.inject(ContactsStoreService).contacts.set([
+                {
+                    owner_id: OWNER_ID,
+                    contact_id: PEER_ID,
+                    alias_name: null,
+                    user: { id: PEER_ID, full_name: 'Zed A', username: 'za', avatar_url: null },
+                },
+            ]);
+            const host = await open(PRIVATE);
+            expect(host.querySelector('.saved-note')?.textContent).toContain('Saved as a contact');
+            expect(host.textContent).not.toContain('Save as contact');
+            expect(Array.from(host.querySelectorAll('.saved-actions .link')).map((b) => b.textContent?.trim())).toEqual(
+                ['Rename', 'Remove']
+            );
+        });
+
+        it('offers Save as contact when the peer is not in the store', async () => {
+            TestBed.inject(ContactsStoreService).contacts.set([]);
+            const host = await open(PRIVATE);
+            expect(host.textContent).toContain('Save as contact');
+            expect(host.querySelector('.saved-note')).toBeNull();
+        });
+
+        it('shows the private chat peer picture in the header, monogram only as the fallback', async () => {
+            const host = await open({ ...PRIVATE, avatar_url: 'https://files.test/zed.webp' });
+            expect(fixture.componentInstance.headerAvatarUrl()).toBe('https://files.test/zed.webp');
+            expect(host.querySelector('app-avatar img')?.getAttribute('src')).toBe('https://files.test/zed.webp');
         });
 
         it('offers Profile, Settings and Data for a private chat, without a member list', async () => {
@@ -253,6 +303,9 @@ describe('ChatInfoComponent', () => {
             const host = await open(GROUP);
             const first = host.querySelector<HTMLElement>('#chat-info-tab-main')!;
             first.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+            host.querySelector<HTMLElement>('#chat-info-tab-encryption')!.dispatchEvent(
+                new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })
+            );
             fixture.detectChanges();
 
             expect(fixture.componentInstance.tab()).toBe('settings');
