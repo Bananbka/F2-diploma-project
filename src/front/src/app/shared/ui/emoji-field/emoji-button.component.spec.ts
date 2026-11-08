@@ -22,6 +22,44 @@ class HostComponent {
     dialogKeys = 0;
 }
 
+describe('placePopover with a boundary', () => {
+    const size = { width: 200, height: 100 };
+    const viewport = { width: 1000, height: 800 };
+    const pane = { left: 300, top: 50, right: 900, bottom: 600 };
+
+    it('keeps a popover that would overhang the left edge inside the pane', () => {
+        const p = placePopover({ top: 200, bottom: 230, right: 340 }, size, viewport, pane);
+        expect(p.left).toBe(308);
+    });
+
+    it('keeps it inside the right edge too', () => {
+        const p = placePopover({ top: 200, bottom: 230, right: 990 }, size, viewport, pane);
+        expect(p.left).toBe(900 - 200 - 8);
+    });
+
+    it('flips above when the pane, not the window, runs out of room below', () => {
+        const p = placePopover({ top: 540, bottom: 570, right: 600 }, size, viewport, pane);
+        expect(p.top).toBe(540 - 4 - 100);
+    });
+
+    it('clamps vertically to the pane', () => {
+        const p = placePopover({ top: 60, bottom: 90, right: 600 }, { width: 200, height: 700 }, viewport, pane);
+        expect(p.top).toBeGreaterThanOrEqual(58);
+        expect(p.top).toBeLessThanOrEqual(600 - 700 - 8 > 58 ? 600 : 58);
+    });
+
+    it('behaves as before without a boundary', () => {
+        expect(placePopover({ top: 100, bottom: 130, right: 500 }, size, viewport)).toEqual(
+            placePopover({ top: 100, bottom: 130, right: 500 }, size, viewport, {
+                left: 0,
+                top: 0,
+                right: 1000,
+                bottom: 800,
+            })
+        );
+    });
+});
+
 describe('placePopover', () => {
     const size = { width: 288, height: 288 };
     const viewport = { width: 1000, height: 800 };

@@ -8,6 +8,7 @@
     border-radius: var(--radius-xl);
     box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
     white-space: nowrap;
+    overflow: auto;
 
     &.is-full {
         width: 21rem;

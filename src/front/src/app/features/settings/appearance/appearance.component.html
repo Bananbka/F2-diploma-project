@@ -13,10 +13,25 @@
         <div class="msg">
             <div class="b other">Hey, are we still on for tonight?</div>
             <span class="meta">12:41</span>
+            <div class="reactions">
+                <app-reaction-chip
+                    emoji="❤️"
+                    [count]="2"
+                    [mine]="true"
+                    [interactive]="false"
+                />
+            </div>
         </div>
         <div class="msg mine">
             <div class="b own">Yes! See you at eight.</div>
-            <span class="meta">12:42 <span class="react">&#128077; 1</span></span>
+            <span class="meta">12:42</span>
+            <div class="reactions">
+                <app-reaction-chip
+                    emoji="👍"
+                    [count]="1"
+                    [interactive]="false"
+                />
+            </div>
         </div>
     </div>
 </section>

@@ -22,6 +22,7 @@ import { BackgroundImageService } from '../../../core/services/background-image.
 import { ColorPickerComponent } from '../../../shared/ui/color-picker/color-picker.component';
 import { ConfirmService } from '../../../shared/ui/confirm-dialog/confirm.service';
 import { ChatBackgroundComponent } from '../../chat/chat-background/chat-background.component';
+import { ReactionChipComponent } from '../../chat/reaction-chip/reaction-chip.component';
 import { BackgroundEditorComponent } from './background-editor/background-editor.component';
 
 const DEFAULT_OWN_PICKER = '#a358f9';
@@ -35,7 +36,7 @@ const DEFAULT_BG_PICKER = '#0a0a0c';
  */
 @Component({
     selector: 'app-appearance',
-    imports: [ColorPickerComponent, ChatBackgroundComponent, BackgroundEditorComponent],
+    imports: [ColorPickerComponent, ChatBackgroundComponent, BackgroundEditorComponent, ReactionChipComponent],
     templateUrl: './appearance.component.html',
     styleUrl: './appearance.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,

@@ -24,6 +24,7 @@ import { ConfirmService } from '../../../../shared/ui/confirm-dialog/confirm.ser
 import { DismissOnEscapeDirective } from '../../../../shared/ui/dismiss/dismiss-on-escape.directive';
 import { trapTab } from '../../../../shared/ui/focus-trap';
 import { ChatBackgroundComponent } from '../../../chat/chat-background/chat-background.component';
+import { ReactionChipComponent } from '../../../chat/reaction-chip/reaction-chip.component';
 
 export type TuningKey = 'position_x' | 'position_y' | 'zoom' | 'dim' | 'blur';
 
@@ -44,7 +45,7 @@ const clamp = (n: number, min: number, max: number): number => Math.min(max, Mat
  */
 @Component({
     selector: 'app-background-editor',
-    imports: [LucideAngularModule, ChatBackgroundComponent, DismissOnEscapeDirective],
+    imports: [LucideAngularModule, ChatBackgroundComponent, DismissOnEscapeDirective, ReactionChipComponent],
     templateUrl: './background-editor.component.html',
     styleUrl: './background-editor.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,

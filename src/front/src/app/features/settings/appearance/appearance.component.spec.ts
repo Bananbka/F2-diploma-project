@@ -118,6 +118,17 @@ describe('AppearanceComponent', () => {
             fixture.detectChanges();
         });
 
+        it('shows real reaction chips (emoji image and count) in a row under the time, not a bare square', () => {
+            const chips = root.querySelectorAll('.preview app-reaction-chip');
+            expect(chips.length).toBe(2);
+            expect(chips[0].querySelector('.reaction-emoji img')).not.toBeNull();
+            const own = root.querySelector('.preview .msg.mine') as HTMLElement;
+            const meta = own.querySelector('.meta') as HTMLElement;
+            const row = own.querySelector('.reactions') as HTMLElement;
+            expect(meta.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+            expect(row.querySelector('.reaction-count')?.textContent?.trim()).toBe('1');
+        });
+
         it('keeps only a thumbnail and an Edit button in the tab, with no tuning sliders', () => {
             expect(root.querySelector('.thumb')).not.toBeNull();
             expect(root.querySelector('.fit-option')).toBeNull();

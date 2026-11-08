@@ -54,6 +54,7 @@ import { ContextMenuEntry, MenuSource } from '../../../shared/ui/context-menu/co
 import { messageTime } from '../../../shared/utils/display';
 import { LocationCardComponent } from '../location-card/location-card.component';
 import { PollCardComponent } from '../poll-card/poll-card.component';
+import { ReactionChipComponent } from '../reaction-chip/reaction-chip.component';
 import { ReactionPickerComponent } from '../reaction-picker/reaction-picker.component';
 
 /** Where a media attachment is in its own, separate (lazier) decrypt lifecycle. */
@@ -179,6 +180,7 @@ const STATUS_VIEWS: Record<DecryptStatus, StatusView> = {
         PollCardComponent,
         LocationCardComponent,
         ReactionPickerComponent,
+        ReactionChipComponent,
     ],
     templateUrl: './message-bubble.component.html',
     styleUrl: './message-bubble.component.scss',

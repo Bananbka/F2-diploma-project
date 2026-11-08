@@ -390,20 +390,12 @@
     @if (reactionGroups().length) {
         <div class="reactions">
             @for (group of reactionGroups(); track group.emoji) {
-                <button
-                    type="button"
-                    class="reaction-pill"
-                    [class.is-mine]="group.mine"
-                    [attr.aria-pressed]="group.mine"
-                    [attr.aria-label]="group.emoji + ' reaction, ' + group.count"
-                    (click)="onPillClick(group.emoji)"
-                >
-                    <span
-                        class="reaction-emoji"
-                        [innerHTML]="group.emoji | twemoji"
-                    ></span>
-                    <span class="reaction-count">{{ group.count }}</span>
-                </button>
+                <app-reaction-chip
+                    [emoji]="group.emoji"
+                    [count]="group.count"
+                    [mine]="group.mine"
+                    (chipClick)="onPillClick(group.emoji)"
+                />
             }
         </div>
     }

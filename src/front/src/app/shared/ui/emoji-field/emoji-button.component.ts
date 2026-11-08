@@ -18,6 +18,13 @@ const MARGIN = 8;
 /** Above the modal card (71) and anything else in the app. */
 const POPOVER_Z_INDEX = 100;
 
+export interface Rect {
+    readonly left: number;
+    readonly top: number;
+    readonly right: number;
+    readonly bottom: number;
+}
+
 export interface Point {
     readonly left: number;
     readonly top: number;
@@ -26,21 +33,23 @@ export interface Point {
 /**
  * Where to put a popover of `size` next to `anchor`: right edges aligned, below the anchor when it
  * fits (or when there is more room below than above), otherwise flipped above, and always clamped
- * inside the viewport.
+ * inside `boundary` (a rect; the viewport when omitted), so a popover tied to one pane cannot spill
+ * over its neighbours.
  */
 export function placePopover(
     anchor: { top: number; bottom: number; right: number },
     size: { width: number; height: number },
-    viewport: { width: number; height: number }
+    viewport: { width: number; height: number },
+    boundary: Rect = { left: 0, top: 0, right: viewport.width, bottom: viewport.height }
 ): Point {
     const clamp = (value: number, min: number, max: number): number =>
         Math.min(Math.max(value, min), Math.max(min, max));
-    const below = viewport.height - anchor.bottom - MARGIN - GAP;
-    const above = anchor.top - MARGIN - GAP;
+    const below = boundary.bottom - anchor.bottom - MARGIN - GAP;
+    const above = anchor.top - boundary.top - MARGIN - GAP;
     const top = size.height <= below || below >= above ? anchor.bottom + GAP : anchor.top - GAP - size.height;
     return {
-        left: clamp(anchor.right - size.width, MARGIN, viewport.width - size.width - MARGIN),
-        top: clamp(top, MARGIN, viewport.height - size.height - MARGIN),
+        left: clamp(anchor.right - size.width, boundary.left + MARGIN, boundary.right - size.width - MARGIN),
+        top: clamp(top, boundary.top + MARGIN, boundary.bottom - size.height - MARGIN),
     };
 }
 

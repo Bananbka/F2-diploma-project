@@ -184,7 +184,21 @@ export class ReactionPickerComponent {
             width: element.offsetWidth || FALLBACK_SIZE.width,
             height: element.offsetHeight || FALLBACK_SIZE.height,
         };
-        const point = placePopover(anchor, size, { width: window.innerWidth, height: window.innerHeight });
+        const viewport = { width: window.innerWidth, height: window.innerHeight };
+        // Keep to the conversation pane the message is in, not the whole window; shrink and scroll if it is too small.
+        const pane = this.anchor().closest('app-chat-view')?.getBoundingClientRect();
+        const boundary = pane
+            ? {
+                  left: Math.max(0, pane.left),
+                  top: Math.max(0, pane.top),
+                  right: Math.min(viewport.width, pane.right),
+                  bottom: Math.min(viewport.height, pane.bottom),
+              }
+            : undefined;
+        const limit = boundary ?? { left: 0, top: 0, right: viewport.width, bottom: viewport.height };
+        element.style.maxWidth = `${Math.max(0, limit.right - limit.left - 16)}px`;
+        element.style.maxHeight = `${Math.max(0, limit.bottom - limit.top - 16)}px`;
+        const point = placePopover(anchor, size, viewport, boundary);
         element.style.left = `${point.left}px`;
         element.style.top = `${point.top}px`;
     }
