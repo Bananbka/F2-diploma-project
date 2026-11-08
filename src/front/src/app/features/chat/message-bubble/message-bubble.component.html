@@ -145,8 +145,16 @@
                             @switch (canRenderMedia() ? (file.kind ?? 'file') : 'file') {
                                 @case ('image') {
                                     <li
-                                        class="media-tile"
+                                        class="media-tile is-viewable"
+                                        [class.has-alpha]="hasAlpha(file)"
+                                        [class.is-sized]="aspectOf(file)"
                                         [style.aspect-ratio]="aspectOf(file)"
+                                        [attr.role]="mediaStatus(file.url) === 'ready' ? 'button' : null"
+                                        [attr.tabindex]="mediaStatus(file.url) === 'ready' ? 0 : null"
+                                        [attr.aria-label]="mediaStatus(file.url) === 'ready' ? 'Open image' : null"
+                                        (click)="openMedia(file, $event)"
+                                        (keydown.enter)="openMedia(file, $event)"
+                                        (keydown.space)="openMedia(file, $event); $event.preventDefault()"
                                         appVisibleOnce
                                         (visible)="onMediaVisible(file)"
                                     >
@@ -156,6 +164,7 @@
                                                     class="media-image"
                                                     [src]="mediaObjectUrl(file.url)"
                                                     [alt]="file.name"
+                                                    (load)="onImageLoad(file, $event)"
                                                 />
                                             }
                                             @case ('error') {
@@ -172,8 +181,16 @@
                                 }
                                 @case ('gif') {
                                     <li
-                                        class="media-tile"
+                                        class="media-tile is-viewable"
+                                        [class.has-alpha]="hasAlpha(file)"
+                                        [class.is-sized]="aspectOf(file)"
                                         [style.aspect-ratio]="aspectOf(file)"
+                                        [attr.role]="mediaStatus(file.url) === 'ready' ? 'button' : null"
+                                        [attr.tabindex]="mediaStatus(file.url) === 'ready' ? 0 : null"
+                                        [attr.aria-label]="mediaStatus(file.url) === 'ready' ? 'Open image' : null"
+                                        (click)="openMedia(file, $event)"
+                                        (keydown.enter)="openMedia(file, $event)"
+                                        (keydown.space)="openMedia(file, $event); $event.preventDefault()"
                                         appVisibleOnce
                                         (visible)="onMediaVisible(file)"
                                     >
@@ -183,6 +200,7 @@
                                                     class="media-image"
                                                     [src]="mediaObjectUrl(file.url)"
                                                     [alt]="file.name"
+                                                    (load)="onImageLoad(file, $event)"
                                                 />
                                                 <span class="tile-badge">GIF</span>
                                             }

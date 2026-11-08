@@ -25,7 +25,6 @@ import {
     PinOff,
     RefreshCw,
     Reply,
-    Shield,
     ShieldAlert,
     ShieldOff,
     SkipForward,
@@ -56,10 +55,8 @@ import { DismissOnEscapeDirective } from '../../../shared/ui/dismiss/dismiss-on-
 import { avatarKindFor, DELETED_USER_LABEL } from '../../../shared/utils/display';
 import { ChatBackgroundComponent } from '../chat-background/chat-background.component';
 import { ComposedMessage, ComposerComponent } from '../composer/composer.component';
-import { InfoDialogService } from '../info-dialog/info-dialog.service';
 import { MessageBubbleComponent, MessageMenuRequest } from '../message-bubble/message-bubble.component';
 import { StickerPackViewerService } from '../stickers/sticker-pack-dialog/sticker-pack-viewer';
-import { TrustDialogService } from '../trust-dialog/trust-dialog.service';
 import { StickToBottom } from './stick-to-bottom';
 
 /**
@@ -192,20 +189,10 @@ export class ChatViewComponent {
         return count ? `${count} members` : 'Group';
     });
 
-    readonly peerId = computed(() => {
-        const chat = this.chat();
-        if (chat?.chat_type !== 'private') {
-            return null;
-        }
-        return chat.participants.find((p) => p.user_id !== this.session.user()?.id)?.user_id ?? null;
-    });
-
     /** Channels are never end-to-end encrypted, so nothing about them may imply confidentiality. */
     readonly showChannelNotice = this.isChannel;
 
     private readonly appearance = inject(AppearanceStore);
-    private readonly infoDialog = inject(InfoDialogService);
-    private readonly trustDialog = inject(TrustDialogService);
     /** The picture behind the messages, only while the image background is the selected kind. */
     readonly backgroundImage = computed(() => {
         const background = this.appearance.value().background;
@@ -230,7 +217,6 @@ export class ChatViewComponent {
     readonly infoIcon = Info;
     /** True only while the panel is showing chat info, which is what the header button controls. */
     readonly profileOpen = computed(() => this.panel.open() && this.panel.view() === 'profile');
-    readonly shieldIcon = Shield;
     readonly shieldAlertIcon = ShieldAlert;
     readonly shieldOffIcon = ShieldOff;
     readonly skipForwardIcon = SkipForward;
@@ -727,22 +713,6 @@ export class ChatViewComponent {
      */
     openProfile(): void {
         this.panel.showProfile();
-    }
-
-    /** Group or channel: the encryption status, never one member's safety number. */
-    openGroupTrust(): void {
-        const chat = this.chat();
-        if (chat) {
-            this.trustDialog.open(chat.id);
-        }
-    }
-
-    async openSafetyNumber(): Promise<void> {
-        const chat = this.chat();
-        const peer = this.peerId();
-        if (chat && peer) {
-            this.infoDialog.openSafety(chat.id, peer);
-        }
     }
 
     async backToList(): Promise<void> {

@@ -354,6 +354,7 @@
                                 }
 
                                 @if (peerId() && peer()) {
+                                    <p class="section">Encryption</p>
                                     <button
                                         type="button"
                                         class="tile"
@@ -550,6 +551,15 @@
                         }
                     }
 
+                    @case ('encryption') {
+                        <section class="group">
+                            <p class="section">Encryption</p>
+                            <app-encryption-panel
+                                [chatId]="chat()!.id"
+                                (safetyRequested)="openSafetyFor($event)"
+                            />
+                        </section>
+                    }
                     @case ('settings') {
                         <section class="group">
                             <p class="section">Notifications</p>

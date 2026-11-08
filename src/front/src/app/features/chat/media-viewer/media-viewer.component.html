@@ -1,0 +1,97 @@
+@if (item(); as current) {
+    <div
+        #dialog
+        class="viewer"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Image viewer"
+        tabindex="-1"
+        (appDismissOnEscape)="close()"
+        (keydown)="onKeydown($event)"
+    >
+        <div class="toolbar">
+            <span class="counter">{{ position() }} / {{ count() }}</span>
+            <span class="spacer"></span>
+            <button
+                type="button"
+                class="tool"
+                aria-label="Zoom out"
+                [disabled]="zoom() <= 1"
+                (click)="zoomOut()"
+            >
+                <lucide-icon [img]="minusIcon" />
+            </button>
+            <button
+                type="button"
+                class="tool"
+                aria-label="Zoom in"
+                [disabled]="zoom() >= 5"
+                (click)="zoomIn()"
+            >
+                <lucide-icon [img]="plusIcon" />
+            </button>
+            <a
+                class="tool"
+                aria-label="Download"
+                title="Download"
+                [href]="current.objectUrl"
+                [attr.download]="current.name"
+            >
+                <lucide-icon [img]="downloadIcon" />
+            </a>
+            <button
+                type="button"
+                class="tool"
+                aria-label="Close"
+                (click)="close()"
+            >
+                <lucide-icon [img]="closeIcon" />
+            </button>
+        </div>
+
+        <div
+            class="stage"
+            [class.is-zoomed]="zoom() > 1"
+            (click)="$event.target === $event.currentTarget && close()"
+            (wheel)="onWheel($event)"
+            (pointerdown)="startPan($event)"
+            (pointermove)="pan($event)"
+            (pointerup)="endDrag()"
+            (pointercancel)="endDrag()"
+            (lostpointercapture)="endDrag()"
+        >
+            <img
+                class="picture"
+                [class.has-alpha]="alpha()"
+                [src]="current.objectUrl"
+                [alt]="current.name"
+                [style.transform]="transform()"
+                draggable="false"
+                (dblclick)="toggleZoom()"
+            />
+        </div>
+
+        @if (hasPrev()) {
+            <button
+                type="button"
+                class="nav prev"
+                aria-label="Previous image"
+                (click)="prev()"
+            >
+                <lucide-icon [img]="prevIcon" />
+            </button>
+        }
+        @if (hasNext()) {
+            <button
+                type="button"
+                class="nav next"
+                aria-label="Next image"
+                (click)="next()"
+            >
+                <lucide-icon [img]="nextIcon" />
+            </button>
+        }
+
+        <p class="caption">{{ current.sender }} &middot; {{ current.time }}</p>
+    </div>
+}

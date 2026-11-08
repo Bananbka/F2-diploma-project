@@ -10,7 +10,6 @@ import {
     Pencil,
     Plus,
     Settings,
-    Shield,
     SquarePen,
     Trash2,
     User,
@@ -75,8 +74,6 @@ export class NavigationRailComponent {
     /** The selected view: a system view or `folder:<id>`. */
     readonly view = input.required<ChatViewKey>();
     readonly viewChange = output<ChatViewKey>();
-    /** Emitted by the shield: opens the safety number for whoever is on screen. */
-    readonly securityRequested = output<void>();
     /** True while the Contacts view replaces the chat list; no chat view is then the current one. */
     readonly contactsActive = input(false);
     readonly contactsRequested = output<void>();
@@ -118,7 +115,6 @@ export class NavigationRailComponent {
     );
 
     readonly plusIcon = Plus;
-    readonly shieldIcon = Shield;
     readonly settingsIcon = Settings;
     readonly logOutIcon = LogOut;
     readonly userIcon = User;

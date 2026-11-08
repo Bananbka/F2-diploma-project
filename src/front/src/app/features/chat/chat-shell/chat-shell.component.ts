@@ -31,9 +31,8 @@ import { CreateGroupComponent } from '../create-group/create-group.component';
 import { firstVisibleChatView, isHiddenSelection } from '../default-views';
 import { InfoDialogComponent } from '../info-dialog/info-dialog.component';
 import { InfoDialogService } from '../info-dialog/info-dialog.service';
+import { MediaViewerComponent } from '../media-viewer/media-viewer.component';
 import { NavigationRailComponent } from '../navigation-rail/navigation-rail.component';
-import { TrustDialogComponent } from '../trust-dialog/trust-dialog.component';
-import { TrustDialogService } from '../trust-dialog/trust-dialog.service';
 
 /** Matches the `@media (width < 48rem)` breakpoint in the shell's own stylesheet. */
 const NARROW_QUERY = '(width < 48rem)';
@@ -51,7 +50,7 @@ const NARROW_QUERY = '(width < 48rem)';
         CreateGroupComponent,
         CreateChannelComponent,
         InfoDialogComponent,
-        TrustDialogComponent,
+        MediaViewerComponent,
     ],
     templateUrl: './chat-shell.component.html',
     styleUrl: './chat-shell.component.scss',
@@ -79,7 +78,6 @@ export class ChatShellComponent {
     private readonly folderStore = inject(FolderStoreService);
     private readonly contactsStore = inject(ContactsStoreService);
     readonly infoDialog = inject(InfoDialogService);
-    readonly trustDialog = inject(TrustDialogService);
 
     /** The selected view of the chat list: chosen on the rail, applied by the sidebar. */
     readonly view = signal<ChatViewKey>('all');
@@ -171,22 +169,5 @@ export class ChatShellComponent {
 
     private matchNarrow(): MediaQueryList {
         return window.matchMedia(NARROW_QUERY);
-    }
-
-    /**
-     * The rail's shield opens the safety number for the current conversation's counterpart.
-     *
-     * With no conversation open there is no peer to compare against, so this falls through to the
-     * chat info screen rather than inventing a target.
-     */
-    async openSecurity(): Promise<void> {
-        const chat = this.store.activeChat();
-        const me = this.session.user()?.id;
-
-        if (!chat) {
-            return;
-        }
-
-        this.trustDialog.openSecurity(chat, me);
     }
 }

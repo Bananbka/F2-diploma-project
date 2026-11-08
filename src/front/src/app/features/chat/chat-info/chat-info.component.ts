@@ -58,6 +58,7 @@ import { ContextMenuDirective, ContextMenuProvider } from '../../../shared/ui/co
 import { ContextMenuEntry } from '../../../shared/ui/context-menu/context-menu.model';
 import { SelectComponent, SelectOption } from '../../../shared/ui/select/select.component';
 import { avatarKindFor, DELETED_USER_LABEL, safetyNumberGroups } from '../../../shared/utils/display';
+import { EncryptionPanelComponent } from '../encryption-panel/encryption-panel.component';
 import { ExportDialogComponent } from '../export-dialog/export-dialog.component';
 import { SafetyNumberComponent } from '../safety-number/safety-number.component';
 
@@ -65,9 +66,9 @@ import { SafetyNumberComponent } from '../safety-number/safety-number.component'
 const MEMBER_RANK: Record<ParticipantRole, number> = { owner: 3, admin: 2, member: 1 };
 
 /** `main` is Members for a group or channel and Profile for a private chat. */
-export type InfoTab = 'main' | 'settings' | 'data';
+export type InfoTab = 'main' | 'encryption' | 'settings' | 'data';
 
-const INFO_TABS: readonly InfoTab[] = ['main', 'settings', 'data'];
+const INFO_TABS: readonly InfoTab[] = ['main', 'encryption', 'settings', 'data'];
 const TAB_KEY = 'chat-info-tab';
 
 function readStoredTab(): InfoTab {
@@ -100,6 +101,7 @@ export interface MemberRow {
         LucideAngularModule,
         AvatarComponent,
         NgTemplateOutlet,
+        EncryptionPanelComponent,
         SelectComponent,
         DatePipe,
         ExportDialogComponent,
@@ -274,9 +276,19 @@ export class ChatInfoComponent {
 
     readonly tabs = computed<{ id: InfoTab; label: string }[]>(() => [
         { id: 'main', label: this.isPrivate() ? 'Profile' : this.isChannel() ? 'Subscribers' : 'Members' },
+        // A private chat keeps its Encryption card on the Profile tab, next to the one person it concerns.
+        ...(this.isPrivate() ? [] : [{ id: 'encryption' as const, label: 'Encryption' }]),
         { id: 'settings', label: 'Settings' },
         { id: 'data', label: 'Data' },
     ]);
+
+    /** From the Encryption tab: open that member's safety number inline, with the usual back arrow. */
+    openSafetyFor(userId: string): void {
+        const member = this.members().find((m) => m.userId === userId);
+        if (member) {
+            this.openSafety(member);
+        }
+    }
 
     readonly isPrivate = computed(() => this.chat()?.chat_type === 'private');
     readonly isChannel = computed(() => this.chat()?.chat_type === 'channel');

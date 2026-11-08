@@ -17,7 +17,6 @@
         [contactsActive]="contactsOpen()"
         (viewChange)="selectView($event)"
         (contactsRequested)="contactsOpen.set(true)"
-        (securityRequested)="openSecurity()"
     />
 
     <app-resizable-panel
@@ -67,9 +66,4 @@
     />
 }
 
-@if (trustDialog.chatId(); as trustChatId) {
-    <app-trust-dialog
-        [chatId]="trustChatId"
-        (closed)="trustDialog.close()"
-    />
-}
+<app-media-viewer />

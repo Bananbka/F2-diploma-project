@@ -6,6 +6,7 @@ import { ChatApiService } from '../../../core/services/chat-api.service';
 import { DirectoryService } from '../../../core/services/directory.service';
 import { DecryptedMessage, DecryptStatus } from '../../../core/services/message.service';
 import { SessionService } from '../../../core/services/session.service';
+import { MediaViewerService } from '../media-viewer/media-viewer.service';
 import { MessageBubbleComponent } from './message-bubble.component';
 
 const CHAT_ID = 'a0000000-0000-4000-8000-000000000001';
@@ -322,6 +323,75 @@ describe('MessageBubbleComponent', () => {
                 buildMessage({ status: 'ok', text: '', attachments: [image({ width: 800, height: 400 })] })
             );
             expect((host.querySelector('.media-tile') as HTMLElement).style.aspectRatio).toContain('800 / 400');
+        });
+    });
+
+    describe('picture tiles', () => {
+        it('gets a white backing for transparent formats only', () => {
+            const png = create(
+                buildMessage({
+                    status: 'ok',
+                    text: '',
+                    attachments: [buildAttachment({ kind: 'image', content_type: 'image/png' })],
+                })
+            );
+            expect(png.querySelector('.media-tile')?.classList.contains('has-alpha')).toBeTrue();
+            const jpeg = create(
+                buildMessage({
+                    status: 'ok',
+                    text: '',
+                    attachments: [buildAttachment({ kind: 'image', content_type: 'image/jpeg' })],
+                })
+            );
+            expect(jpeg.querySelector('.media-tile')?.classList.contains('has-alpha')).toBeFalse();
+        });
+
+        it('treats whitespace-only text as no caption, so the picture is still the whole bubble', () => {
+            const host = create(
+                buildMessage({ status: 'ok', text: '  ', attachments: [buildAttachment({ kind: 'image' })] })
+            );
+            expect(host.querySelector('.bubble')?.classList.contains('is-media-only')).toBeTrue();
+        });
+
+        it('takes the natural ratio of the decoded picture when the sender gave no size', () => {
+            const host = create(
+                buildMessage({ status: 'ok', text: '', attachments: [buildAttachment({ kind: 'image' })] })
+            );
+            fixture.componentInstance.onImageLoad({ url: buildAttachment({ kind: 'image' }).url }, {
+                target: { naturalWidth: 300, naturalHeight: 300 },
+            } as unknown as Event);
+            fixture.detectChanges();
+            expect(fixture.componentInstance.aspectOf(buildAttachment({ kind: 'image' }))).toBe('300 / 300');
+            expect(host.querySelector('.media-tile')).not.toBeNull();
+        });
+    });
+
+    describe('opening the viewer', () => {
+        it('a decrypted picture is a labelled button that opens the viewer on click and Enter', () => {
+            const host = create(
+                buildMessage({ status: 'ok', text: '', attachments: [buildAttachment({ kind: 'image' })] })
+            );
+            const url = buildAttachment({ kind: 'image' }).url;
+            fixture.componentInstance.mediaState.set(new Map([[url, { status: 'ready', objectUrl: 'blob:abc' }]]));
+            fixture.detectChanges();
+            const tile = host.querySelector('.media-tile') as HTMLElement;
+            expect(tile.getAttribute('role')).toBe('button');
+            expect(tile.getAttribute('aria-label')).toBe('Open image');
+            expect(tile.tabIndex).toBe(0);
+            const viewer = TestBed.inject(MediaViewerService);
+            tile.click();
+            expect(viewer.current()?.key).toBe(url);
+            viewer.close();
+            tile.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+            expect(viewer.current()?.key).toBe(url);
+        });
+
+        it('does not open while it is still decrypting', () => {
+            const host = create(
+                buildMessage({ status: 'ok', text: '', attachments: [buildAttachment({ kind: 'image' })] })
+            );
+            (host.querySelector('.media-tile') as HTMLElement).click();
+            expect(TestBed.inject(MediaViewerService).current()).toBeNull();
         });
     });
 

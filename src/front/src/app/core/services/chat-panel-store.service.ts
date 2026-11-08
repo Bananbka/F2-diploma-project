@@ -14,7 +14,7 @@ const PICKER_TAB_KEY = 'chat-panel-picker-tab';
 
 /** What the chat-info view was showing for one chat, so a route round-trip can put it back. */
 export interface InfoPanelState {
-    tab: 'main' | 'settings' | 'data';
+    tab: 'main' | 'encryption' | 'settings' | 'data';
     memberId: string | null;
     /** The member's safety number is open inline in place of their profile. */
     safetyOpen: boolean;

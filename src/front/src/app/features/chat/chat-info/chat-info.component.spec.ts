@@ -239,9 +239,28 @@ describe('ChatInfoComponent', () => {
 
         it('offers Members, Settings and Data for a group', async () => {
             const host = await open(GROUP);
-            expect(tabLabels(host)).toEqual(['Members', 'Settings', 'Data']);
+            expect(tabLabels(host)).toEqual(['Members', 'Encryption', 'Settings', 'Data']);
             expect(host.querySelector('.members')).not.toBeNull();
             expect(host.querySelector('.invite-create')).toBeNull();
+        });
+
+        it('a group has an Encryption tab; a private chat keeps its Encryption card on Profile', async () => {
+            const group = await open(GROUP);
+            fixture.componentInstance.selectTab('encryption');
+            fixture.detectChanges();
+            expect(group.querySelector('app-encryption-panel')).not.toBeNull();
+            const privateHost = await open(PRIVATE);
+            expect(tabLabels(privateHost)).not.toContain('Encryption');
+            expect(
+                Array.from(privateHost.querySelectorAll('.section')).some((e) => e.textContent?.trim() === 'Encryption')
+            ).toBeTrue();
+        });
+
+        it('openSafetyFor opens that member safety number inline, as the member profile does', async () => {
+            await open(GROUP);
+            fixture.componentInstance.openSafetyFor(PEER_ID);
+            expect(fixture.componentInstance.selectedMemberId()).toBe(PEER_ID);
+            expect(fixture.componentInstance.safetyOpen()).toBeTrue();
         });
 
         it('after a reload, a preloaded contact shows as saved instead of offering Save', async () => {
@@ -284,6 +303,9 @@ describe('ChatInfoComponent', () => {
             const host = await open(GROUP);
             const first = host.querySelector<HTMLElement>('#chat-info-tab-main')!;
             first.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+            host.querySelector<HTMLElement>('#chat-info-tab-encryption')!.dispatchEvent(
+                new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })
+            );
             fixture.detectChanges();
 
             expect(fixture.componentInstance.tab()).toBe('settings');

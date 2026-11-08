@@ -1,17 +1,5 @@
-import {
-    afterNextRender,
-    ChangeDetectionStrategy,
-    Component,
-    computed,
-    effect,
-    ElementRef,
-    inject,
-    input,
-    output,
-    signal,
-    viewChild,
-} from '@angular/core';
-import { ArrowLeft, LucideAngularModule, ShieldAlert, ShieldCheck, ShieldOff, X } from 'lucide-angular';
+import { ChangeDetectionStrategy, Component, computed, effect, inject, input, output, signal } from '@angular/core';
+import { LucideAngularModule, ShieldAlert, ShieldCheck, ShieldOff } from 'lucide-angular';
 import { firstValueFrom } from 'rxjs';
 
 import { Chat } from '../../../core/models/chat.model';
@@ -24,9 +12,7 @@ import { KeyStoreService } from '../../../core/services/key-store.service';
 import { SessionService } from '../../../core/services/session.service';
 import { TrustStoreService } from '../../../core/services/trust-store.service';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
-import { DismissOnEscapeDirective } from '../../../shared/ui/dismiss/dismiss-on-escape.directive';
-import { trapTab } from '../../../shared/ui/focus-trap';
-import { classifySafetyError, SafetyNumberComponent } from '../safety-number/safety-number.component';
+import { classifySafetyError } from '../safety-number/safety-number.component';
 
 export type MemberKeyStatus = 'checking' | 'verified' | 'unverified' | 'changed' | 'no-keys' | 'error';
 
@@ -40,18 +26,18 @@ export const STATUS_LABELS: Record<MemberKeyStatus, string> = {
 };
 
 /**
- * The shield for group chats and channels: the conversation's encryption status, and for a group
- * each member's key status with a way into that person's safety number. A group has no single
- * safety number, so the shield must never open one person's.
+ * The Encryption section of chat info for a group or channel: the conversation's encryption status
+ * and, for a group, each member's key status with a way into that person's safety number (the host
+ * opens it inline). A group has no single safety number, so none is shown here.
  */
 @Component({
-    selector: 'app-trust-dialog',
-    imports: [LucideAngularModule, AvatarComponent, SafetyNumberComponent, DismissOnEscapeDirective],
-    templateUrl: './trust-dialog.component.html',
-    styleUrl: './trust-dialog.component.scss',
+    selector: 'app-encryption-panel',
+    imports: [LucideAngularModule, AvatarComponent],
+    templateUrl: './encryption-panel.component.html',
+    styleUrl: './encryption-panel.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class TrustDialogComponent {
+export class EncryptionPanelComponent {
     private readonly chatApi = inject(ChatApiService);
     private readonly cryptoApi = inject(CryptoApiService);
     private readonly keyStore = inject(KeyStoreService);
@@ -59,18 +45,16 @@ export class TrustDialogComponent {
     private readonly directory = inject(DirectoryService);
     private readonly session = inject(SessionService);
     private readonly store = inject(ChatStoreService);
-    private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
 
     readonly chatId = input.required<string>();
-    readonly closed = output<void>();
+    /** The person whose safety number the user asked to see. */
+    readonly safetyRequested = output<string>();
 
     readonly chat = signal<Chat | null>(null);
     readonly roster = signal<ChatRoster | null>(null);
     readonly loading = signal(true);
     readonly error = signal<string | null>(null);
     readonly statuses = signal<Record<string, MemberKeyStatus>>({});
-    /** The member whose safety number is open inline, if any. */
-    readonly selected = signal<string | null>(null);
 
     readonly isChannel = computed(() => this.chat()?.chat_type === 'channel');
     readonly verificationError = this.store.memberVerificationError;
@@ -95,22 +79,13 @@ export class TrustDialogComponent {
                 };
             });
     });
-    readonly selectedName = computed(() => {
-        const id = this.selected();
-        return id ? this.directory.lookup(id).name : '';
-    });
 
     readonly labels = STATUS_LABELS;
-    readonly closeIcon = X;
-    readonly backIcon = ArrowLeft;
     readonly okIcon = ShieldCheck;
     readonly alertIcon = ShieldAlert;
     readonly offIcon = ShieldOff;
 
-    private readonly dialog = viewChild.required<ElementRef<HTMLElement>>('dialog');
-
     constructor() {
-        afterNextRender(() => this.dialog().nativeElement.focus());
         effect(() => void this.load(this.chatId()));
     }
 
@@ -160,23 +135,6 @@ export class TrustDialogComponent {
     }
 
     openMember(userId: string): void {
-        this.selected.set(userId);
-    }
-
-    backToList(): void {
-        this.selected.set(null);
-    }
-
-    /** Escape goes back from a member's safety number before it closes the dialog. */
-    onEscape(): void {
-        if (this.selected()) {
-            this.backToList();
-        } else {
-            this.closed.emit();
-        }
-    }
-
-    onKeydown(event: KeyboardEvent): void {
-        trapTab(event, this.host.nativeElement);
+        this.safetyRequested.emit(userId);
     }
 }

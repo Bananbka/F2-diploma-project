@@ -11,45 +11,14 @@ import { DirectoryService } from '../../../core/services/directory.service';
 import { KeyStoreService } from '../../../core/services/key-store.service';
 import { SessionService } from '../../../core/services/session.service';
 import { TrustStoreService } from '../../../core/services/trust-store.service';
-import { InfoDialogService } from '../info-dialog/info-dialog.service';
 import { classifySafetyError } from '../safety-number/safety-number.component';
-import { TrustDialogComponent } from './trust-dialog.component';
-import { TrustDialogService } from './trust-dialog.service';
+import { EncryptionPanelComponent } from './encryption-panel.component';
 
 const ME = 'me';
 const CHAT_ID = 'chat-1';
 
 const participants = (...ids: string[]): ChatParticipant[] =>
     ids.map((user_id) => ({ user_id, role: 'member' as const, joined_at: '2024-01-01T00:00:00Z' }));
-
-describe('TrustDialogService routing', () => {
-    let service: TrustDialogService;
-    let info: InfoDialogService;
-
-    beforeEach(() => {
-        TestBed.configureTestingModule({ providers: [provideRouter([])] });
-        service = TestBed.inject(TrustDialogService);
-        info = TestBed.inject(InfoDialogService);
-    });
-
-    it('a private chat opens the peer safety number in the info dialog', () => {
-        service.openSecurity({ id: 'c', chat_type: 'private', participants: participants(ME, 'peer') }, ME);
-        expect(info.chatId()).toBe('c');
-        expect(service.chatId()).toBeNull();
-    });
-
-    it('a group opens the encryption dialog, never one member', () => {
-        service.openSecurity({ id: 'g', chat_type: 'group', participants: participants(ME, 'a', 'b') }, ME);
-        expect(service.chatId()).toBe('g');
-        expect(info.chatId()).toBeNull();
-    });
-
-    it('a channel opens the encryption dialog too', () => {
-        service.openSecurity({ id: 'ch', chat_type: 'channel', participants: participants(ME, 'a') }, ME);
-        expect(service.chatId()).toBe('ch');
-        expect(info.chatId()).toBeNull();
-    });
-});
 
 describe('classifySafetyError', () => {
     it('tells a contact without keys from the user without keys from a real failure', () => {
@@ -62,19 +31,16 @@ describe('classifySafetyError', () => {
     });
 });
 
-describe('TrustDialogComponent', () => {
-    let fixture: ComponentFixture<TrustDialogComponent>;
+describe('EncryptionPanelComponent', () => {
+    let fixture: ComponentFixture<EncryptionPanelComponent>;
     let keyStore: { computeSafetyNumber: jasmine.Spy };
     let chatApi: { getChat: jasmine.Spy };
-    let closed: number;
     let verificationError: ReturnType<typeof signal<string | null>>;
 
     async function open(chat: Partial<Chat>) {
         chatApi.getChat.and.returnValue(of({ id: CHAT_ID, chat_type: 'group', participants: [], ...chat }));
-        fixture = TestBed.createComponent(TrustDialogComponent);
+        fixture = TestBed.createComponent(EncryptionPanelComponent);
         fixture.componentRef.setInput('chatId', CHAT_ID);
-        closed = 0;
-        fixture.componentInstance.closed.subscribe(() => closed++);
         fixture.detectChanges();
         await fixture.whenStable();
         await new Promise((resolve) => setTimeout(resolve));
@@ -150,20 +116,13 @@ describe('TrustDialogComponent', () => {
         ).toContain('has not published encryption keys yet');
     });
 
-    it('opens a member safety number inline and Escape steps back before closing', async () => {
+    it('asks the host to open a member safety number rather than opening one itself', async () => {
         const root = await open({ participants: participants(ME, 'a') });
+        const requested: string[] = [];
+        fixture.componentInstance.safetyRequested.subscribe((id) => requested.push(id));
         root.querySelector<HTMLButtonElement>('.row .link')!.click();
-        fixture.detectChanges();
-        expect(root.querySelector('app-safety-number')).not.toBeNull();
-        expect(root.querySelector('.icon[aria-label="Back to members"]')).not.toBeNull();
-
-        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-        fixture.detectChanges();
-        expect(root.querySelector('app-safety-number')).toBeNull();
-        expect(closed).toBe(0);
-
-        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-        expect(closed).toBe(1);
+        expect(requested).toEqual(['a']);
+        expect(root.querySelector('.dialog, [role="dialog"]')).toBeNull();
     });
 
     it('surfaces a failed member-set verification', async () => {

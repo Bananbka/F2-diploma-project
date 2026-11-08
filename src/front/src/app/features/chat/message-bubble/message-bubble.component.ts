@@ -53,6 +53,7 @@ import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
 import { ContextMenuEntry, MenuSource } from '../../../shared/ui/context-menu/context-menu.model';
 import { messageTime } from '../../../shared/utils/display';
 import { LocationCardComponent } from '../location-card/location-card.component';
+import { canHaveAlpha, MediaViewerService } from '../media-viewer/media-viewer.service';
 import { PollCardComponent } from '../poll-card/poll-card.component';
 import { ReactionChipComponent } from '../reaction-chip/reaction-chip.component';
 import { ReactionPickerComponent } from '../reaction-picker/reaction-picker.component';
@@ -207,6 +208,7 @@ const STATUS_VIEWS: Record<DecryptStatus, StatusView> = {
 })
 export class MessageBubbleComponent {
     private readonly directory = inject(DirectoryService);
+    private readonly viewer = inject(MediaViewerService);
     private readonly chatApi = inject(ChatApiService);
     private readonly attachmentBatch = inject(AttachmentBatchService);
     private readonly destroyRef = inject(DestroyRef);
@@ -336,12 +338,40 @@ export class MessageBubbleComponent {
         if (!files.length || !files.every((f) => f.kind === 'image' || f.kind === 'video' || f.kind === 'gif')) {
             return 'none';
         }
-        return message.text ? 'captioned' : 'only';
+        return message.text?.trim() ? 'captioned' : 'only';
     });
 
     /** Reserve the media's box before it loads, when the sender told us its size. */
-    aspectOf(file: { width?: number | null; height?: number | null }): string | null {
-        return file.width && file.height ? `${file.width} / ${file.height}` : null;
+    aspectOf(file: { url: string; width?: number | null; height?: number | null }): string | null {
+        if (file.width && file.height) {
+            return `${file.width} / ${file.height}`;
+        }
+        return this.naturalRatios().get(file.url) ?? null;
+    }
+
+    /** Ratios read from the decoded picture, for attachments whose sender gave no size. */
+    private readonly naturalRatios = signal<ReadonlyMap<string, string>>(new Map());
+
+    onImageLoad(file: { url: string }, event: Event): void {
+        const img = event.target as HTMLImageElement;
+        if (img.naturalWidth && img.naturalHeight && !this.naturalRatios().has(file.url)) {
+            this.naturalRatios.update((all) =>
+                new Map(all).set(file.url, `${img.naturalWidth} / ${img.naturalHeight}`)
+            );
+        }
+    }
+
+    /** PNG, WebP and GIF can have transparent pixels, which show on a white backing rather than the bubble. */
+    hasAlpha(file: { content_type: string }): boolean {
+        return canHaveAlpha(file.content_type);
+    }
+
+    openMedia(file: MessageAttachment, event?: Event): void {
+        if (this.selecting() || this.mediaStatus(file.url) !== 'ready') {
+            return;
+        }
+        event?.stopPropagation();
+        this.viewer.open(this.message().chatId, file.url);
     }
 
     /** A sticker is a bare image with no bubble chrome — only when it is the *entire* message. */
@@ -413,6 +443,32 @@ export class MessageBubbleComponent {
                 }
             });
         });
+
+        // Everything this bubble has decrypted is available to the viewer, so stepping through a chat's
+        // pictures never decrypts again; the entries go when this bubble (and its blob URLs) does.
+        const registered = new Set<string>();
+        effect(() => {
+            const message = this.message();
+            const sender = this.sender().name;
+            const time = this.time();
+            for (const file of message.attachments) {
+                const objectUrl = this.mediaState().get(file.url)?.objectUrl;
+                if (objectUrl && (file.kind === 'image' || file.kind === 'gif')) {
+                    registered.add(file.url);
+                    this.viewer.register(message.chatId, {
+                        key: file.url,
+                        messageId: message.id,
+                        objectUrl,
+                        name: file.name,
+                        contentType: file.content_type,
+                        kind: file.kind,
+                        sender,
+                        time,
+                    });
+                }
+            }
+        });
+        this.destroyRef.onDestroy(() => registered.forEach((key) => this.viewer.unregister(key)));
 
         this.destroyRef.onDestroy(() => {
             if (timer) {

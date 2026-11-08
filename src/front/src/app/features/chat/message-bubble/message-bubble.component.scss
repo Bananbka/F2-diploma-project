@@ -840,3 +840,22 @@
 :host(.is-media-only) .meta .receipt {
     display: none;
 }
+
+/* A picture with transparent pixels shows on white, not on the bubble or the chat background. The box
+   takes the picture's own ratio once known, so nothing but the picture is ever visible in it. */
+.media-tile.is-viewable {
+    cursor: zoom-in;
+
+    &:focus-visible {
+        outline: 2px solid var(--primary);
+        outline-offset: -2px;
+    }
+}
+
+.media-tile.is-sized {
+    min-height: 0;
+}
+
+.media-tile.has-alpha {
+    background: #fff;
+}

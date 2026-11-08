@@ -56,27 +56,6 @@
         </button>
 
         <div class="head-actions">
-            @if (peerId()) {
-                <button
-                    type="button"
-                    class="head-button"
-                    aria-label="Safety number"
-                    title="Safety number"
-                    (click)="openSafetyNumber()"
-                >
-                    <lucide-icon [img]="shieldIcon" />
-                </button>
-            } @else if (isGroupLike()) {
-                <button
-                    type="button"
-                    class="head-button"
-                    aria-label="Encryption"
-                    title="Encryption"
-                    (click)="openGroupTrust()"
-                >
-                    <lucide-icon [img]="isChannel() ? shieldOffIcon : shieldIcon" />
-                </button>
-            }
             <button
                 type="button"
                 class="head-button"
