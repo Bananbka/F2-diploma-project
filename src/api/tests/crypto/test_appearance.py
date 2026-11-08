@@ -14,6 +14,7 @@ DEFAULTS = {
     "other_bubble_color": None,
     "background": {"kind": "default", "color": None, "gradient": None, "image": None},
     "background_image_version": None,
+    "hidden_views": [],
     "version": 1,
 }
 
@@ -79,6 +80,9 @@ async def test_put_replaces_whole_document():
         {"background": {"kind": "gradient", "gradient": "neon"}},
         {"version": 2},
         {"surprise": 1},
+        {"hidden_views": ["unread", "unread"]},
+        {"hidden_views": ["favourites"]},
+        {"hidden_views": ["all", "unread", "direct", "groups", "channels"]},
     ],
 )
 async def test_invalid_documents_are_422(bad):
@@ -99,6 +103,31 @@ async def test_delete_resets_to_defaults():
         assert r.status_code == 200, r.text
         assert r.json()["data"] == DEFAULTS
         assert (await alice.get(URL)).json()["data"] == DEFAULTS
+    finally:
+        await alice.aclose()
+
+
+async def test_hidden_views_round_trip_and_reset():
+    alice, _ = await _register_user()
+    try:
+        doc = _doc(hidden_views=["unread", "channels", "contacts"])
+        r = await alice.put(URL, json=doc)
+        assert r.status_code == 200, r.text
+        assert (await alice.get(URL)).json()["data"]["hidden_views"] == ["unread", "channels", "contacts"]
+        r = await alice.delete(URL)
+        assert r.json()["data"]["hidden_views"] == []
+        assert (await alice.get(URL)).json()["data"] == DEFAULTS
+    finally:
+        await alice.aclose()
+
+
+async def test_hidden_views_contacts_only_is_allowed():
+    alice, _ = await _register_user()
+    try:
+        r = await alice.put(URL, json=_doc(hidden_views=["contacts"]))
+        assert r.status_code == 200, r.text
+        r = await alice.put(URL, json=_doc(hidden_views=["unread", "direct", "groups", "channels", "contacts"]))
+        assert r.status_code == 200, r.text
     finally:
         await alice.aclose()
 

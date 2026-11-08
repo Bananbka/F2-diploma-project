@@ -6,12 +6,15 @@ bounded by the schema and carries no free-form text.
 
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 HEX_COLOR = r"^#[0-9a-fA-F]{6}$"
 
 type FontFamily = Literal["inter", "system", "serif", "mono", "rounded"]
 type GradientName = Literal["aurora", "dusk", "ocean", "forest", "sunset"]
+type NavView = Literal["all", "unread", "direct", "groups", "channels", "contacts"]
+
+CHAT_VIEWS = frozenset({"all", "unread", "direct", "groups", "channels"})
 
 
 VERSION_PATTERN = r"^[0-9a-f]{8,64}$"
@@ -71,7 +74,18 @@ class Appearance(BaseModel):
     # Read-only: content hash of the uploaded background object, None when nothing is uploaded.
     # Accepted on input so a response can be sent back unchanged, but always overwritten.
     background_image_version: str | None = Field(default=None, pattern=VERSION_PATTERN)
+    # Built-in navigation views hidden from the left rail. At least one chat view stays visible.
+    hidden_views: list[NavView] = Field(default_factory=list, max_length=6)
     version: Literal[1] = 1
+
+    @field_validator("hidden_views")
+    @classmethod
+    def _hidden_views_valid(cls, v: list[NavView]) -> list[NavView]:
+        if len(set(v)) != len(v):
+            raise ValueError("hidden_views must not contain duplicates")
+        if CHAT_VIEWS <= set(v):
+            raise ValueError("at least one chat view must remain visible")
+        return v
 
 
 class AppearanceResponse(Appearance):

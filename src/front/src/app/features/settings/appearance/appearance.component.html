@@ -79,22 +79,20 @@
     </div>
 
     <div class="field">
-        <label for="appearance-font">Font</label>
-        <select
-            id="appearance-font"
+        <span class="font-label">Font</span>
+        <app-select
+            label="Font"
+            [options]="fontOptions"
             [value]="value().font_family"
-            (change)="setFontFamily($any($event.target).value)"
+            [optionTemplate]="fontOption"
+            (valueChange)="setFontFamily($event)"
+        />
+        <ng-template
+            #fontOption
+            let-option
         >
-            @for (f of families; track f.id) {
-                <option
-                    [value]="f.id"
-                    [style.font-family]="f.stack"
-                    [selected]="value().font_family === f.id"
-                >
-                    {{ f.label }}
-                </option>
-            }
-        </select>
+            <span [style.font-family]="fontStack(option.value)">{{ option.label }}</span>
+        </ng-template>
     </div>
 </section>
 

@@ -141,6 +141,11 @@ export function appearanceVars(a: Appearance, imageColor: string | null = null):
         const [r, g, b] = parseHex(readableTextColor(base));
         vars['--chat-chip-bg'] = `rgb(${r} ${g} ${b} / 12%)`;
         vars['--chat-chip-border'] = mutedOn(base, 3);
+        // Text drawn straight on the background (empty states, dividers, notices) gets a translucent
+        // backing of the background's own colour, so a busy picture cannot swallow it.
+        const [br, bg2, bb] = parseHex(base);
+        vars['--chat-overlay-bg'] = `rgb(${br} ${bg2} ${bb} / 62%)`;
+        vars['--chat-overlay-blur'] = 'blur(8px)';
     }
     // Reactions I made are tinted with my bubble colour when it stands out from the chat background,
     // otherwise with the readable accent, so the "mine" state stays distinct and at least 3:1.

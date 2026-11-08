@@ -114,4 +114,15 @@ describe('appearance-css', () => {
         });
         expect(unknown['--chat-meta-accent']).toBe('#ffffff');
     });
+
+    it('gives text drawn on a custom background a translucent backing of its own colour, and none by default', () => {
+        const vars = appearanceVars({
+            ...DEFAULT_APPEARANCE,
+            background: { kind: 'color', color: '#102030', gradient: null },
+        });
+        expect(vars['--chat-overlay-bg']).toBe('rgb(16 32 48 / 62%)');
+        expect(vars['--chat-overlay-blur']).toBe('blur(8px)');
+        expect(contrastRatio(vars['--chat-meta-fg'], '#102030')).toBeGreaterThanOrEqual(4.5);
+        expect(appearanceVars(DEFAULT_APPEARANCE)['--chat-overlay-bg']).toBeUndefined();
+    });
 });

@@ -48,11 +48,18 @@ describe('AppearanceComponent', () => {
         expect(store.update).toHaveBeenCalledWith({ font_size: 16 });
     });
 
-    it('updates the font family', () => {
-        const select = root.querySelector<HTMLSelectElement>('#appearance-font')!;
-        select.value = 'mono';
-        select.dispatchEvent(new Event('change'));
+    it('updates the font family from the custom select, previewing each font', () => {
+        root.querySelector<HTMLButtonElement>('app-select .trigger')!.click();
+        fixture.detectChanges();
+        const options = Array.from(document.body.querySelectorAll<HTMLElement>('.listbox [role="option"]'));
+        expect(options.length).toBe(5);
+        const mono = options.find((o) => o.textContent?.includes('Monospace'))!;
+        const preview = Array.from(mono.querySelectorAll<HTMLElement>('span')).find((e) => e.style.fontFamily);
+        expect(preview?.style.fontFamily).toContain('mono');
+        mono.click();
+        fixture.detectChanges();
         expect(store.update).toHaveBeenCalledWith({ font_family: 'mono' });
+        expect(root.querySelector('select')).toBeNull();
     });
 
     it('sets a bubble colour from a swatch and clears it with Default', () => {

@@ -9,12 +9,13 @@ import {
     signal,
     viewChild,
 } from '@angular/core';
-import { Lock, LucideAngularModule, Palette, ShieldCheck, Sticker, User, X } from 'lucide-angular';
+import { FolderCog, Lock, LucideAngularModule, Palette, ShieldCheck, Sticker, User, X } from 'lucide-angular';
 
 import { SessionService } from '../../../core/services/session.service';
 import { trapTab } from '../../../shared/ui/focus-trap';
 import { StickerPackManagerComponent } from '../../chat/stickers/sticker-pack-manager/sticker-pack-manager.component';
 import { AppearanceComponent } from '../appearance/appearance.component';
+import { FoldersSettingsComponent } from '../folders/folders-settings.component';
 import { PrivacyComponent } from '../privacy/privacy.component';
 import { ProfileComponent } from '../profile/profile.component';
 import { SecurityComponent } from '../security/security.component';
@@ -28,6 +29,7 @@ const TAB_ICONS = {
     security: ShieldCheck,
     stickers: Sticker,
     appearance: Palette,
+    folders: FolderCog,
     privacy: Lock,
 } as const;
 
@@ -47,6 +49,7 @@ const TAB_ICONS = {
         SecurityComponent,
         StickerPackManagerComponent,
         AppearanceComponent,
+        FoldersSettingsComponent,
         PrivacyComponent,
     ],
     templateUrl: './settings-modal.component.html',

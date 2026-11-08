@@ -7,6 +7,10 @@ export type AppearanceGradient = (typeof GRADIENT_PRESETS)[number];
 export type AppearanceBackgroundKind = 'default' | 'color' | 'gradient' | 'image';
 export type BackgroundImageFit = 'cover' | 'contain' | 'tile';
 
+/** The built-in views of the rail that can be hidden. The wire names, not the client's internal ids. */
+export const HIDDEN_VIEW_IDS = ['all', 'unread', 'direct', 'groups', 'channels', 'contacts'] as const;
+export type HiddenViewId = (typeof HIDDEN_VIEW_IDS)[number];
+
 export const BUBBLE_RADIUS_MIN = 0;
 export const BUBBLE_RADIUS_MAX = 28;
 export const BUBBLE_RADIUS_DEFAULT = 19;
@@ -54,6 +58,8 @@ export interface Appearance {
     font_size: number;
     font_family: AppearanceFontFamily;
     bubble_radius: number;
+    /** Built-in rail views the user has hidden. At least one chat view (not Contacts) always stays visible. */
+    hidden_views: HiddenViewId[];
     own_bubble_color: string | null;
     other_bubble_color: string | null;
     background: AppearanceBackground;
@@ -66,6 +72,7 @@ export const DEFAULT_APPEARANCE: Appearance = {
     font_size: FONT_SIZE_DEFAULT,
     font_family: 'inter',
     bubble_radius: BUBBLE_RADIUS_DEFAULT,
+    hidden_views: [],
     own_bubble_color: null,
     other_bubble_color: null,
     background: { kind: 'default', color: null, gradient: null, image: null },
@@ -87,6 +94,15 @@ export function normalizeAppearance(raw: Partial<Appearance> | null | undefined)
             image: image ? { ...DEFAULT_BACKGROUND_IMAGE, ...image } : null,
         },
         background_image_version: source.background_image_version ?? null,
+        hidden_views: Array.isArray(source.hidden_views)
+            ? [
+                  ...new Set(
+                      source.hidden_views.filter((v): v is HiddenViewId =>
+                          (HIDDEN_VIEW_IDS as readonly string[]).includes(v)
+                      )
+                  ),
+              ]
+            : [],
         version: 1,
     };
 }

@@ -252,6 +252,17 @@ describe('ChatStoreService', () => {
         });
     });
 
+    it('refuses an attachment send in a channel instead of publishing an empty post', async () => {
+        store.chats.set([chat({ chat_type: 'channel' })]);
+        store.activeChatId.set(CHAT);
+        await store.send('', undefined, [
+            { url: 'http://x/y', name: 'a.png', size: 1, content_type: 'image/png', kind: 'image' },
+        ]);
+        expect(TestBed.inject(MessageService).sendChannelPost).not.toHaveBeenCalled();
+        expect(store.pending().length).toBe(0);
+        expect(store.realtimeError()).toContain('Channels cannot carry attachments');
+    });
+
     /**
      * A private chat whose peer deleted their account is read-only: the history still opens and
      * verifies, nothing new can be sent. It is its own state, not the member-set alarm or the

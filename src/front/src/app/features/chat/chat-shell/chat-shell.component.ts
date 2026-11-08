@@ -28,7 +28,12 @@ import { ContactsListComponent } from '../contacts-list/contacts-list.component'
 import { CreateChannelComponent } from '../create-channel/create-channel.component';
 import { CreateDialogService } from '../create-dialog.service';
 import { CreateGroupComponent } from '../create-group/create-group.component';
+import { firstVisibleChatView, isHiddenSelection } from '../default-views';
+import { InfoDialogComponent } from '../info-dialog/info-dialog.component';
+import { InfoDialogService } from '../info-dialog/info-dialog.service';
 import { NavigationRailComponent } from '../navigation-rail/navigation-rail.component';
+import { TrustDialogComponent } from '../trust-dialog/trust-dialog.component';
+import { TrustDialogService } from '../trust-dialog/trust-dialog.service';
 
 /** Matches the `@media (width < 48rem)` breakpoint in the shell's own stylesheet. */
 const NARROW_QUERY = '(width < 48rem)';
@@ -45,6 +50,8 @@ const NARROW_QUERY = '(width < 48rem)';
         ContactsListComponent,
         CreateGroupComponent,
         CreateChannelComponent,
+        InfoDialogComponent,
+        TrustDialogComponent,
     ],
     templateUrl: './chat-shell.component.html',
     styleUrl: './chat-shell.component.scss',
@@ -71,6 +78,8 @@ export class ChatShellComponent {
 
     private readonly folderStore = inject(FolderStoreService);
     private readonly contactsStore = inject(ContactsStoreService);
+    readonly infoDialog = inject(InfoDialogService);
+    readonly trustDialog = inject(TrustDialogService);
 
     /** The selected view of the chat list: chosen on the rail, applied by the sidebar. */
     readonly view = signal<ChatViewKey>('all');
@@ -106,6 +115,17 @@ export class ChatShellComponent {
     readonly wifiOffIcon = WifiOff;
 
     constructor() {
+        // Hiding the view that is on screen moves to the first one still visible; Contacts closes if hidden.
+        effect(() => {
+            const hidden = this.appearance.value().hidden_views;
+            if (isHiddenSelection(hidden, this.view())) {
+                this.view.set(firstVisibleChatView(hidden));
+            }
+            if (hidden.includes('contacts') && this.contactsOpen()) {
+                this.contactsOpen.set(false);
+            }
+        });
+
         // Contacts are needed by chat info ("saved" state) long before the Contacts view opens.
         void this.contactsStore.load();
 
@@ -167,7 +187,6 @@ export class ChatShellComponent {
             return;
         }
 
-        const peer = chat.participants.find((p) => p.user_id !== me);
-        await this.router.navigate(peer ? ['/chats', chat.id, 'safety', peer.user_id] : ['/chats', chat.id, 'info']);
+        this.trustDialog.openSecurity(chat, me);
     }
 }

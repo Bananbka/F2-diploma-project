@@ -1,0 +1,119 @@
+<section class="group">
+    <p class="section">Default views</p>
+    <p class="hint">Choose which built-in views appear in the sidebar. At least one chat view always stays visible.</p>
+
+    <ul class="views">
+        @for (view of views; track view.id) {
+            <li class="row">
+                <lucide-icon
+                    class="row-icon"
+                    [img]="view.icon"
+                />
+                <span class="row-text">
+                    <span class="row-title">{{ view.label }}</span>
+                    <span class="row-sub">{{ view.description }}</span>
+                    @if (isLocked(view.id)) {
+                        <span
+                            class="row-note"
+                            [id]="'view-note-' + view.id"
+                            >This is the last visible chat view, so it cannot be hidden.</span
+                        >
+                    }
+                </span>
+                <button
+                    type="button"
+                    role="switch"
+                    class="switch"
+                    [attr.aria-checked]="isVisible(view.id)"
+                    [attr.aria-label]="(isVisible(view.id) ? 'Hide ' : 'Show ') + view.label"
+                    [attr.aria-describedby]="isLocked(view.id) ? 'view-note-' + view.id : null"
+                    [disabled]="isLocked(view.id)"
+                    (click)="toggle(view.id)"
+                >
+                    <span class="knob"></span>
+                </button>
+            </li>
+        }
+    </ul>
+
+    <button
+        type="button"
+        class="link"
+        [disabled]="hidden().length === 0"
+        (click)="restoreAll()"
+    >
+        <lucide-icon [img]="restoreIcon" />
+        Restore all default views
+    </button>
+</section>
+
+<section class="group">
+    <div class="group-head">
+        <p class="section">My folders</p>
+        <button
+            type="button"
+            class="primary"
+            (click)="openDialog(null)"
+        >
+            <lucide-icon [img]="plusIcon" />
+            New folder
+        </button>
+    </div>
+
+    @if (folderItems().length === 0) {
+        <p class="empty">You have no folders yet. A folder gathers chosen chats into one view of the sidebar.</p>
+    } @else {
+        <ul class="views">
+            @for (item of folderItems(); track item.folder.id) {
+                <li class="row">
+                    <lucide-icon
+                        class="row-icon"
+                        [img]="item.icon"
+                    />
+                    <span class="row-text">
+                        <span class="row-title">{{ item.folder.title }}</span>
+                        <span class="row-sub">{{ item.count }} {{ item.count === 1 ? 'chat' : 'chats' }}</span>
+                    </span>
+                    <span class="actions">
+                        <button
+                            type="button"
+                            class="icon-button"
+                            [attr.aria-label]="'Edit chats in ' + item.folder.title"
+                            [title]="'Edit chats'"
+                            (click)="openDialog(item.folder, 'chats')"
+                        >
+                            <lucide-icon [img]="editIcon" />
+                        </button>
+                        <button
+                            type="button"
+                            class="icon-button"
+                            [attr.aria-label]="'Rename ' + item.folder.title"
+                            title="Rename"
+                            (click)="openDialog(item.folder, 'name')"
+                        >
+                            <lucide-icon [img]="renameIcon" />
+                        </button>
+                        <button
+                            type="button"
+                            class="icon-button is-danger"
+                            [attr.aria-label]="'Delete ' + item.folder.title"
+                            title="Delete"
+                            (click)="remove(item.folder)"
+                        >
+                            <lucide-icon [img]="deleteIcon" />
+                        </button>
+                    </span>
+                </li>
+            }
+        </ul>
+    }
+</section>
+
+@if (dialog(); as d) {
+    <app-folder-edit-dialog
+        [folder]="d.folder"
+        [focus]="d.focus"
+        [chats]="chats()"
+        (closed)="dialog.set(null)"
+    />
+}

@@ -229,6 +229,102 @@ describe('MessageBubbleComponent', () => {
         });
     });
 
+    describe('broadcast (channel) layout', () => {
+        it('left-aligns my own post, with the meta row hugging the left edge', () => {
+            (TestBed.inject(DirectoryService).isMe as jasmine.Spy).and.returnValue(true);
+            fixture = TestBed.createComponent(MessageBubbleComponent);
+            fixture.componentRef.setInput('message', buildMessage());
+            fixture.componentRef.setInput('broadcast', true);
+            fixture.detectChanges();
+            const host = fixture.nativeElement as HTMLElement;
+            document.body.appendChild(host);
+            host.style.display = 'block';
+            host.style.width = '900px';
+            expect(getComputedStyle(host).justifyContent).toBe('normal');
+            const bubble = (host.querySelector('.bubble') as HTMLElement).getBoundingClientRect();
+            expect(bubble.left - host.getBoundingClientRect().left).toBeLessThan(200);
+            const left = (selector: string) =>
+                (host.querySelector(selector) as HTMLElement).getBoundingClientRect().left;
+            expect(left('.react-trigger')).toBeLessThan(left('.meta .time'));
+            expect(left('.meta .time')).toBeLessThan(left('.meta .action'));
+            expect(host.querySelector('.bubble-row > .who')).not.toBeNull();
+            host.remove();
+        });
+
+        it('keeps my own post in my own bubble colour', () => {
+            (TestBed.inject(DirectoryService).isMe as jasmine.Spy).and.returnValue(true);
+            fixture = TestBed.createComponent(MessageBubbleComponent);
+            fixture.componentRef.setInput('message', buildMessage());
+            fixture.componentRef.setInput('broadcast', true);
+            fixture.detectChanges();
+            const host = fixture.nativeElement as HTMLElement;
+            host.style.setProperty('--bubble-own-bg', '#123456');
+            expect(getComputedStyle(host.querySelector('.bubble') as HTMLElement).backgroundColor).toBe(
+                'rgb(18, 52, 86)'
+            );
+        });
+
+        it('says so instead of rendering an empty bubble for a post with nothing to show', () => {
+            const host = create(buildMessage({ status: 'plaintext', text: '', attachments: [] }));
+            expect(host.querySelector('.empty-post')?.textContent).toContain('no text or attachment');
+        });
+
+        it('shows no placeholder for a post that has text', () => {
+            const host = create(buildMessage({ status: 'plaintext', text: 'hello' }));
+            expect(host.querySelector('.empty-post')).toBeNull();
+        });
+    });
+
+    describe('media bubbles', () => {
+        const image = (extra: Partial<MessageAttachment> = {}) =>
+            buildAttachment({ kind: 'image', content_type: 'image/png', ...extra });
+
+        it('a plain picture is the bubble: no padding or background, time overlaid on it', () => {
+            const host = create(buildMessage({ status: 'ok', text: '', attachments: [image()] }));
+            document.body.appendChild(host);
+            const bubble = host.querySelector('.bubble') as HTMLElement;
+            expect(bubble.classList.contains('is-media-only')).toBeTrue();
+            const style = getComputedStyle(bubble);
+            expect(style.paddingTop).toBe('0px');
+            expect(style.backgroundColor).toBe('rgba(0, 0, 0, 0)');
+            expect(host.querySelector('.media-time')?.textContent).toContain(fixture.componentInstance.time());
+            expect(getComputedStyle(host.querySelector('.meta .time') as HTMLElement).display).toBe('none');
+            host.remove();
+        });
+
+        it('a captioned picture runs edge to edge on top and keeps the bubble colour for the caption strip', () => {
+            const host = create(buildMessage({ status: 'ok', text: 'look at this', attachments: [image()] }));
+            document.body.appendChild(host);
+            const bubble = host.querySelector('.bubble') as HTMLElement;
+            expect(bubble.classList.contains('is-media-captioned')).toBeTrue();
+            expect(getComputedStyle(bubble).paddingLeft).toBe('0px');
+            expect(host.querySelector('.media-time')).toBeNull();
+            const text = host.querySelector('.text') as HTMLElement;
+            expect(parseFloat(getComputedStyle(text).paddingLeft)).toBeGreaterThan(0);
+            const media = (host.querySelector('.attachments') as HTMLElement).getBoundingClientRect();
+            expect(media.top).toBeLessThanOrEqual(text.getBoundingClientRect().top);
+            host.remove();
+        });
+
+        it('keeps the ordinary padded bubble for text, files and voice', () => {
+            for (const attachments of [[], [buildAttachment({ kind: 'file' })], [buildAttachment({ kind: 'audio' })]]) {
+                const host = create(
+                    buildMessage({ status: 'ok', text: attachments.length ? '' : 'hello', attachments })
+                );
+                const bubble = host.querySelector('.bubble') as HTMLElement;
+                expect(bubble.classList.contains('is-media-only')).toBeFalse();
+                expect(bubble.classList.contains('is-media-captioned')).toBeFalse();
+            }
+        });
+
+        it('reserves the picture box when the size is known', () => {
+            const host = create(
+                buildMessage({ status: 'ok', text: '', attachments: [image({ width: 800, height: 400 })] })
+            );
+            expect((host.querySelector('.media-tile') as HTMLElement).style.aspectRatio).toContain('800 / 400');
+        });
+    });
+
     describe('avatar alignment', () => {
         it('shares a row with the bubble and lines its bottom edge up with the bubble, at any font scale', () => {
             (TestBed.inject(DirectoryService).isMe as jasmine.Spy).and.returnValue(false);

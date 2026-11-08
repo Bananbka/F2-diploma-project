@@ -12,7 +12,7 @@ import {
     input,
     signal,
 } from '@angular/core';
-import { Router, RouterLink } from '@angular/router';
+import { Router } from '@angular/router';
 import {
     ArrowLeft,
     Bell,
@@ -56,6 +56,7 @@ import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
 import { ConfirmRequest, ConfirmService } from '../../../shared/ui/confirm-dialog/confirm.service';
 import { ContextMenuDirective, ContextMenuProvider } from '../../../shared/ui/context-menu/context-menu.directive';
 import { ContextMenuEntry } from '../../../shared/ui/context-menu/context-menu.model';
+import { SelectComponent, SelectOption } from '../../../shared/ui/select/select.component';
 import { avatarKindFor, DELETED_USER_LABEL, safetyNumberGroups } from '../../../shared/utils/display';
 import { ExportDialogComponent } from '../export-dialog/export-dialog.component';
 import { SafetyNumberComponent } from '../safety-number/safety-number.component';
@@ -95,11 +96,11 @@ export interface MemberRow {
 @Component({
     selector: 'app-chat-info',
     imports: [
-        RouterLink,
         SafetyNumberComponent,
         LucideAngularModule,
         AvatarComponent,
         NgTemplateOutlet,
+        SelectComponent,
         DatePipe,
         ExportDialogComponent,
         ContextMenuDirective,
@@ -418,6 +419,20 @@ export class ChatInfoComponent {
     readonly activeInviteLinks = computed(() => this.inviteLinks().filter((l) => l.is_active));
 
     /** A couple of presets rather than a raw date/number input — this is a rare, low-stakes action. */
+    readonly expiryOptions: readonly SelectOption[] = [
+        { value: 'none', label: 'Never' },
+        { value: '1d', label: 'In 1 day' },
+        { value: '7d', label: 'In 7 days' },
+    ];
+    readonly usesOptions: readonly SelectOption[] = [
+        { value: 'none', label: 'No limit' },
+        { value: '1', label: '1 use' },
+        { value: '10', label: '10 uses' },
+    ];
+    readonly roleOptions: readonly SelectOption[] = [
+        { value: 'admin', label: 'Admin' },
+        { value: 'member', label: 'Member' },
+    ];
     readonly expiryPreset = signal<'none' | '1d' | '7d'>('none');
     readonly maxUsesPreset = signal<'none' | '1' | '10'>('none');
 

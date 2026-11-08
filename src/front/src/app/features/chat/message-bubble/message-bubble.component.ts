@@ -194,6 +194,10 @@ const STATUS_VIEWS: Record<DecryptStatus, StatusView> = {
         // Addressable so a reply quote can scroll to the message it quotes.
         '[attr.id]': '"msg-" + message().id',
         '[class.is-outgoing]': 'isOwn()',
+        // Broadcast feeds (channels) put every post on the left, mine included.
+        '[class.is-broadcast]': 'broadcast()',
+        '[class.is-media-only]': 'mediaLayout() === "only"',
+        '[class.is-leading]': '!isOwn() || broadcast()',
         '[attr.data-delivery]': 'delivery()',
         // An attribute rather than a `[class]` string: a class-map binding competes with the
         // `[class.is-outgoing]` binding for the same property, and the tone styles need both to be
@@ -211,6 +215,8 @@ export class MessageBubbleComponent {
     readonly message = input.required<DecryptedMessage>();
     /** Groups and channels label each sender; a two-party chat does not need to. */
     readonly showSender = input(true);
+    /** A channel: every post is left-aligned like an incoming message, whoever wrote it. */
+    readonly broadcast = input(false);
     readonly canDelete = input(false);
     /**
      * Where an outgoing message is in its journey.
@@ -259,6 +265,15 @@ export class MessageBubbleComponent {
      * An edit re-seals the content under a fresh chain index, which means composing new ciphertext —
      * impossible for a message we could not open, and meaningless for a channel post or a legacy one.
      */
+    /** A post with neither text nor anything to show must say so rather than render an empty bubble. */
+    readonly isEmptyPost = computed(
+        () =>
+            this.contentKind() === 'text' &&
+            this.message().text === '' &&
+            this.message().attachments.length === 0 &&
+            this.message().status !== 'no_key'
+    );
+
     readonly canEdit = computed(() => this.isOwn() && this.message().status === 'ok' && this.contentKind() === 'text');
 
     /** What the sealed payload is. A message we could not open has no payload, so it reads as text. */
@@ -306,6 +321,28 @@ export class MessageBubbleComponent {
         const status = this.message().status;
         return status === 'ok' || status === 'plaintext';
     });
+
+    /**
+     * How a message made only of pictures or video is drawn: `only` (no caption) makes the media the
+     * bubble itself, with the time overlaid; `captioned` puts the media edge to edge on top, with the
+     * bubble colour kept for the caption strip. Anything else keeps the ordinary padded bubble.
+     */
+    readonly mediaLayout = computed<'none' | 'only' | 'captioned'>(() => {
+        const message = this.message();
+        if (!this.canRenderMedia() || this.isStickerOnly() || this.contentKind() !== 'text') {
+            return 'none';
+        }
+        const files = message.attachments;
+        if (!files.length || !files.every((f) => f.kind === 'image' || f.kind === 'video' || f.kind === 'gif')) {
+            return 'none';
+        }
+        return message.text ? 'captioned' : 'only';
+    });
+
+    /** Reserve the media's box before it loads, when the sender told us its size. */
+    aspectOf(file: { width?: number | null; height?: number | null }): string | null {
+        return file.width && file.height ? `${file.width} / ${file.height}` : null;
+    }
 
     /** A sticker is a bare image with no bubble chrome — only when it is the *entire* message. */
     readonly isStickerOnly = computed(() => {

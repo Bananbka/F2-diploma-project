@@ -56,8 +56,10 @@ import { DismissOnEscapeDirective } from '../../../shared/ui/dismiss/dismiss-on-
 import { avatarKindFor, DELETED_USER_LABEL } from '../../../shared/utils/display';
 import { ChatBackgroundComponent } from '../chat-background/chat-background.component';
 import { ComposedMessage, ComposerComponent } from '../composer/composer.component';
+import { InfoDialogService } from '../info-dialog/info-dialog.service';
 import { MessageBubbleComponent, MessageMenuRequest } from '../message-bubble/message-bubble.component';
 import { StickerPackViewerService } from '../stickers/sticker-pack-dialog/sticker-pack-viewer';
+import { TrustDialogService } from '../trust-dialog/trust-dialog.service';
 import { StickToBottom } from './stick-to-bottom';
 
 /**
@@ -202,6 +204,8 @@ export class ChatViewComponent {
     readonly showChannelNotice = this.isChannel;
 
     private readonly appearance = inject(AppearanceStore);
+    private readonly infoDialog = inject(InfoDialogService);
+    private readonly trustDialog = inject(TrustDialogService);
     /** The picture behind the messages, only while the image background is the selected kind. */
     readonly backgroundImage = computed(() => {
         const background = this.appearance.value().background;
@@ -719,17 +723,25 @@ export class ChatViewComponent {
 
     /**
      * The chat-info entry points (header identity, member-verification banner) open the side panel
-     * on its chat-info view. The standalone `/chats/:id/info` route still exists for deep links.
+     * on its chat-info view. The `/chats/:id/info` deep link opens the same thing as a dialog.
      */
     openProfile(): void {
         this.panel.showProfile();
+    }
+
+    /** Group or channel: the encryption status, never one member's safety number. */
+    openGroupTrust(): void {
+        const chat = this.chat();
+        if (chat) {
+            this.trustDialog.open(chat.id);
+        }
     }
 
     async openSafetyNumber(): Promise<void> {
         const chat = this.chat();
         const peer = this.peerId();
         if (chat && peer) {
-            await this.router.navigate(['/chats', chat.id, 'safety', peer]);
+            this.infoDialog.openSafety(chat.id, peer);
         }
     }
 

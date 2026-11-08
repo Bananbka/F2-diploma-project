@@ -59,3 +59,17 @@
         <app-create-channel />
     }
 }
+
+@if (infoDialog.chatId(); as infoChatId) {
+    <app-info-dialog
+        [chatId]="infoChatId"
+        (closed)="infoDialog.close()"
+    />
+}
+
+@if (trustDialog.chatId(); as trustChatId) {
+    <app-trust-dialog
+        [chatId]="trustChatId"
+        (closed)="trustDialog.close()"
+    />
+}

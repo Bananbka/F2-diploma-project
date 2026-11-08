@@ -5,7 +5,7 @@
     padding: 0.375rem 1rem;
 }
 
-:host(.is-outgoing) {
+:host(.is-outgoing:not(.is-broadcast)) {
     justify-content: flex-end;
 }
 
@@ -96,7 +96,7 @@
     --who-offset: calc(2rem * var(--chat-font-scale, 1) + 0.625rem);
 }
 
-:host(:not(.is-outgoing)) .stack > :not(.bubble-row) {
+:host(.is-leading) .stack > :not(.bubble-row) {
     margin-left: var(--who-offset);
 }
 
@@ -107,7 +107,7 @@
     min-width: 0;
 }
 
-:host(.is-outgoing) .stack {
+:host(.is-outgoing:not(.is-broadcast)) .stack {
     align-items: flex-end;
 }
 
@@ -566,22 +566,22 @@
     line-height: 1;
 }
 
-:host(.is-outgoing) .meta {
+:host(.is-outgoing:not(.is-broadcast)) .meta {
     flex-direction: row-reverse;
 }
 
 /* Incoming: the row hugs the left edge of the column and reads [react][time][actions]. The two buttons
    hold their space at all times (hover only changes opacity), so the time never shifts. */
-:host(:not(.is-outgoing)) .meta {
+:host(.is-leading) .meta {
     justify-content: flex-start;
     margin-left: 0;
 }
 
-:host(:not(.is-outgoing)) .meta .reaction-add-wrap {
+:host(.is-leading) .meta .reaction-add-wrap {
     order: -1;
 }
 
-:host(:not(.is-outgoing)) .meta .action {
+:host(.is-leading) .meta .action {
     order: 1;
 }
 
@@ -685,7 +685,7 @@
     margin: 0.25rem 0.25rem 0;
 }
 
-:host(.is-outgoing) .reactions {
+:host(.is-outgoing:not(.is-broadcast)) .reactions {
     justify-content: flex-end;
 }
 
@@ -696,7 +696,7 @@
 
 /* Incoming rows read left to right, so the control goes first; outgoing rows are reversed, where
    its place after the actions button already puts it on the far left. */
-:host(:not(.is-outgoing)) .reaction-add-wrap {
+:host(.is-leading) .reaction-add-wrap {
     order: -1;
 }
 
@@ -773,4 +773,70 @@
         font-style: normal;
         font-weight: 500;
     }
+}
+
+/* ── Media bubbles ────────────────────────────────────────────────────────────────────────────
+   A message of only pictures or video: no padding around the media. Without a caption the picture is
+   the bubble (the time overlays it); with one, the media runs edge to edge on top and the caption sits
+   in the bubble-coloured strip below. */
+
+.bubble.is-media-only,
+.bubble.is-media-captioned {
+    padding: 0;
+    gap: 0;
+    overflow: hidden;
+
+    .content {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        width: 100%;
+    }
+
+    .attachments {
+        order: -1;
+        gap: 0.125rem;
+        margin: 0;
+    }
+
+    .media-tile {
+        max-width: 18rem;
+        border-radius: 0;
+    }
+}
+
+.bubble.is-media-only {
+    background: transparent;
+    border: none;
+}
+
+.bubble.is-media-captioned .text {
+    padding: 0.625rem 1rem;
+}
+
+.media-time {
+    position: absolute;
+    right: 0.5rem;
+    bottom: 0.5rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.125rem 0.5rem;
+    background: rgb(0 0 0 / 50%);
+    backdrop-filter: blur(6px);
+    border-radius: 999px;
+    color: #fff;
+    font-size: calc(0.6875rem * var(--chat-font-scale, 1));
+    line-height: 1.4;
+}
+
+.media-tick {
+    width: 0.875rem;
+    height: 0.875rem;
+}
+
+/* The time already sits on the picture, so the footer keeps only its buttons. */
+:host(.is-media-only) .meta .time,
+:host(.is-media-only) .meta .receipt {
+    display: none;
 }

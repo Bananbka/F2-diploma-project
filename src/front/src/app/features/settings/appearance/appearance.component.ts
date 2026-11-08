@@ -21,6 +21,7 @@ import { AppearanceStore } from '../../../core/services/appearance-store.service
 import { BackgroundImageService } from '../../../core/services/background-image.service';
 import { ColorPickerComponent } from '../../../shared/ui/color-picker/color-picker.component';
 import { ConfirmService } from '../../../shared/ui/confirm-dialog/confirm.service';
+import { SelectComponent, SelectOption } from '../../../shared/ui/select/select.component';
 import { ChatBackgroundComponent } from '../../chat/chat-background/chat-background.component';
 import { ReactionChipComponent } from '../../chat/reaction-chip/reaction-chip.component';
 import { BackgroundEditorComponent } from './background-editor/background-editor.component';
@@ -36,7 +37,13 @@ const DEFAULT_BG_PICKER = '#0a0a0c';
  */
 @Component({
     selector: 'app-appearance',
-    imports: [ColorPickerComponent, ChatBackgroundComponent, BackgroundEditorComponent, ReactionChipComponent],
+    imports: [
+        SelectComponent,
+        ColorPickerComponent,
+        ChatBackgroundComponent,
+        BackgroundEditorComponent,
+        ReactionChipComponent,
+    ],
     templateUrl: './appearance.component.html',
     styleUrl: './appearance.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
@@ -150,7 +157,12 @@ export class AppearanceComponent {
     readonly min = FONT_SIZE_MIN;
     readonly max = FONT_SIZE_MAX;
     readonly families = FONT_FAMILIES.map((id) => ({ id, label: FONT_LABELS[id], stack: FONT_STACKS[id] }));
+    readonly fontOptions: readonly SelectOption[] = FONT_FAMILIES.map((id) => ({ value: id, label: FONT_LABELS[id] }));
     readonly bubbleSwatches = BUBBLE_SWATCHES;
+
+    fontStack(id: string): string {
+        return FONT_STACKS[id as AppearanceFontFamily];
+    }
     readonly backgroundSwatches = BACKGROUND_SWATCHES;
     readonly gradients = GRADIENT_PRESETS.map((id) => ({ id, css: GRADIENT_CSS[id] }));
 

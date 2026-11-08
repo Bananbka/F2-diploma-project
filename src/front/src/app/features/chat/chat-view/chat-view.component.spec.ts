@@ -463,3 +463,24 @@ describe('ChatViewComponent', () => {
         });
     });
 });
+
+describe('ChatViewComponent empty state on a custom background', () => {
+    it('draws the words in a backing card with colours from the chat variables', () => {
+        TestBed.configureTestingModule({
+            providers: [provideRouter([]), provideHttpClient(), provideHttpClientTesting()],
+        });
+        const fixture = TestBed.createComponent(ChatViewComponent);
+        fixture.detectChanges();
+        const host = fixture.nativeElement as HTMLElement;
+        document.body.appendChild(host);
+        const card = host.querySelector('.placeholder-card') as HTMLElement;
+        const title = host.querySelector('.placeholder-title') as HTMLElement;
+        expect(card).not.toBeNull();
+        expect(getComputedStyle(card).backgroundColor).toBe('rgba(0, 0, 0, 0)');
+        host.style.setProperty('--chat-overlay-bg', 'rgb(1 2 3 / 62%)');
+        host.style.setProperty('--chat-meta-accent', 'rgb(250 250 250)');
+        expect(getComputedStyle(card).backgroundColor).toContain('1, 2, 3');
+        expect(getComputedStyle(title).color).toBe('rgb(250, 250, 250)');
+        host.remove();
+    });
+});

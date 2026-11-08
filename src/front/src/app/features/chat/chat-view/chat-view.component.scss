@@ -358,7 +358,7 @@
 
 .status {
     margin: 0.5rem 0;
-    color: var(--muted-foreground);
+    color: var(--chat-meta-fg, var(--muted-foreground));
     font-size: 0.75rem;
     text-align: center;
 }
@@ -404,7 +404,7 @@
 .divider-rule {
     flex: 1;
     height: 1px;
-    background: var(--border);
+    background: var(--chat-chip-border, var(--border));
 }
 
 .divider-pill {
@@ -412,10 +412,11 @@
     align-items: center;
     gap: 0.375rem;
     padding: 0.375rem 0.75rem;
-    background: rgb(37 37 45 / 40%);
-    border: 1px solid var(--border);
+    background: var(--chat-overlay-bg, rgb(37 37 45 / 40%));
+    backdrop-filter: var(--chat-overlay-blur, none);
+    border: 1px solid var(--chat-chip-border, var(--border));
     border-radius: 999px;
-    color: var(--muted-foreground);
+    color: var(--chat-meta-fg, var(--muted-foreground));
     font-size: 0.6875rem;
     text-align: center;
 
@@ -774,25 +775,38 @@
     gap: 0.5rem;
     padding: 2rem;
     text-align: center;
+}
+
+/* The words sit on the chat background, so over a custom one they get a translucent backing and
+   colours derived from it; with the default background none of these variables exist. */
+.placeholder-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 1.25rem 1.5rem;
+    background: var(--chat-overlay-bg, transparent);
+    border-radius: var(--radius-2xl);
+    backdrop-filter: var(--chat-overlay-blur, none);
 
     lucide-icon {
         width: 2.5rem;
         height: 2.5rem;
         margin-bottom: 0.5rem;
-        color: var(--muted);
+        color: var(--chat-meta-fg, var(--muted));
     }
 }
 
 .placeholder-title {
     margin: 0;
-    color: var(--foreground);
+    color: var(--chat-meta-accent, var(--foreground));
     font-size: 0.9375rem;
     font-weight: 500;
 }
 
 .placeholder-note {
     margin: 0;
-    color: var(--muted-foreground);
+    color: var(--chat-meta-fg, var(--muted-foreground));
     font-size: 0.8125rem;
 }
 

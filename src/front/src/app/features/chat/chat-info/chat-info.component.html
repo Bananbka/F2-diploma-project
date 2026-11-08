@@ -175,22 +175,20 @@
                         }
 
                         @if (canChangeRole(member)) {
-                            <label class="tile role-tile">
+                            <div class="tile role-tile">
                                 <span class="tile-icon"><lucide-icon [img]="userPlusIcon" /></span>
                                 <span class="tile-text">
                                     <span class="tile-title">Role</span>
                                 </span>
-                                <select
+                                <app-select
                                     class="member-role"
+                                    [options]="roleOptions"
                                     [disabled]="busy()"
-                                    [attr.aria-label]="'Role for ' + member.name"
+                                    [label]="'Role for ' + member.name"
                                     [value]="member.role"
-                                    (change)="setRole(member.userId, $any($event.target).value)"
-                                >
-                                    <option value="admin">Admin</option>
-                                    <option value="member">Member</option>
-                                </select>
-                            </label>
+                                    (valueChange)="setRole(member.userId, $any($event))"
+                                />
+                            </div>
                         }
 
                         @if (canTransferTo(member)) {
@@ -355,10 +353,11 @@
                                     </ul>
                                 }
 
-                                @if (peerId()) {
-                                    <a
+                                @if (peerId() && peer()) {
+                                    <button
+                                        type="button"
                                         class="tile"
-                                        [routerLink]="['/chats', chat()!.id, 'safety', peerId()!]"
+                                        (click)="openSafety(peer()!)"
                                     >
                                         <span class="tile-icon">
                                             <lucide-icon [img]="shieldIcon" />
@@ -377,7 +376,7 @@
                                             [img]="chevronRightIcon"
                                             class="tile-chevron"
                                         />
-                                    </a>
+                                    </button>
                                 }
 
                                 @if (peer(); as other) {
@@ -582,33 +581,37 @@
                                 <p class="section">Invite link</p>
 
                                 <div class="invite-create">
-                                    <label class="invite-field">
-                                        <span>Expires</span>
-                                        <select
+                                    <div class="invite-field">
+                                        <span
+                                            class="invite-label"
+                                            id="invite-expiry-label"
+                                            >Expires</span
+                                        >
+                                        <app-select
+                                            [options]="expiryOptions"
                                             [value]="expiryPreset()"
                                             [disabled]="inviteBusy()"
-                                            (change)="expiryPreset.set($any($event.target).value)"
+                                            label="Expires"
+                                            (valueChange)="expiryPreset.set($any($event))"
+                                        />
+                                    </div>
+                                    <div class="invite-field">
+                                        <span
+                                            class="invite-label"
+                                            id="invite-uses-label"
+                                            >Uses</span
                                         >
-                                            <option value="none">Never</option>
-                                            <option value="1d">In 1 day</option>
-                                            <option value="7d">In 7 days</option>
-                                        </select>
-                                    </label>
-                                    <label class="invite-field">
-                                        <span>Uses</span>
-                                        <select
+                                        <app-select
+                                            [options]="usesOptions"
                                             [value]="maxUsesPreset()"
                                             [disabled]="inviteBusy()"
-                                            (change)="maxUsesPreset.set($any($event.target).value)"
-                                        >
-                                            <option value="none">No limit</option>
-                                            <option value="1">1 use</option>
-                                            <option value="10">10 uses</option>
-                                        </select>
-                                    </label>
+                                            label="Uses"
+                                            (valueChange)="maxUsesPreset.set($any($event))"
+                                        />
+                                    </div>
                                     <button
                                         type="button"
-                                        class="section-action invite-generate"
+                                        class="invite-generate"
                                         [disabled]="inviteBusy()"
                                         (click)="createInviteLink()"
                                     >
@@ -692,8 +695,9 @@
                                         }
                                     </ul>
                                 } @else {
-                                    <p class="muted small">
-                                        No active invite links. Generate one to invite people by link.
+                                    <p class="invite-empty">
+                                        <lucide-icon [img]="linkIcon" />
+                                        No active invite links yet
                                     </p>
                                 }
                             </section>

@@ -68,7 +68,7 @@
     <!-- The avatar and the bubble share one row, so the avatar follows the bubble (its bottom edge)
          and not the sender line above it or the time and reactions below. -->
     <div class="bubble-row">
-        @if (!isOwn()) {
+        @if (!isOwn() || broadcast()) {
             <app-avatar
                 class="who"
                 size="sm"
@@ -82,6 +82,8 @@
         <div
             class="bubble"
             [class.is-sticker-only]="isStickerOnly()"
+            [class.is-media-only]="mediaLayout() === 'only'"
+            [class.is-media-captioned]="mediaLayout() === 'captioned'"
         >
             @if (view().icon; as statusIcon) {
                 <lucide-icon
@@ -129,6 +131,10 @@
                     <p class="detail">{{ view().detail }}</p>
                 }
 
+                @if (isEmptyPost()) {
+                    <p class="text is-placeholder empty-post">This post has no text or attachment to show.</p>
+                }
+
                 <!-- Fetched through the API rather than from the URL the upload returned: the message
                  bucket is private, so only an authorised request can read it. Media kinds are
                  decrypted client-side before rendering; only a message we actually opened
@@ -140,6 +146,7 @@
                                 @case ('image') {
                                     <li
                                         class="media-tile"
+                                        [style.aspect-ratio]="aspectOf(file)"
                                         appVisibleOnce
                                         (visible)="onMediaVisible(file)"
                                     >
@@ -166,6 +173,7 @@
                                 @case ('gif') {
                                     <li
                                         class="media-tile"
+                                        [style.aspect-ratio]="aspectOf(file)"
                                         appVisibleOnce
                                         (visible)="onMediaVisible(file)"
                                     >
@@ -303,6 +311,20 @@
                             }
                         }
                     </ul>
+                }
+
+                @if (mediaLayout() === 'only') {
+                    <!-- The picture is the bubble, so the time sits on it in a small dark pill that reads over any image. -->
+                    <span class="media-time">
+                        {{ time() }}
+                        @if (isOwn()) {
+                            <lucide-icon
+                                class="media-tick"
+                                [img]="deliveryIcon()"
+                                [title]="deliveryTitle()"
+                            />
+                        }
+                    </span>
                 }
             </div>
         </div>

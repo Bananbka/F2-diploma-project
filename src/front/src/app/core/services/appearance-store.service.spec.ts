@@ -107,6 +107,31 @@ describe('AppearanceStore', () => {
         expect(toast.error).toHaveBeenCalled();
     });
 
+    describe('hidden views', () => {
+        it('loads an old cached document without hidden_views as an empty list', () => {
+            localStorage.setItem(
+                APPEARANCE_CACHE_KEY,
+                JSON.stringify({ ...DEFAULT_APPEARANCE, hidden_views: undefined })
+            );
+            expect(create().value().hidden_views).toEqual([]);
+        });
+
+        it('drops unknown and duplicate ids from a stored document', () => {
+            localStorage.setItem(
+                APPEARANCE_CACHE_KEY,
+                JSON.stringify({ ...DEFAULT_APPEARANCE, hidden_views: ['unread', 'unread', 'bogus', 'contacts'] })
+            );
+            expect(create().value().hidden_views).toEqual(['unread', 'contacts']);
+        });
+
+        it('persists a hidden view through the debounced save', fakeAsync(() => {
+            const store = create();
+            store.update({ hidden_views: ['unread'] });
+            tick(APPEARANCE_PERSIST_DELAY_MS);
+            expect(api.put).toHaveBeenCalledWith(jasmine.objectContaining({ hidden_views: ['unread'] }));
+        }));
+    });
+
     describe('background image and shape', () => {
         const file = (type: string, size = 10) => new File([new Uint8Array(size)], 'bg', { type });
 

@@ -3,7 +3,9 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
 import { of } from 'rxjs';
 
+import { HiddenViewId } from '../../../core/models/appearance.model';
 import { UserProfile } from '../../../core/models/chat.model';
+import { AppearanceStore } from '../../../core/services/appearance-store.service';
 import { AuthApiService } from '../../../core/services/auth-api.service';
 import { ChatStoreService } from '../../../core/services/chat-store.service';
 import { CryptoApiService } from '../../../core/services/crypto-api.service';
@@ -45,6 +47,7 @@ describe('NavigationRailComponent avatar', () => {
 
     beforeEach(async () => {
         folders.set([]);
+        localStorage.removeItem('appearance.v1');
         authApi = jasmine.createSpyObj<AuthApiService>('AuthApiService', ['me']);
         authApi.me.and.returnValue(of(ME));
         const keyStore = jasmine.createSpyObj<KeyStoreService>('KeyStoreService', ['lock']);
@@ -120,6 +123,79 @@ describe('NavigationRailComponent avatar', () => {
             fixture.detectChanges();
             expect(button('Contacts').getAttribute('aria-current')).toBe('page');
             expect(button('All chats').getAttribute('aria-current')).toBeNull();
+        });
+
+        describe('hiding built-in views', () => {
+            let appearance: AppearanceStore;
+            let settings: SettingsService;
+
+            beforeEach(async () => {
+                localStorage.removeItem('appearance.v1');
+                await session.restore();
+                appearance = TestBed.inject(AppearanceStore);
+                // The debounced save would reach for HTTP; these specs are about what the rail does.
+                spyOn(appearance as unknown as { flush: () => Promise<void> }, 'flush').and.resolveTo();
+                settings = TestBed.inject(SettingsService);
+                spyOn(settings, 'open');
+                fixture.detectChanges();
+            });
+
+            const hide = (...ids: HiddenViewId[]) => {
+                appearance.update({ hidden_views: ids });
+                fixture.detectChanges();
+            };
+            const labels = () =>
+                Array.from(root().querySelectorAll('nav .tabs > button, nav > button')).map((b) =>
+                    b.getAttribute('aria-label')
+                );
+
+            it('does not render a hidden view, and Contacts can be hidden too', () => {
+                hide('unread', 'contacts');
+                expect(button('Unread')).toBeNull();
+                expect(button('Contacts')).toBeNull();
+                expect(button('All chats')).not.toBeNull();
+                expect(labels().length).toBeGreaterThan(0);
+            });
+
+            it('Hide from sidebar writes hidden_views through the store', () => {
+                const entries = fixture.componentInstance.defaultViewMenu({ id: 'unread' })() as {
+                    label: string;
+                    action?: () => void;
+                }[];
+                const hideEntry = entries.find((e) => e.label === 'Hide from sidebar')!;
+                hideEntry.action!();
+                expect(appearance.value().hidden_views).toEqual(['unread']);
+            });
+
+            it('offers Manage folders…, which opens Settings on the Folders tab', () => {
+                const entries = fixture.componentInstance.defaultViewMenu({ id: 'all' })() as {
+                    label: string;
+                    action?: () => void;
+                }[];
+                entries.find((e) => e.label === 'Manage folders…')!.action!();
+                expect(settings.open).toHaveBeenCalledWith('folders');
+            });
+
+            it('disables Hide for the last visible chat view, with a reason, and does not hide it', () => {
+                hide('direct', 'groups', 'channels', 'unread');
+                const entries = fixture.componentInstance.defaultViewMenu({ id: 'all' })() as {
+                    label: string;
+                    disabled?: boolean;
+                    disabledReason?: string;
+                    action?: () => void;
+                }[];
+                const hideEntry = entries.find((e) => e.label === 'Hide from sidebar')!;
+                expect(hideEntry.disabled).toBeTrue();
+                expect(hideEntry.disabledReason).toContain('At least one chat view');
+                hideEntry.action!();
+                expect(appearance.value().hidden_views).not.toContain('all');
+            });
+
+            it('the folder menu also offers Manage folders…', () => {
+                const folder: Folder = { id: 'f1', title: 'Work', icon: null, items: [] };
+                const entries = fixture.componentInstance.folderMenu(folder)() as { label?: string }[];
+                expect(entries.some((e) => e.label === 'Manage folders…')).toBeTrue();
+            });
         });
 
         it('emits the chosen view, for system views and folders alike', async () => {

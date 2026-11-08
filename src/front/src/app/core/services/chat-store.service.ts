@@ -852,6 +852,12 @@ export class ChatStoreService {
         if (content && chat.chat_type === 'channel') {
             return;
         }
+        // Nor a key for an attachment: files are encrypted for the chat, and a channel has no envelope
+        // to hold the key. Sending the post anyway would publish an empty message, so refuse out loud.
+        if (attachments?.length && chat.chat_type === 'channel') {
+            this.realtimeError.set('Channels cannot carry attachments yet.');
+            return;
+        }
 
         const localId = `local-${uuidv4()}`;
         this.pending.update((p) => [

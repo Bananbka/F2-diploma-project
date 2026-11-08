@@ -15,6 +15,7 @@
             [attr.aria-current]="view() === item.key && !contactsActive() ? 'page' : null"
             [attr.aria-label]="labelFor(item)"
             [title]="item.label"
+            [appContextMenu]="defaultViewMenu({ id: item.viewId! })"
             (click)="select(item.key)"
         >
             <lucide-icon [img]="item.icon!" />
@@ -28,17 +29,20 @@
         </button>
     }
 
-    <button
-        type="button"
-        class="rail-button"
-        [class.is-active]="contactsActive()"
-        [attr.aria-current]="contactsActive() ? 'page' : null"
-        aria-label="Contacts"
-        title="Contacts"
-        (click)="contactsRequested.emit()"
-    >
-        <lucide-icon [img]="contactsIcon" />
-    </button>
+    @if (!contactsHidden()) {
+        <button
+            type="button"
+            class="rail-button"
+            [class.is-active]="contactsActive()"
+            [attr.aria-current]="contactsActive() ? 'page' : null"
+            aria-label="Contacts"
+            title="Contacts"
+            [appContextMenu]="defaultViewMenu(contactsView)"
+            (click)="contactsRequested.emit()"
+        >
+            <lucide-icon [img]="contactsIcon" />
+        </button>
+    }
 
     <hr
         class="divider"

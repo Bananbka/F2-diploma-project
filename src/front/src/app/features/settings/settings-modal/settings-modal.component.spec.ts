@@ -6,6 +6,7 @@ import { SessionService } from '../../../core/services/session.service';
 import { ConfirmService } from '../../../shared/ui/confirm-dialog/confirm.service';
 import { StickerPackManagerComponent } from '../../chat/stickers/sticker-pack-manager/sticker-pack-manager.component';
 import { AppearanceComponent } from '../appearance/appearance.component';
+import { FoldersSettingsComponent } from '../folders/folders-settings.component';
 import { PrivacyComponent } from '../privacy/privacy.component';
 import { ProfileComponent } from '../profile/profile.component';
 import { SecurityComponent } from '../security/security.component';
@@ -45,6 +46,13 @@ class StubPrivacyComponent {}
 })
 class StubAppearanceComponent {}
 
+@Component({
+    selector: 'app-folders-settings',
+    template: '<p id="stub-folders">folders</p>',
+    changeDetection: ChangeDetectionStrategy.OnPush,
+})
+class StubFoldersComponent {}
+
 describe('SettingsModalComponent', () => {
     let fixture: ComponentFixture<SettingsModalComponent>;
     let root: HTMLElement;
@@ -83,6 +91,7 @@ describe('SettingsModalComponent', () => {
                     SecurityComponent,
                     StickerPackManagerComponent,
                     AppearanceComponent,
+                    FoldersSettingsComponent,
                     PrivacyComponent,
                 ],
             },
@@ -92,6 +101,7 @@ describe('SettingsModalComponent', () => {
                     StubSecurityComponent,
                     StubStickersComponent,
                     StubAppearanceComponent,
+                    StubFoldersComponent,
                     StubPrivacyComponent,
                 ],
             },
@@ -127,6 +137,7 @@ describe('SettingsModalComponent', () => {
             'Security',
             'Stickers',
             'Appearance',
+            'Folders',
             'Privacy & data',
         ]);
     });
@@ -144,7 +155,7 @@ describe('SettingsModalComponent', () => {
     });
 
     it('shows the matching section for each tab', async () => {
-        const expected = ['profile', 'security', 'stickers', 'appearance', 'privacy'];
+        const expected = ['profile', 'security', 'stickers', 'appearance', 'folders', 'privacy'];
         for (let i = 0; i < tabs().length; i++) {
             tabs()[i].click();
             await fixture.whenStable();
@@ -164,13 +175,13 @@ describe('SettingsModalComponent', () => {
 
         key(tabs()[1], { key: 'ArrowUp' });
         key(tabs()[0], { key: 'ArrowUp' });
-        expect(document.activeElement).toBe(tabs()[4]);
+        expect(document.activeElement).toBe(tabs()[tabs().length - 1]);
 
-        key(tabs()[4], { key: 'Home' });
+        key(tabs()[tabs().length - 1], { key: 'Home' });
         expect(document.activeElement).toBe(tabs()[0]);
         key(tabs()[0], { key: 'End' });
-        expect(document.activeElement).toBe(tabs()[4]);
-        key(tabs()[4], { key: 'ArrowRight' });
+        expect(document.activeElement).toBe(tabs()[tabs().length - 1]);
+        key(tabs()[tabs().length - 1], { key: 'ArrowRight' });
         expect(document.activeElement).toBe(tabs()[0]);
     });
 
