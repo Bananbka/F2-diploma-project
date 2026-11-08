@@ -52,8 +52,9 @@ import { TwemojiPipe } from '../../../shared/emoji/twemoji.pipe';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
 import { ContextMenuEntry, MenuSource } from '../../../shared/ui/context-menu/context-menu.model';
 import { messageTime } from '../../../shared/utils/display';
+import { resolveImageType, typeMayBeTransparent } from '../../../shared/utils/image-meta';
 import { LocationCardComponent } from '../location-card/location-card.component';
-import { canHaveAlpha, MediaViewerService } from '../media-viewer/media-viewer.service';
+import { MediaViewerService } from '../media-viewer/media-viewer.service';
 import { PollCardComponent } from '../poll-card/poll-card.component';
 import { ReactionChipComponent } from '../reaction-chip/reaction-chip.component';
 import { ReactionPickerComponent } from '../reaction-picker/reaction-picker.component';
@@ -63,6 +64,8 @@ type MediaStatus = 'idle' | 'decrypting' | 'ready' | 'error';
 
 interface MediaEntry {
     status: MediaStatus;
+    /** What the decrypted bytes really are (sniffed), which beats the declared type of an encrypted upload. */
+    mime?: string;
     /** `URL.createObjectURL` on the decrypted plaintext — revoked on removal/destroy. */
     objectUrl?: string;
 }
@@ -362,8 +365,9 @@ export class MessageBubbleComponent {
     }
 
     /** PNG, WebP and GIF can have transparent pixels, which show on a white backing rather than the bubble. */
-    hasAlpha(file: { content_type: string }): boolean {
-        return canHaveAlpha(file.content_type);
+    hasAlpha(file: { url: string; name: string; content_type: string }): boolean {
+        const entry = this.mediaState().get(file.url);
+        return typeMayBeTransparent(entry?.mime ?? resolveImageType(file.content_type, file.name));
     }
 
     openMedia(file: MessageAttachment, event?: Event): void {
@@ -460,7 +464,7 @@ export class MessageBubbleComponent {
                         messageId: message.id,
                         objectUrl,
                         name: file.name,
-                        contentType: file.content_type,
+                        contentType: this.mediaState().get(file.url)?.mime ?? file.content_type,
                         kind: file.kind,
                         sender,
                         time,
@@ -781,10 +785,11 @@ export class MessageBubbleComponent {
 
             const ciphertext = await this.attachmentBatch.fetch(this.message().chatId, file.url);
             const plaintext = await decryptAttachment(new Uint8Array(ciphertext), file.decryptionKey);
-            const blob = new Blob([plaintext as BufferSource], { type: file.content_type });
+            const mime = resolveImageType(file.content_type, file.name, plaintext) ?? undefined;
+            const blob = new Blob([plaintext as BufferSource], { type: mime ?? file.content_type });
             const objectUrl = URL.createObjectURL(blob);
 
-            this.mediaState.update((current) => new Map(current).set(file.url, { status: 'ready', objectUrl }));
+            this.mediaState.update((current) => new Map(current).set(file.url, { status: 'ready', objectUrl, mime }));
         } catch {
             this.mediaState.update((current) => new Map(current).set(file.url, { status: 'error' }));
         }

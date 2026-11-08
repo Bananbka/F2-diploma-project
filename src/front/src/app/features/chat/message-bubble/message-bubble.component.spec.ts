@@ -366,6 +366,51 @@ describe('MessageBubbleComponent', () => {
         });
     });
 
+    describe('transparent picture with an unhelpful declared type', () => {
+        it('gets the white backing from the file name or the decrypted bytes, and the bubble stays transparent', () => {
+            // What an encrypted upload is recorded as by the server: no hint about the picture inside.
+            const file = buildAttachment({
+                kind: 'image',
+                content_type: 'application/octet-stream',
+                name: 'circle.png',
+            });
+            const host = create(buildMessage({ status: 'ok', text: '', attachments: [file] }));
+            document.body.appendChild(host);
+            fixture.componentInstance.mediaState.set(
+                new Map([[file.url, { status: 'ready' as const, objectUrl: 'blob:x' }]])
+            );
+            fixture.detectChanges();
+            const tile = host.querySelector('.media-tile') as HTMLElement;
+            expect(tile.classList.contains('has-alpha')).toBeTrue();
+            expect(getComputedStyle(tile).backgroundColor).toBe('rgb(255, 255, 255)');
+            const bubble = host.querySelector('.bubble') as HTMLElement;
+            expect(bubble.classList.contains('is-media-only')).toBeTrue();
+            expect(getComputedStyle(bubble).backgroundColor).toBe('rgba(0, 0, 0, 0)');
+            expect(getComputedStyle(bubble).paddingLeft).toBe('0px');
+            host.remove();
+        });
+
+        it('uses the sniffed type when the name gives nothing away', () => {
+            const file = buildAttachment({ kind: 'image', content_type: 'application/octet-stream', name: 'blob' });
+            const host = create(buildMessage({ status: 'ok', text: '', attachments: [file] }));
+            fixture.componentInstance.mediaState.set(
+                new Map([[file.url, { status: 'ready' as const, objectUrl: 'blob:x', mime: 'image/png' }]])
+            );
+            fixture.detectChanges();
+            expect(host.querySelector('.media-tile')?.classList.contains('has-alpha')).toBeTrue();
+        });
+
+        it('keeps JPEG on the plain tile', () => {
+            const file = buildAttachment({
+                kind: 'image',
+                content_type: 'application/octet-stream',
+                name: 'photo.jpg',
+            });
+            const host = create(buildMessage({ status: 'ok', text: '', attachments: [file] }));
+            expect(host.querySelector('.media-tile')?.classList.contains('has-alpha')).toBeFalse();
+        });
+    });
+
     describe('opening the viewer', () => {
         it('a decrypted picture is a labelled button that opens the viewer on click and Enter', () => {
             const host = create(

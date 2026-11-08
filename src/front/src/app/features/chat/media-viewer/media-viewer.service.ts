@@ -1,5 +1,7 @@
 import { computed, Injectable, signal } from '@angular/core';
 
+import { typeMayBeTransparent } from '../../../shared/utils/image-meta';
+
 export interface ViewerItem {
     /** The attachment url: unique per file, and what a bubble registers and unregisters it under. */
     key: string;
@@ -19,7 +21,7 @@ interface Entry extends ViewerItem {
 
 /** Content types that can have transparent pixels, so they get a white backing. */
 export function canHaveAlpha(contentType: string): boolean {
-    return /^image\/(png|webp|gif)$/i.test(contentType);
+    return typeMayBeTransparent(contentType);
 }
 
 /**
