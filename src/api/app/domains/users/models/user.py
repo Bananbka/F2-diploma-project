@@ -1,6 +1,6 @@
 ﻿import uuid
 
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy import String, Text, Boolean, DateTime, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -27,6 +27,9 @@ class User(Base):
 
     bio: Mapped[str | None] = mapped_column(Text, nullable=True)
     avatar_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Per-user chat appearance (see appearance_schemas.Appearance). NULL means all defaults.
+    chat_appearance: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     # Set when the account is deleted. The row stays as a tombstone, so keys, distributions and

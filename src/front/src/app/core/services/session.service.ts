@@ -3,6 +3,7 @@ import { Router } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
 
 import { UserProfile } from '../models/chat.model';
+import { AppearanceStore } from './appearance-store.service';
 import { AuthApiService, RegisterRequest, RewrappedIdentity } from './auth-api.service';
 import { CryptoApiService } from './crypto-api.service';
 import { KeyStoreService, UnlockStageReporter } from './key-store.service';
@@ -49,6 +50,7 @@ export class SessionService {
     private readonly keyStore = inject(KeyStoreService);
     private readonly messages = inject(MessageService);
     private readonly ws = inject(WebSocketService);
+    private readonly appearance = inject(AppearanceStore);
     private readonly profileApi = inject(ProfileApiService);
     private readonly router = inject(Router);
 
@@ -171,6 +173,7 @@ export class SessionService {
         this.ws.disconnect();
         await this.keyStore.lock();
         this.messages.forgetOpened();
+        this.appearance.clear();
         this.user.set(null);
         void this.router.navigate(['/login']);
     }
@@ -205,6 +208,7 @@ export class SessionService {
         this.ws.disconnect();
         await this.keyStore.lock();
         this.messages.forgetOpened();
+        this.appearance.clear();
         this.user.set(null);
     }
 
@@ -274,6 +278,7 @@ export class SessionService {
         await this.keyStore.lock();
         this.keyStore.forgetDeviceId();
         this.messages.forgetOpened();
+        this.appearance.clear();
         this.user.set(null);
     }
 
@@ -287,6 +292,7 @@ export class SessionService {
             this.ws.disconnect();
             await this.keyStore.lock();
             this.messages.forgetOpened();
+            this.appearance.clear();
             this.user.set(null);
         }
     }

@@ -7,6 +7,7 @@
     role="dialog"
     aria-modal="true"
     aria-label="Create poll"
+    (appDismissOnEscape)="closed.emit()"
 >
     <div class="head">
         <h2>Create poll</h2>
@@ -30,10 +31,11 @@
     }
 
     <label class="field">
-        <span>Question</span>
+        <span class="required">Question</span>
         <div class="emoji-input-wrap">
             <input
                 #questionField
+                aria-required="true"
                 type="text"
                 class="input"
                 [attr.maxlength]="questionMax"
@@ -45,12 +47,13 @@
     </label>
 
     <div class="field">
-        <span>Options</span>
+        <span class="required">Options</span>
         @for (option of options(); track $index) {
             <div class="option-row">
                 <div class="emoji-input-wrap">
                     <input
                         #optionField
+                        aria-required="true"
                         type="text"
                         class="input"
                         [attr.maxlength]="optionMax"

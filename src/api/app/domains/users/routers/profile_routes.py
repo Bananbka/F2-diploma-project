@@ -14,6 +14,7 @@ from app.core.responses import SuccessResponse
 from app.core.security import delete_token_cookies, revocation_cutoff, verify_password_async
 from app.domains.users.dependencies import get_current_user
 from app.domains.users.models import User
+from app.domains.users.schemas.appearance_schemas import Appearance, AppearanceResponse
 from app.domains.users.schemas.profile_schemas import ProfileRequestSchema
 from app.domains.users.schemas.user_schemas import AccountDeleteRequest, UserResponse
 from app.domains.users.routers.auth_routes import (
@@ -41,6 +42,56 @@ router = APIRouter(prefix="/profile", tags=["Profile"])
 @router.get("/me", response_model=SuccessResponse[UserResponse])
 async def get_me(current_user: User = Depends(get_current_user)):
     return SuccessResponse(data=current_user)
+
+
+APPEARANCE_PER_USER = 60
+APPEARANCE_WINDOW = 60
+
+
+def _appearance_of(user: User) -> AppearanceResponse:
+    if not user.chat_appearance:
+        return AppearanceResponse()
+    try:
+        return AppearanceResponse.model_validate(user.chat_appearance)
+    except ValueError:
+        # A stored document that no longer satisfies the schema must not break the client.
+        return AppearanceResponse()
+
+
+@router.get("/me/appearance", response_model=SuccessResponse[AppearanceResponse])
+async def get_appearance(user: User = Depends(get_current_user)):
+    return SuccessResponse(data=_appearance_of(user))
+
+
+@router.put("/me/appearance", response_model=SuccessResponse[AppearanceResponse])
+async def put_appearance(
+    data_in: Appearance,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+):
+    await enforce_rate_limit(
+        redis,
+        scope="appearance",
+        identifier=str(user.id),
+        limit=APPEARANCE_PER_USER,
+        window_seconds=APPEARANCE_WINDOW,
+    )
+    user.chat_appearance = data_in.model_dump(mode="json")
+    await db.commit()
+    await db.refresh(user)
+    return SuccessResponse(data=_appearance_of(user))
+
+
+@router.delete("/me/appearance", response_model=SuccessResponse[AppearanceResponse])
+async def reset_appearance(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    user.chat_appearance = None
+    await db.commit()
+    await db.refresh(user)
+    return SuccessResponse(data=AppearanceResponse())
 
 
 @router.patch("/me", response_model=SuccessResponse[UserResponse])

@@ -4,6 +4,7 @@ import { AbstractControl, FormBuilder, ReactiveFormsModule, Validators } from '@
 import { Eye, EyeOff, LucideAngularModule, ShieldCheck } from 'lucide-angular';
 
 import { SessionService } from '../../../core/services/session.service';
+import { formSnapshot } from '../../../shared/forms/form-signal';
 import { applyServerErrors, errorTextFor } from '../../../shared/forms/server-errors';
 import { SettingsService } from '../settings.service';
 
@@ -31,7 +32,9 @@ export class ChangePasswordComponent {
         confirm: ['', Validators.required],
     });
 
-    readonly passwordsMatch = computed(() => this.form.controls.confirm.value === this.form.controls.newPassword.value);
+    private readonly snapshot = formSnapshot(this.form);
+
+    readonly passwordsMatch = computed(() => this.snapshot().value.confirm === this.snapshot().value.newPassword);
 
     readonly eyeIcon = Eye;
     readonly eyeOffIcon = EyeOff;

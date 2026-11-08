@@ -70,10 +70,15 @@
             </div>
 
             <div class="field">
-                <label for="deletePassword">Enter your password to confirm</label>
+                <label
+                    for="deletePassword"
+                    class="required"
+                    >Enter your password to confirm</label
+                >
                 <input
                     #passwordInput
                     id="deletePassword"
+                    aria-required="true"
                     type="password"
                     autocomplete="current-password"
                     [formControl]="deletePassword"

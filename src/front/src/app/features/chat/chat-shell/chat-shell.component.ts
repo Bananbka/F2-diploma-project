@@ -11,6 +11,8 @@ import {
 import { Router, RouterOutlet } from '@angular/router';
 import { LucideAngularModule, WifiOff } from 'lucide-angular';
 
+import { appearanceVars } from '../../../core/services/appearance-css';
+import { AppearanceStore } from '../../../core/services/appearance-store.service';
 import { ChatPanelStoreService } from '../../../core/services/chat-panel-store.service';
 import { ChatStoreService } from '../../../core/services/chat-store.service';
 import { DirectoryService } from '../../../core/services/directory.service';
@@ -45,8 +47,14 @@ const NARROW_QUERY = '(width < 48rem)';
     templateUrl: './chat-shell.component.html',
     styleUrl: './chat-shell.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
+    host: { '[style]': 'appearanceStyle()' },
 })
 export class ChatShellComponent {
+    private readonly appearance = inject(AppearanceStore);
+
+    /** The user's chat appearance as custom properties scoped to the chat, not to the whole page. */
+    readonly appearanceStyle = computed(() => appearanceVars(this.appearance.value()));
+
     private readonly store = inject(ChatStoreService);
     private readonly directory = inject(DirectoryService);
     private readonly session = inject(SessionService);
@@ -104,6 +112,7 @@ export class ChatShellComponent {
             }
         });
 
+        void this.appearance.load();
         this.store.bindRealtime();
         void this.store.loadChats();
         void this.directory.warm();

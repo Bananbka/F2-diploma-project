@@ -114,8 +114,9 @@
                     [title]="category.label"
                     [attr.aria-label]="category.label"
                     (click)="jumpTo('' + i)"
-                    [innerHTML]="category.emoji[0] | twemoji"
-                ></button>
+                >
+                    <lucide-icon [img]="categoryIcons[i]" />
+                </button>
             }
         </div>
     </div>
@@ -137,9 +138,11 @@
                     [class.is-active]="activeCategory() === i"
                     [attr.aria-selected]="activeCategory() === i"
                     [title]="category.label"
+                    [attr.aria-label]="category.label"
                     (click)="selectCategory(i)"
-                    [innerHTML]="category.emoji[0] | twemoji"
-                ></button>
+                >
+                    <lucide-icon [img]="categoryIcons[i]" />
+                </button>
             }
         </div>
 

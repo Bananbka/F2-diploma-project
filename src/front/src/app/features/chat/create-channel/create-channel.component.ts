@@ -16,6 +16,7 @@ import { UserSearchResult } from '../../../core/models/chat.model';
 import { ChatApiService } from '../../../core/services/chat-api.service';
 import { ChatStoreService } from '../../../core/services/chat-store.service';
 import { DirectoryService } from '../../../core/services/directory.service';
+import { formSnapshot } from '../../../shared/forms/form-signal';
 import { applyServerErrors, errorTextFor } from '../../../shared/forms/server-errors';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
 import { EmojiButtonComponent } from '../../../shared/ui/emoji-field/emoji-button.component';
@@ -55,8 +56,11 @@ export class CreateChannelComponent {
         description: [''],
     });
 
-    readonly slug = computed(() => this.form.controls.title.value.trim().toLowerCase().replace(/\s+/g, '-'));
-    readonly canCreate = computed(() => this.form.valid && !this.submitting());
+    private readonly snapshot = formSnapshot(this.form);
+
+    readonly slug = computed(() => this.snapshot().value.title.trim().toLowerCase().replace(/\s+/g, '-'));
+    readonly titleMissing = computed(() => this.snapshot().value.title.trim().length === 0);
+    readonly canCreate = computed(() => this.snapshot().valid && !this.submitting());
 
     titleError(): string | null {
         return errorTextFor(this.form.controls.title, {

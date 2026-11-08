@@ -80,6 +80,38 @@ describe('MessageBubbleComponent', () => {
         }).compileComponents();
     });
 
+    describe('appearance custom properties', () => {
+        it('uses --bubble-own-bg on an outgoing bubble', () => {
+            (TestBed.inject(DirectoryService).isMe as jasmine.Spy).and.returnValue(true);
+            const host = create(buildMessage());
+            host.style.setProperty('--bubble-own-bg', '#123456');
+            host.style.setProperty('--bubble-own-fg', '#ffffff');
+
+            const style = getComputedStyle(host.querySelector('.bubble') as HTMLElement);
+            expect(style.backgroundColor).toBe('rgb(18, 52, 86)');
+        });
+
+        it('uses --bubble-other-bg on an incoming bubble and falls back without it', () => {
+            const host = create(buildMessage());
+            const bubble = host.querySelector('.bubble') as HTMLElement;
+            const before = getComputedStyle(bubble).backgroundColor;
+
+            host.style.setProperty('--bubble-other-bg', '#654321');
+            expect(getComputedStyle(bubble).backgroundColor).toBe('rgb(101, 67, 33)');
+            host.style.removeProperty('--bubble-other-bg');
+            expect(getComputedStyle(bubble).backgroundColor).toBe(before);
+        });
+
+        it('scales message text with --chat-font-scale', () => {
+            const host = create(buildMessage());
+            const text = host.querySelector('.text') as HTMLElement;
+            const base = parseFloat(getComputedStyle(text).fontSize);
+
+            host.style.setProperty('--chat-font-scale', '2');
+            expect(parseFloat(getComputedStyle(text).fontSize)).toBeCloseTo(base * 2, 1);
+        });
+    });
+
     describe('per-status rendering — docs/ui-states.md "Message-level states"', () => {
         it('ok: renders the plaintext with no status icon or warning detail', () => {
             const host = create(buildMessage({ status: 'ok', text: 'hi there' }));

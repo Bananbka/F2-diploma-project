@@ -18,6 +18,7 @@ import { ChatStoreService } from '../../../core/services/chat-store.service';
 import { CryptoApiService } from '../../../core/services/crypto-api.service';
 import { isEncryptionRefused } from '../../../core/services/crypto-errors';
 import { DirectoryService } from '../../../core/services/directory.service';
+import { formSnapshot } from '../../../shared/forms/form-signal';
 import { applyServerErrors, errorTextFor } from '../../../shared/forms/server-errors';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
 import { EmojiButtonComponent } from '../../../shared/ui/emoji-field/emoji-button.component';
@@ -58,7 +59,20 @@ export class CreateGroupComponent {
         description: [''],
     });
 
-    readonly canCreate = computed(() => this.form.valid && this.selected().length > 0 && !this.submitting());
+    private readonly snapshot = formSnapshot(this.form);
+
+    readonly canCreate = computed(() => this.snapshot().valid && this.selected().length > 0 && !this.submitting());
+
+    /** Why the button is disabled, shown beside it so the disabled state is never silent. */
+    readonly blockedReason = computed(() => {
+        if (this.snapshot().value.title.trim().length === 0) {
+            return 'Give the group a name to continue.';
+        }
+        if (!this.snapshot().valid) {
+            return 'Fix the highlighted field to continue.';
+        }
+        return this.selected().length === 0 ? 'Add at least one member to continue.' : null;
+    });
 
     titleError(): string | null {
         return errorTextFor(this.form.controls.title, {

@@ -1,0 +1,216 @@
+<section class="group">
+    <p class="section">Preview</p>
+    <div
+        class="preview"
+        [style]="previewStyle()"
+        role="img"
+        aria-label="Preview of a conversation with your current appearance settings"
+    >
+        <div class="msg">
+            <div class="b other">Hey, are we still on for tonight?</div>
+            <span class="meta">12:41</span>
+        </div>
+        <div class="msg mine">
+            <div class="b own">Yes! See you at eight.</div>
+            <span class="meta">12:42 <span class="react">&#128077; 1</span></span>
+        </div>
+    </div>
+</section>
+
+<section class="group">
+    <p class="section">Text</p>
+
+    <div class="field">
+        <label for="appearance-size">Message text size</label>
+        <div class="stepper">
+            <button
+                type="button"
+                class="step"
+                aria-label="Decrease text size"
+                [disabled]="value().font_size <= min"
+                (click)="stepFontSize(-1)"
+            >
+                &minus;
+            </button>
+            <input
+                id="appearance-size"
+                type="range"
+                [min]="min"
+                [max]="max"
+                step="1"
+                [value]="value().font_size"
+                [attr.aria-valuetext]="value().font_size + ' pixels'"
+                (input)="setFontSize($any($event.target).value)"
+            />
+            <button
+                type="button"
+                class="step"
+                aria-label="Increase text size"
+                [disabled]="value().font_size >= max"
+                (click)="stepFontSize(1)"
+            >
+                +
+            </button>
+            <output
+                class="size-value"
+                for="appearance-size"
+                >{{ value().font_size }} px</output
+            >
+        </div>
+    </div>
+
+    <div class="field">
+        <label for="appearance-font">Font</label>
+        <select
+            id="appearance-font"
+            [value]="value().font_family"
+            (change)="setFontFamily($any($event.target).value)"
+        >
+            @for (f of families; track f.id) {
+                <option
+                    [value]="f.id"
+                    [style.font-family]="f.stack"
+                    [selected]="value().font_family === f.id"
+                >
+                    {{ f.label }}
+                </option>
+            }
+        </select>
+    </div>
+</section>
+
+<section class="group">
+    <p class="section">Bubble colours</p>
+
+    <div
+        class="field"
+        role="group"
+        aria-labelledby="own-label"
+    >
+        <span
+            id="own-label"
+            class="label"
+            >Your messages</span
+        >
+        <div class="swatches">
+            <input
+                type="color"
+                class="picker"
+                aria-label="Your bubble colour"
+                [value]="ownPicker()"
+                (input)="setBubble('own', $any($event.target).value)"
+            />
+            @for (c of bubbleSwatches; track c) {
+                <button
+                    type="button"
+                    class="swatch"
+                    [style.background]="c"
+                    [attr.aria-label]="'Your bubble colour ' + c"
+                    [attr.aria-pressed]="value().own_bubble_color === c"
+                    (click)="setBubble('own', c)"
+                ></button>
+            }
+            <button
+                type="button"
+                class="link"
+                [disabled]="value().own_bubble_color === null"
+                (click)="setBubble('own', null)"
+            >
+                Default
+            </button>
+        </div>
+    </div>
+
+    <div
+        class="field"
+        role="group"
+        aria-labelledby="other-label"
+    >
+        <span
+            id="other-label"
+            class="label"
+            >Their messages</span
+        >
+        <div class="swatches">
+            <input
+                type="color"
+                class="picker"
+                aria-label="Their bubble colour"
+                [value]="otherPicker()"
+                (input)="setBubble('other', $any($event.target).value)"
+            />
+            @for (c of bubbleSwatches; track c) {
+                <button
+                    type="button"
+                    class="swatch"
+                    [style.background]="c"
+                    [attr.aria-label]="'Their bubble colour ' + c"
+                    [attr.aria-pressed]="value().other_bubble_color === c"
+                    (click)="setBubble('other', c)"
+                ></button>
+            }
+            <button
+                type="button"
+                class="link"
+                [disabled]="value().other_bubble_color === null"
+                (click)="setBubble('other', null)"
+            >
+                Default
+            </button>
+        </div>
+    </div>
+</section>
+
+<section class="group">
+    <p class="section">Chat background</p>
+    <div
+        class="swatches"
+        role="group"
+        aria-label="Chat background"
+    >
+        <button
+            type="button"
+            class="swatch is-default"
+            aria-label="Default background"
+            [attr.aria-pressed]="value().background.kind === 'default'"
+            (click)="setBackgroundDefault()"
+        ></button>
+        <input
+            type="color"
+            class="picker"
+            aria-label="Solid background colour"
+            [value]="bgPicker()"
+            (input)="setBackgroundColor($any($event.target).value)"
+        />
+        @for (c of backgroundSwatches; track c) {
+            <button
+                type="button"
+                class="swatch"
+                [style.background]="c"
+                [attr.aria-label]="'Background colour ' + c"
+                [attr.aria-pressed]="value().background.kind === 'color' && value().background.color === c"
+                (click)="setBackgroundColor(c)"
+            ></button>
+        }
+        @for (g of gradients; track g.id) {
+            <button
+                type="button"
+                class="swatch"
+                [style.background]="g.css"
+                [attr.aria-label]="'Gradient ' + g.id"
+                [attr.aria-pressed]="value().background.gradient === g.id"
+                (click)="setBackgroundGradient(g.id)"
+            ></button>
+        }
+    </div>
+</section>
+
+<section class="group">
+    <button
+        type="button"
+        class="reset"
+        (click)="reset()"
+    >
+        Reset to defaults
+    </button>
+</section>

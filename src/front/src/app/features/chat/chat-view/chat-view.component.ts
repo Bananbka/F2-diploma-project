@@ -50,6 +50,8 @@ import { VoiceRecorderService } from '../../../core/services/voice-recorder.serv
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
 import { ContextMenuItem } from '../../../shared/ui/context-menu/context-menu.model';
 import { ContextMenuService } from '../../../shared/ui/context-menu/context-menu.service';
+import { DismissStackService } from '../../../shared/ui/dismiss/dismiss-layer.service';
+import { DismissOnEscapeDirective } from '../../../shared/ui/dismiss/dismiss-on-escape.directive';
 import { avatarKindFor, DELETED_USER_LABEL } from '../../../shared/utils/display';
 import { ComposedMessage, ComposerComponent } from '../composer/composer.component';
 import { MessageBubbleComponent, MessageMenuRequest } from '../message-bubble/message-bubble.component';
@@ -64,7 +66,13 @@ const DRAG_SELECT_THRESHOLD_PX = 8;
 
 @Component({
     selector: 'app-chat-view',
-    imports: [LucideAngularModule, AvatarComponent, MessageBubbleComponent, ComposerComponent],
+    imports: [
+        DismissOnEscapeDirective,
+        LucideAngularModule,
+        AvatarComponent,
+        MessageBubbleComponent,
+        ComposerComponent,
+    ],
     templateUrl: './chat-view.component.html',
     styleUrl: './chat-view.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
@@ -190,6 +198,13 @@ export class ChatViewComponent {
     readonly showChannelNotice = this.isChannel;
 
     private readonly scroller = viewChild<ElementRef<HTMLElement>>('scroller');
+    private readonly dismissStack = inject(DismissStackService);
+    private readonly composerEl = viewChild(ComposerComponent, { read: ElementRef });
+    /**
+     * The composer's last measured height. The selection bar takes its place and is given the same
+     * height, so entering or leaving selection mode does not resize the message list above it.
+     */
+    readonly composerHeight = signal(0);
     /** Whether new rows should pull the view down. False once the user scrolls up to read back. */
     private pinToBottom = true;
     /** Set once the opening scroll has actually landed on the newest message. */
@@ -220,6 +235,24 @@ export class ChatViewComponent {
     }
 
     constructor() {
+        // Escape leaves selection mode (and, being a later layer, a forward picker above it closes first).
+        effect((onCleanup) => {
+            if (this.isSelecting()) {
+                onCleanup(this.dismissStack.push({ close: () => this.cancelSelection() }));
+            }
+        });
+
+        effect((onCleanup) => {
+            const element = this.composerEl()?.nativeElement as HTMLElement | undefined;
+            if (!element || typeof ResizeObserver === 'undefined') {
+                return;
+            }
+            const observer = new ResizeObserver(() => this.composerHeight.set(element.offsetHeight));
+            observer.observe(element);
+            this.composerHeight.set(element.offsetHeight);
+            onCleanup(() => observer.disconnect());
+        });
+
         effect(() => {
             const id = this.chatId() ?? null;
             this.store.activeChatId.set(id);

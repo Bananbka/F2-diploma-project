@@ -174,6 +174,15 @@ describe('ChatViewComponent', () => {
         }).compileComponents();
     });
 
+    describe('appearance custom properties', () => {
+        it('paints the conversation with --chat-bg', () => {
+            const host = create();
+            host.style.setProperty('--chat-bg', '#102030');
+
+            expect(getComputedStyle(host).backgroundColor).toBe('rgb(16, 32, 48)');
+        });
+    });
+
     describe('conversation-level states — docs/ui-states.md', () => {
         it('renders the history-floor divider as a permanent notice, not a loading state', () => {
             store.conversation.set([{ kind: 'history-floor' }]);

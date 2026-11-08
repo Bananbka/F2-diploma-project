@@ -28,11 +28,16 @@
         >
             <div class="fields">
                 <div class="field">
-                    <label for="title">Channel name</label>
+                    <label
+                        for="title"
+                        class="required"
+                        >Channel name</label
+                    >
                     <div class="emoji-input-wrap">
                         <input
                             #titleField
                             id="title"
+                            aria-required="true"
                             type="text"
                             placeholder="announcements"
                             formControlName="title"
@@ -160,9 +165,19 @@
                 </p>
             }
 
+            @if (titleMissing()) {
+                <p
+                    class="hint"
+                    id="create-channel-reason"
+                >
+                    Give the channel a name to continue.
+                </p>
+            }
+
             <button
                 type="submit"
                 class="submit"
+                [attr.aria-describedby]="titleMissing() ? 'create-channel-reason' : null"
                 [disabled]="!canCreate()"
             >
                 <lucide-icon [img]="hashIcon" />

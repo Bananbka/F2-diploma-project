@@ -8,6 +8,7 @@ import {
     validateLocation,
 } from '../../../core/models/message-payload';
 import { GEOLOCATION_MESSAGES, requestPosition } from '../../../core/services/geolocation';
+import { DismissOnEscapeDirective } from '../../../shared/ui/dismiss/dismiss-on-escape.directive';
 
 type Phase = 'idle' | 'locating' | 'ready' | 'error';
 
@@ -17,7 +18,7 @@ type Phase = 'idle' | 'locating' | 'ready' | 'error';
  */
 @Component({
     selector: 'app-location-dialog',
-    imports: [LucideAngularModule],
+    imports: [DismissOnEscapeDirective, LucideAngularModule],
     templateUrl: './location-dialog.component.html',
     styleUrl: './location-dialog.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,

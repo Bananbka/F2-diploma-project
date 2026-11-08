@@ -6,7 +6,7 @@
     flex-direction: column;
     min-width: 0;
     min-height: 0;
-    background: var(--background);
+    background: var(--chat-bg, var(--background));
 }
 
 /* ── Header ───────────────────────────────────────────────────────────────────────────────── */
@@ -16,7 +16,8 @@
     align-items: center;
     gap: 0.75rem;
     flex-shrink: 0;
-    padding: 0.75rem 1rem;
+    height: 60px;
+    padding: 0 1rem;
     background: var(--card);
     border-bottom: 1px solid var(--border);
 }

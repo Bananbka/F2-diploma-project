@@ -1,0 +1,204 @@
+@use 'ui';
+
+:host {
+    @include ui.screen-page(true);
+}
+
+.group {
+    margin-top: 2rem;
+}
+
+.field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 1rem;
+}
+
+label,
+.label {
+    color: var(--foreground);
+    font-size: 0.8125rem;
+}
+
+.stepper {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+
+    input[type='range'] {
+        flex: 1;
+        accent-color: var(--primary);
+    }
+}
+
+.step {
+    width: 2rem;
+    height: 2rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    color: var(--foreground);
+
+    &:disabled {
+        opacity: 0.4;
+    }
+
+    &:focus-visible {
+        outline: 2px solid var(--primary);
+        outline-offset: 2px;
+    }
+}
+
+.size-value {
+    min-width: 3.5rem;
+    color: var(--muted-foreground);
+    font-size: 0.8125rem;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+}
+
+select {
+    padding: 0.5rem 0.75rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    color: var(--foreground);
+
+    &:focus-visible {
+        outline: 2px solid var(--primary);
+        outline-offset: 2px;
+    }
+}
+
+.swatches {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.picker {
+    width: 2rem;
+    height: 2rem;
+    padding: 0;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    cursor: pointer;
+
+    &:focus-visible {
+        outline: 2px solid var(--primary);
+        outline-offset: 2px;
+    }
+}
+
+.swatch {
+    width: 2rem;
+    height: 2rem;
+    border: 2px solid var(--border);
+    border-radius: 50%;
+    cursor: pointer;
+
+    &[aria-pressed='true'] {
+        border-color: var(--foreground);
+        box-shadow: 0 0 0 2px var(--primary);
+    }
+
+    &:focus-visible {
+        outline: 2px solid var(--primary);
+        outline-offset: 2px;
+    }
+
+    &.is-default {
+        background: var(--background);
+    }
+}
+
+.link {
+    padding: 0.25rem 0.5rem;
+    background: none;
+    border: 0;
+    color: var(--primary);
+    font-size: 0.8125rem;
+
+    &:disabled {
+        color: var(--muted-foreground);
+    }
+
+    &:focus-visible {
+        outline: 2px solid var(--primary);
+        border-radius: var(--radius-sm);
+    }
+}
+
+.reset {
+    padding: 0.5rem 1rem;
+    background: var(--danger-surface);
+    border: 1px solid var(--danger-border);
+    border-radius: var(--radius-lg);
+    color: var(--danger);
+    font-size: 0.8125rem;
+
+    &:focus-visible {
+        outline: 2px solid var(--primary);
+        outline-offset: 2px;
+    }
+}
+
+/* The preview mirrors the message bubble's rules, driven by the same custom properties. */
+.preview {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: 1rem;
+    background: var(--chat-bg, var(--background));
+    border: 1px solid var(--border);
+    border-radius: var(--radius-2xl);
+    font-family: var(--chat-font-family, inherit);
+}
+
+.msg {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.25rem;
+
+    &.mine {
+        align-items: flex-end;
+    }
+}
+
+.b {
+    max-width: 80%;
+    padding: 0.625rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-2xl);
+    font-size: calc(0.875rem * var(--chat-font-scale, 1));
+    line-height: 1.55;
+
+    &.other {
+        background: var(--bubble-other-bg, var(--surface-raised));
+        border-top-left-radius: var(--radius-sm);
+        color: var(--bubble-other-fg, inherit);
+    }
+
+    &.own {
+        background: var(--bubble-own-bg, var(--primary));
+        border-color: transparent;
+        border-top-right-radius: var(--radius-sm);
+        color: var(--bubble-own-fg, #fff);
+    }
+}
+
+.meta {
+    color: var(--muted-foreground);
+    font-size: calc(0.6875rem * var(--chat-font-scale, 1));
+}
+
+.react {
+    margin-left: 0.375rem;
+    padding: 0.0625rem 0.375rem;
+    background: rgb(255 255 255 / 8%);
+    border-radius: 999px;
+}

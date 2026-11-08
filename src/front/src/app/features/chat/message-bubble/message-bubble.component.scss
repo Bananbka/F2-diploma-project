@@ -184,18 +184,20 @@
     align-items: flex-start;
     gap: 0.625rem;
     padding: 0.625rem 1rem;
-    background: var(--surface-raised);
+    background: var(--bubble-other-bg, var(--surface-raised));
     border: 1px solid var(--border);
     border-radius: var(--radius-2xl);
+    color: var(--bubble-other-fg, inherit);
+    font-family: var(--chat-font-family, inherit);
     border-top-left-radius: var(--radius-sm);
 }
 
 :host(.is-outgoing) .bubble {
-    background: var(--primary);
+    background: var(--bubble-own-bg, var(--primary));
     border-color: transparent;
     border-top-left-radius: var(--radius-2xl);
     border-top-right-radius: var(--radius-sm);
-    color: #fff;
+    color: var(--bubble-own-fg, #fff);
 }
 
 .content {
@@ -204,7 +206,7 @@
 
 .text {
     margin: 0;
-    font-size: 0.875rem;
+    font-size: calc(0.875rem * var(--chat-font-scale, 1));
     line-height: 1.55;
     overflow-wrap: anywhere;
     white-space: pre-wrap;
@@ -217,7 +219,7 @@
 
 .detail {
     margin: 0.25rem 0 0;
-    font-size: 0.6875rem;
+    font-size: calc(0.6875rem * var(--chat-font-scale, 1));
     line-height: 1.45;
     opacity: 0.85;
 }

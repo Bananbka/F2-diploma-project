@@ -28,11 +28,16 @@
         >
             <div class="fields">
                 <div class="field">
-                    <label for="title">Group name</label>
+                    <label
+                        for="title"
+                        class="required"
+                        >Group name</label
+                    >
                     <div class="emoji-input-wrap">
                         <input
                             #titleField
                             id="title"
+                            aria-required="true"
                             type="text"
                             placeholder="Dev Team"
                             formControlName="title"
@@ -146,9 +151,19 @@
                 </p>
             }
 
+            @if (blockedReason(); as reason) {
+                <p
+                    class="hint"
+                    id="create-group-reason"
+                >
+                    {{ reason }}
+                </p>
+            }
+
             <button
                 type="submit"
                 class="submit"
+                [attr.aria-describedby]="blockedReason() ? 'create-group-reason' : null"
                 [disabled]="!canCreate()"
             >
                 <lucide-icon [img]="usersIcon" />

@@ -5,6 +5,7 @@ import { Router, RouterLink } from '@angular/router';
 import { ArrowLeft, Eye, EyeOff, LucideAngularModule, ShieldAlert } from 'lucide-angular';
 
 import { SessionService } from '../../../core/services/session.service';
+import { formSnapshot } from '../../../shared/forms/form-signal';
 import { applyServerErrors, errorTextFor } from '../../../shared/forms/server-errors';
 
 /**
@@ -45,7 +46,9 @@ export class ResetPasswordComponent {
 
     readonly acknowledged = signal('');
 
-    readonly passwordsMatch = computed(() => this.form.controls.confirm.value === this.form.controls.newPassword.value);
+    private readonly snapshot = formSnapshot(this.form);
+
+    readonly passwordsMatch = computed(() => this.snapshot().value.confirm === this.snapshot().value.newPassword);
 
     readonly canSubmit = computed(
         () => this.acknowledged().trim().toUpperCase() === ACKNOWLEDGEMENT && !this.submitting()

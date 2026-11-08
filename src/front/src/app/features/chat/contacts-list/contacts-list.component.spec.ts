@@ -67,6 +67,11 @@ describe('ContactsListComponent', () => {
 
     const names = () => Array.from(host.querySelectorAll('.name')).map((el) => el.textContent?.trim());
 
+    it('has a 60px header row aligned with the conversation header and no title', () => {
+        expect(host.querySelector('h2')).toBeNull();
+        expect(host.querySelector<HTMLElement>('.head')!.getBoundingClientRect().height).toBe(60);
+    });
+
     it('lists contacts by alias or name, sorted, with the username', () => {
         expect(names()).toEqual(['Bob Brown', 'Countess']);
         expect(host.textContent).toContain('@ada');

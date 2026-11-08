@@ -9,7 +9,21 @@ import {
     output,
     signal,
 } from '@angular/core';
-import { Clock, LucideAngularModule, Search, X } from 'lucide-angular';
+import {
+    Car,
+    Clock,
+    Flag,
+    Hand,
+    Lightbulb,
+    LucideAngularModule,
+    PawPrint,
+    Search,
+    Shapes,
+    Smile,
+    Trophy,
+    Utensils,
+    X,
+} from 'lucide-angular';
 
 import { TwemojiPipe } from '../../emoji/twemoji.pipe';
 import { ContextMenuDirective, ContextMenuProvider } from '../context-menu/context-menu.directive';
@@ -83,6 +97,8 @@ export class EmojiPickerComponent {
     readonly toneSample = computed(() => this.shown('\u{1F44B}'));
     readonly toneLabel = computed(() => TONE_LABELS[this.tone()]);
 
+    /** One icon per entry of `EMOJI_CATEGORIES`, same order: the standard Unicode group order. */
+    readonly categoryIcons = [Smile, Hand, PawPrint, Utensils, Car, Trophy, Lightbulb, Shapes, Flag] as const;
     readonly searchIcon = Search;
     readonly recentIcon = Clock;
 
@@ -120,15 +136,17 @@ export class EmojiPickerComponent {
         };
         const onKeyDown = (event: KeyboardEvent): void => {
             if (event.key === 'Escape' && !this.embedded()) {
+                // Capture phase + stop: Escape dismisses this popover only, never a dialog around it.
+                event.stopPropagation();
                 this.closeRequested.emit();
             }
         };
 
         document.addEventListener('mousedown', onPointerDown, true);
-        document.addEventListener('keydown', onKeyDown);
+        document.addEventListener('keydown', onKeyDown, true);
         this.destroyRef.onDestroy(() => {
             document.removeEventListener('mousedown', onPointerDown, true);
-            document.removeEventListener('keydown', onKeyDown);
+            document.removeEventListener('keydown', onKeyDown, true);
         });
     }
 

@@ -9,11 +9,12 @@ import {
     signal,
     viewChild,
 } from '@angular/core';
-import { Lock, LucideAngularModule, ShieldCheck, Sticker, User, X } from 'lucide-angular';
+import { Lock, LucideAngularModule, Palette, ShieldCheck, Sticker, User, X } from 'lucide-angular';
 
 import { SessionService } from '../../../core/services/session.service';
 import { trapTab } from '../../../shared/ui/focus-trap';
 import { StickerPackManagerComponent } from '../../chat/stickers/sticker-pack-manager/sticker-pack-manager.component';
+import { AppearanceComponent } from '../appearance/appearance.component';
 import { PrivacyComponent } from '../privacy/privacy.component';
 import { ProfileComponent } from '../profile/profile.component';
 import { SecurityComponent } from '../security/security.component';
@@ -22,7 +23,13 @@ import { SETTINGS_TABS, SettingsService, SettingsTab } from '../settings.service
 /** Matches the full-screen breakpoint in the stylesheet. */
 const NARROW_QUERY = '(width < 48rem)';
 
-const TAB_ICONS = { profile: User, security: ShieldCheck, stickers: Sticker, privacy: Lock } as const;
+const TAB_ICONS = {
+    profile: User,
+    security: ShieldCheck,
+    stickers: Sticker,
+    appearance: Palette,
+    privacy: Lock,
+} as const;
 
 /**
  * The settings dialog: a vertical tab list beside the active tab on wide screens, a scrollable tab
@@ -34,7 +41,14 @@ const TAB_ICONS = { profile: User, security: ShieldCheck, stickers: Sticker, pri
  */
 @Component({
     selector: 'app-settings-modal',
-    imports: [LucideAngularModule, ProfileComponent, SecurityComponent, StickerPackManagerComponent, PrivacyComponent],
+    imports: [
+        LucideAngularModule,
+        ProfileComponent,
+        SecurityComponent,
+        StickerPackManagerComponent,
+        AppearanceComponent,
+        PrivacyComponent,
+    ],
     templateUrl: './settings-modal.component.html',
     styleUrl: './settings-modal.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,

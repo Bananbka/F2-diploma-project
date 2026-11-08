@@ -324,7 +324,10 @@
     @if (isSelecting()) {
         <!-- Replaces the composer rather than sitting beside it: while picking messages the only
              actions that make sense are the bulk ones. -->
-        <div class="selection-bar">
+        <div
+            class="selection-bar"
+            [style.min-height.px]="composerHeight() || null"
+        >
             <button
                 type="button"
                 class="selection-cancel"
@@ -410,6 +413,7 @@
             class="picker"
             role="dialog"
             aria-label="Forward to"
+            (appDismissOnEscape)="forwardPickerOpen.set(false)"
         >
             <p class="picker-title">
                 Forward {{ forwardableCount() }} message{{ forwardableCount() === 1 ? '' : 's' }}
