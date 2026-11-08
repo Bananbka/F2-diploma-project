@@ -271,3 +271,21 @@ select {
         outline-offset: -2px;
     }
 }
+
+.image-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+}
+
+.thumb {
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    width: 6rem;
+    aspect-ratio: 16 / 10;
+    background: var(--background);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+}

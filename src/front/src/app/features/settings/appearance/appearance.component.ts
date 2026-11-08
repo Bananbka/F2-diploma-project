@@ -4,8 +4,6 @@ import {
     AppearanceFontFamily,
     AppearanceGradient,
     BACKGROUND_SWATCHES,
-    BackgroundImageFit,
-    BackgroundImageSettings,
     BUBBLE_RADIUS_MAX,
     BUBBLE_RADIUS_MIN,
     BUBBLE_SWATCHES,
@@ -24,6 +22,7 @@ import { BackgroundImageService } from '../../../core/services/background-image.
 import { ColorPickerComponent } from '../../../shared/ui/color-picker/color-picker.component';
 import { ConfirmService } from '../../../shared/ui/confirm-dialog/confirm.service';
 import { ChatBackgroundComponent } from '../../chat/chat-background/chat-background.component';
+import { BackgroundEditorComponent } from './background-editor/background-editor.component';
 
 const DEFAULT_OWN_PICKER = '#a358f9';
 const DEFAULT_OTHER_PICKER = '#1e1e26';
@@ -36,7 +35,7 @@ const DEFAULT_BG_PICKER = '#0a0a0c';
  */
 @Component({
     selector: 'app-appearance',
-    imports: [ColorPickerComponent, ChatBackgroundComponent],
+    imports: [ColorPickerComponent, ChatBackgroundComponent, BackgroundEditorComponent],
     templateUrl: './appearance.component.html',
     styleUrl: './appearance.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
@@ -53,27 +52,8 @@ export class AppearanceComponent {
     readonly radiusMin = BUBBLE_RADIUS_MIN;
     readonly radiusMax = BUBBLE_RADIUS_MAX;
 
-    /** The tuning sliders for the background picture, in display order. */
-    readonly tuning: readonly {
-        key: 'position_x' | 'position_y' | 'zoom' | 'dim' | 'blur';
-        label: string;
-        min: number;
-        max: number;
-        unit: string;
-    }[] = [
-        { key: 'position_x', label: 'Horizontal position', min: 0, max: 100, unit: '%' },
-        { key: 'position_y', label: 'Vertical position', min: 0, max: 100, unit: '%' },
-        { key: 'zoom', label: 'Zoom', min: 100, max: 300, unit: '%' },
-        { key: 'dim', label: 'Dim', min: 0, max: 80, unit: '%' },
-        { key: 'blur', label: 'Blur', min: 0, max: 20, unit: ' px' },
-    ];
-    readonly fits: readonly { id: BackgroundImageFit; label: string }[] = [
-        { id: 'cover', label: 'Cover' },
-        { id: 'contain', label: 'Contain' },
-        { id: 'tile', label: 'Tile' },
-    ];
-
     readonly image = computed(() => this.value().background.image ?? null);
+    readonly editorOpen = signal(false);
     readonly previewImage = computed(() => (this.value().background.kind === 'image' ? this.image() : null));
     readonly hasUploadedImage = computed(() => !!this.value().background_image_version);
     readonly imageError = signal<string | null>(null);
@@ -155,42 +135,14 @@ export class AppearanceComponent {
         this.uploading.set(true);
         try {
             const result = await this.store.uploadBackgroundImage(file);
-            if (!result.ok) {
+            if (result.ok) {
+                // A new picture goes straight to the editor to be fitted.
+                this.editorOpen.set(true);
+            } else {
                 this.imageError.set(result.message);
             }
         } finally {
             this.uploading.set(false);
-        }
-    }
-
-    setFit(fit: BackgroundImageFit): void {
-        this.patchImage({ fit });
-    }
-
-    setTuning(key: 'position_x' | 'position_y' | 'zoom' | 'dim' | 'blur', raw: string, min: number, max: number): void {
-        const n = Math.round(Number(raw));
-        if (Number.isFinite(n)) {
-            this.patchImage({ [key]: Math.min(max, Math.max(min, n)) });
-        }
-    }
-
-    private patchImage(patch: Partial<BackgroundImageSettings>): void {
-        const current = this.image() ?? { ...DEFAULT_BACKGROUND_IMAGE, version: this.value().background_image_version };
-        this.store.update({
-            background: { kind: 'image', color: null, gradient: null, image: { ...current, ...patch } },
-        });
-    }
-
-    async removeImage(): Promise<void> {
-        const ok = await this.confirm.ask({
-            title: 'Remove background image?',
-            message: 'The picture is deleted and the default background is used again.',
-            confirmLabel: 'Remove',
-            danger: true,
-        });
-        if (ok) {
-            this.imageError.set(null);
-            await this.store.removeBackgroundImage();
         }
     }
 

@@ -195,6 +195,38 @@ describe('MessageBubbleComponent', () => {
         });
     });
 
+    describe('bubble corners follow --bubble-radius', () => {
+        for (const own of [false, true]) {
+            it(`${own ? 'own' : 'other'}: every corner is square at radius 0`, () => {
+                (TestBed.inject(DirectoryService).isMe as jasmine.Spy).and.returnValue(own);
+                const host = create(buildMessage());
+                document.body.appendChild(host);
+                host.style.setProperty('--bubble-radius', '0px');
+                const style = getComputedStyle(host.querySelector('.bubble') as HTMLElement);
+                for (const corner of ['TopLeft', 'TopRight', 'BottomLeft', 'BottomRight']) {
+                    expect(
+                        parseFloat(
+                            style.getPropertyValue(
+                                `border-${corner.replace(/([a-z])([A-Z])/, '$1-$2').toLowerCase()}-radius`
+                            )
+                        )
+                    ).toBe(0);
+                }
+                host.remove();
+            });
+        }
+
+        it('keeps the tail corner no larger than the chosen radius', () => {
+            (TestBed.inject(DirectoryService).isMe as jasmine.Spy).and.returnValue(false);
+            const host = create(buildMessage());
+            document.body.appendChild(host);
+            host.style.setProperty('--bubble-radius', '3px');
+            const style = getComputedStyle(host.querySelector('.bubble') as HTMLElement);
+            expect(parseFloat(style.borderTopLeftRadius)).toBeLessThanOrEqual(3);
+            host.remove();
+        });
+    });
+
     describe('avatar alignment', () => {
         it('shares a row with the bubble and lines its bottom edge up with the bubble, at any font scale', () => {
             (TestBed.inject(DirectoryService).isMe as jasmine.Spy).and.returnValue(false);

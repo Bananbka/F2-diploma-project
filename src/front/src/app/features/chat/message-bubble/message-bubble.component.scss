@@ -210,7 +210,7 @@
     --bubble-accent-fg: var(--bubble-other-accent-fg, #fff);
     --bubble-muted: var(--bubble-other-fg-muted, var(--muted-foreground));
     font-family: var(--chat-font-family, inherit);
-    border-top-left-radius: var(--radius-sm);
+    border-top-left-radius: min(var(--radius-sm), var(--bubble-radius, var(--radius-sm)));
 }
 
 :host(.is-outgoing) .bubble {

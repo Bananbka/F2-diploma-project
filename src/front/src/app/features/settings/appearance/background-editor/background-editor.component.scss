@@ -1,0 +1,250 @@
+@use 'ui';
+
+.backdrop {
+    @include ui.modal-backdrop;
+}
+
+.dialog {
+    @include ui.modal-card(53.75rem);
+
+    width: min(53.75rem, calc(100vw - 2rem));
+    max-height: calc(100vh - 2rem);
+    overflow-y: auto;
+    outline: none;
+}
+
+.head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+
+    h2 {
+        margin: 0;
+        font-size: 1rem;
+    }
+}
+
+.close {
+    display: inline-flex;
+    padding: 0.25rem;
+    background: none;
+    border: none;
+    color: var(--muted-foreground);
+
+    lucide-icon {
+        width: 1rem;
+        height: 1rem;
+    }
+}
+
+.body {
+    display: grid;
+    grid-template-columns: minmax(0, 1.6fr) minmax(14rem, 1fr);
+    gap: 1rem;
+    align-items: start;
+
+    @media (max-width: 720px) {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* The frame resembles the real chat area; the background layer and the mock live inside its own stacking context. */
+.frame {
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    aspect-ratio: 16 / 10;
+    background: var(--background);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    font-family: var(--chat-font-family, inherit);
+    cursor: grab;
+    touch-action: none;
+
+    &:active {
+        cursor: grabbing;
+    }
+
+    &:focus-visible {
+        outline: 2px solid var(--primary);
+        outline-offset: 2px;
+    }
+}
+
+.mock {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    gap: 0.625rem;
+    padding: 1rem;
+    pointer-events: none;
+}
+
+.msg {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.25rem;
+
+    &.mine {
+        align-items: flex-end;
+    }
+}
+
+.b {
+    max-width: 80%;
+    padding: 0.5rem 0.875rem;
+    border: 1px solid var(--border);
+    border-radius: var(--bubble-radius, var(--radius-2xl));
+    font-size: calc(0.8125rem * var(--chat-font-scale, 1));
+    line-height: 1.5;
+
+    &.other {
+        background: var(--bubble-other-bg, var(--surface-raised));
+        border-top-left-radius: min(var(--radius-sm), var(--bubble-radius, var(--radius-sm)));
+        color: var(--bubble-other-fg, inherit);
+    }
+
+    &.own {
+        background: var(--bubble-own-bg, var(--primary));
+        border-color: transparent;
+        border-top-right-radius: min(var(--radius-sm), var(--bubble-radius, var(--radius-sm)));
+        color: var(--bubble-own-fg, #fff);
+    }
+}
+
+.meta {
+    color: var(--chat-meta-fg, var(--muted-foreground));
+    font-size: 0.6875rem;
+}
+
+.controls {
+    display: flex;
+    flex-direction: column;
+    gap: 0.625rem;
+    min-width: 0;
+}
+
+.field {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 0.125rem 0.5rem;
+    font-size: 0.8125rem;
+
+    label {
+        color: var(--muted-foreground);
+    }
+
+    input[type='range'] {
+        grid-column: 1 / -1;
+        width: 100%;
+    }
+}
+
+.value {
+    font-variant-numeric: tabular-nums;
+}
+
+.fit {
+    display: inline-flex;
+    align-self: flex-start;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+}
+
+.fit-option {
+    padding: 0.375rem 0.875rem;
+    background: none;
+    border: 0;
+    color: var(--muted-foreground);
+    font-size: 0.8125rem;
+    cursor: pointer;
+
+    &[aria-checked='true'] {
+        background: var(--primary);
+        color: var(--primary-foreground, #fff);
+    }
+
+    &:focus-visible {
+        outline: 2px solid var(--primary);
+        outline-offset: -2px;
+    }
+}
+
+.actions-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.75rem;
+}
+
+.link {
+    padding: 0.125rem 0;
+    background: none;
+    border: 0;
+    color: var(--primary);
+    font-size: 0.8125rem;
+    cursor: pointer;
+
+    &.is-danger {
+        color: var(--danger);
+    }
+
+    &:disabled {
+        color: var(--muted-foreground);
+        cursor: default;
+    }
+
+    &:focus-visible {
+        outline: 2px solid var(--primary);
+        border-radius: var(--radius-sm);
+    }
+}
+
+.file-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.error {
+    margin: 0;
+    color: var(--danger);
+    font-size: 0.8125rem;
+}
+
+.foot {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+}
+
+.btn {
+    padding: 0.5rem 1rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    color: var(--foreground);
+    font-size: 0.875rem;
+    cursor: pointer;
+
+    &.is-primary {
+        background: var(--primary);
+        border-color: transparent;
+        color: var(--primary-foreground, #fff);
+    }
+
+    &:disabled {
+        opacity: 0.5;
+        cursor: default;
+    }
+
+    &:focus-visible {
+        outline: 2px solid var(--primary);
+        outline-offset: 2px;
+    }
+}

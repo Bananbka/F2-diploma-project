@@ -277,24 +277,6 @@
         >
             {{ hasUploadedImage() ? 'Use my image' : 'Upload an image' }}
         </button>
-        @if (hasUploadedImage()) {
-            <button
-                type="button"
-                class="link"
-                [disabled]="uploading()"
-                (click)="imageInput.click()"
-            >
-                Replace image
-            </button>
-            <button
-                type="button"
-                class="link is-danger"
-                [disabled]="uploading()"
-                (click)="removeImage()"
-            >
-                Remove image
-            </button>
-        }
         <span class="hint">JPEG, PNG or WebP, up to 5 MB. You can also drop a file here.</span>
     </div>
     @if (imageError(); as message) {
@@ -306,46 +288,26 @@
         </p>
     }
 
-    @if (value().background.kind === 'image' && image(); as img) {
-        <div
-            class="fit"
-            role="radiogroup"
-            aria-label="Image fit"
-        >
-            @for (f of fits; track f.id) {
-                <button
-                    type="button"
-                    role="radio"
-                    class="fit-option"
-                    [attr.aria-checked]="img.fit === f.id"
-                    (click)="setFit(f.id)"
-                >
-                    {{ f.label }}
-                </button>
-            }
-        </div>
-        @for (t of tuning; track t.key) {
-            <div class="field">
-                <label [for]="'appearance-image-' + t.key">{{ t.label }}</label>
-                <div class="stepper">
-                    <input
-                        [id]="'appearance-image-' + t.key"
-                        type="range"
-                        [min]="t.min"
-                        [max]="t.max"
-                        step="1"
-                        [value]="img[t.key]"
-                        [attr.aria-valuetext]="img[t.key] + t.unit"
-                        (input)="setTuning(t.key, $any($event.target).value, t.min, t.max)"
-                    />
-                    <output
-                        class="size-value"
-                        [attr.for]="'appearance-image-' + t.key"
-                        >{{ img[t.key] }}{{ t.unit }}</output
-                    >
-                </div>
+    @if (value().background.kind === 'image' && image()) {
+        <div class="image-row">
+            <div class="thumb">
+                <app-chat-background
+                    [image]="image()"
+                    [version]="value().background_image_version"
+                />
             </div>
-        }
+            <button
+                type="button"
+                class="link"
+                (click)="editorOpen.set(true)"
+            >
+                Edit image&hellip;
+            </button>
+        </div>
+    }
+
+    @if (editorOpen()) {
+        <app-background-editor (closed)="editorOpen.set(false)" />
     }
 </section>
 

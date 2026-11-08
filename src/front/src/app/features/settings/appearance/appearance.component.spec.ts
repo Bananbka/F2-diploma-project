@@ -98,7 +98,7 @@ describe('AppearanceComponent', () => {
         expect(store.update).toHaveBeenCalledWith({ bubble_radius: 20 });
     });
 
-    describe('background image tuning', () => {
+    describe('background image', () => {
         const image = {
             fit: 'cover',
             position_x: 50,
@@ -118,45 +118,36 @@ describe('AppearanceComponent', () => {
             fixture.detectChanges();
         });
 
-        it('shows the tuning controls only for an image background and emits fit changes', () => {
-            const radios = root.querySelectorAll<HTMLButtonElement>('.fit-option');
-            expect(radios.length).toBe(3);
-            radios[2].click();
-            expect(store.update).toHaveBeenCalledWith({
-                background: jasmine.objectContaining({ kind: 'image', image: { ...image, fit: 'tile' } }),
-            });
+        it('keeps only a thumbnail and an Edit button in the tab, with no tuning sliders', () => {
+            expect(root.querySelector('.thumb')).not.toBeNull();
+            expect(root.querySelector('.fit-option')).toBeNull();
+            expect(root.querySelector('#appearance-image-zoom')).toBeNull();
         });
 
-        it('clamps and emits the sliders', () => {
-            const dim = root.querySelector<HTMLInputElement>('#appearance-image-dim')!;
-            dim.value = '80';
-            dim.dispatchEvent(new Event('input'));
-            expect(store.update).toHaveBeenCalledWith({
-                background: jasmine.objectContaining({ image: { ...image, dim: 80 } }),
-            });
-            const zoom = root.querySelector<HTMLInputElement>('#appearance-image-zoom')!;
-            zoom.value = '250';
-            zoom.dispatchEvent(new Event('input'));
-            expect(store.update).toHaveBeenCalledWith({
-                background: jasmine.objectContaining({ image: { ...image, zoom: 250 } }),
-            });
+        it('opens the editor from the Edit button', () => {
+            expect(document.body.querySelector('app-background-editor')).toBeNull();
+            root.querySelector<HTMLButtonElement>('.image-row .link')!.click();
+            fixture.detectChanges();
+            expect(root.querySelector('app-background-editor')).not.toBeNull();
         });
 
-        it('confirms before removing the image', async () => {
-            const remove = jasmine.createSpy('removeBackgroundImage').and.resolveTo(true);
-            (store as unknown as { removeBackgroundImage: jasmine.Spy }).removeBackgroundImage = remove;
-            await fixture.componentInstance.removeImage();
-            expect(confirm.ask).toHaveBeenCalled();
-            expect(remove).toHaveBeenCalled();
+        it('opens the editor right after a successful upload', async () => {
+            (store as unknown as { uploadBackgroundImage: jasmine.Spy }).uploadBackgroundImage = jasmine
+                .createSpy('upload')
+                .and.resolveTo({ ok: true });
+            await fixture.componentInstance.upload(new File([], 'x.png', { type: 'image/png' }));
+            fixture.detectChanges();
+            expect(root.querySelector('app-background-editor')).not.toBeNull();
         });
 
-        it('shows the upload error', async () => {
+        it('shows the upload error and does not open the editor', async () => {
             (store as unknown as { uploadBackgroundImage: jasmine.Spy }).uploadBackgroundImage = jasmine
                 .createSpy('upload')
                 .and.resolveTo({ ok: false, message: 'Too big.' });
             await fixture.componentInstance.upload(new File([], 'x.png', { type: 'image/png' }));
             fixture.detectChanges();
             expect(root.querySelector('.image-error')?.textContent).toContain('Too big.');
+            expect(root.querySelector('app-background-editor')).toBeNull();
         });
     });
 });
