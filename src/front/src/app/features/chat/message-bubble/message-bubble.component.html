@@ -363,6 +363,7 @@
             <span class="reaction-add-wrap">
                 <button
                     type="button"
+                    #reactTrigger
                     class="reaction-add react-trigger"
                     aria-label="Add a reaction"
                     aria-haspopup="menu"
@@ -373,30 +374,12 @@
                 </button>
 
                 @if (pickerOpen()) {
-                    <div
-                        class="reactions-picker"
-                        role="menu"
-                    >
-                        @for (emoji of quickReactions; track emoji) {
-                            <button
-                                type="button"
-                                role="menuitem"
-                                class="picker-emoji"
-                                (click)="pickReaction(emoji)"
-                                [innerHTML]="emoji | twemoji"
-                            ></button>
-                        }
-                        <input
-                            type="text"
-                            class="picker-custom"
-                            placeholder="Other…"
-                            maxlength="8"
-                            aria-label="Enter a custom emoji reaction"
-                            [value]="customEmoji()"
-                            (input)="customEmoji.set($any($event.target).value)"
-                            (keydown.enter)="submitCustomEmoji()"
-                        />
-                    </div>
+                    <app-reaction-picker
+                        [anchor]="reactTrigger"
+                        [mine]="myReactions()"
+                        (picked)="pickReaction($event)"
+                        (closed)="closePicker()"
+                    />
                 }
             </span>
         }

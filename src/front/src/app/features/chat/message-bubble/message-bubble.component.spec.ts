@@ -5,6 +5,7 @@ import { AttachmentBatchService } from '../../../core/services/attachment-batch.
 import { ChatApiService } from '../../../core/services/chat-api.service';
 import { DirectoryService } from '../../../core/services/directory.service';
 import { DecryptedMessage, DecryptStatus } from '../../../core/services/message.service';
+import { SessionService } from '../../../core/services/session.service';
 import { MessageBubbleComponent } from './message-bubble.component';
 
 const CHAT_ID = 'a0000000-0000-4000-8000-000000000001';
@@ -76,6 +77,7 @@ describe('MessageBubbleComponent', () => {
                 { provide: DirectoryService, useValue: directory },
                 { provide: ChatApiService, useValue: chatApi },
                 { provide: AttachmentBatchService, useValue: attachmentBatch },
+                { provide: SessionService, useValue: { user: () => ({ id: 'me' }) } },
             ],
         }).compileComponents();
     });
@@ -463,7 +465,7 @@ describe('MessageBubbleComponent', () => {
             trigger.click();
             fixture.detectChanges();
 
-            const picker = host.querySelector<HTMLElement>('.reactions-picker')!;
+            const picker = document.body.querySelector<HTMLElement>('.reactions-picker')!;
             picker.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
             fixture.detectChanges();
 

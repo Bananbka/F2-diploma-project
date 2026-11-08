@@ -54,6 +54,7 @@ import { ContextMenuEntry, MenuSource } from '../../../shared/ui/context-menu/co
 import { messageTime } from '../../../shared/utils/display';
 import { LocationCardComponent } from '../location-card/location-card.component';
 import { PollCardComponent } from '../poll-card/poll-card.component';
+import { ReactionPickerComponent } from '../reaction-picker/reaction-picker.component';
 
 /** Where a media attachment is in its own, separate (lazier) decrypt lifecycle. */
 type MediaStatus = 'idle' | 'decrypting' | 'ready' | 'error';
@@ -81,8 +82,6 @@ export interface MessageMenuRequest {
     /** Entries for whatever was under the pointer (a sticker), shown above the message actions. */
     extra?: ContextMenuEntry[];
 }
-
-export const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 
 /** One emoji, grouped, for rendering as a pill. */
 export interface ReactionGroup {
@@ -179,6 +178,7 @@ const STATUS_VIEWS: Record<DecryptStatus, StatusView> = {
         TwemojiPipe,
         PollCardComponent,
         LocationCardComponent,
+        ReactionPickerComponent,
     ],
     templateUrl: './message-bubble.component.html',
     styleUrl: './message-bubble.component.scss',
@@ -459,11 +459,14 @@ export class MessageBubbleComponent {
     readonly smilePlusIcon = SmilePlus;
     readonly pinIcon = Pin;
 
-    readonly quickReactions = QUICK_REACTIONS;
-
     /** Open while picking a reaction from the tray. */
     readonly pickerOpen = signal(false);
-    readonly customEmoji = signal('');
+    /** Emoji I have already reacted with on this message. */
+    readonly myReactions = computed(() =>
+        this.reactionGroups()
+            .filter((g) => g.mine)
+            .map((g) => g.emoji)
+    );
 
     /** Reactions on this message, grouped by emoji so the bubble renders one pill per emoji. */
     readonly reactionGroups = computed<ReactionGroup[]>(() => {
@@ -712,12 +715,10 @@ export class MessageBubbleComponent {
     togglePicker(event: MouseEvent): void {
         event.stopPropagation();
         this.pickerOpen.update((open) => !open);
-        this.customEmoji.set('');
     }
 
     closePicker(): void {
         this.pickerOpen.set(false);
-        this.customEmoji.set('');
     }
 
     /** Clicking a pill toggles it: pick it again to remove your own, or add it if it is not yours. */
@@ -728,19 +729,5 @@ export class MessageBubbleComponent {
     pickReaction(emoji: string): void {
         this.reactionToggled.emit(emoji);
         this.closePicker();
-    }
-
-    submitCustomEmoji(): void {
-        const emoji = this.customEmoji().trim();
-        // Mirrors the server's own check (`validate_emoji`): reject plain text so the request is
-        // not sent only to be rejected, without trying to fully validate Unicode grapheme clusters.
-        if (emoji && !this.isAscii(emoji)) {
-            this.reactionToggled.emit(emoji);
-        }
-        this.closePicker();
-    }
-
-    private isAscii(value: string): boolean {
-        return /^[\x00-\x7F]*$/.test(value);
     }
 }
