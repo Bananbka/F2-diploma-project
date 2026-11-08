@@ -304,29 +304,6 @@
         </div>
     </div>
 
-    <!-- Reactions are plaintext metadata, not sealed content, so they render even for a message we
-         could not decrypt — a reaction says nothing about the content itself. -->
-    @if (reactionGroups().length) {
-        <div class="reactions">
-            @for (group of reactionGroups(); track group.emoji) {
-                <button
-                    type="button"
-                    class="reaction-pill"
-                    [class.is-mine]="group.mine"
-                    [attr.aria-pressed]="group.mine"
-                    [attr.aria-label]="group.emoji + ' reaction, ' + group.count"
-                    (click)="onPillClick(group.emoji)"
-                >
-                    <span
-                        class="reaction-emoji"
-                        [innerHTML]="group.emoji | twemoji"
-                    ></span>
-                    <span class="reaction-count">{{ group.count }}</span>
-                </button>
-            }
-        </div>
-    }
-
     @if (message().isPinned) {
         <p class="pinned-tag">
             <lucide-icon [img]="pinIcon" />
@@ -420,4 +397,27 @@
             </span>
         }
     </div>
+
+    <!-- Reactions are plaintext metadata, not sealed content, so they render even for a message we
+         could not decrypt — a reaction says nothing about the content itself. -->
+    @if (reactionGroups().length) {
+        <div class="reactions">
+            @for (group of reactionGroups(); track group.emoji) {
+                <button
+                    type="button"
+                    class="reaction-pill"
+                    [class.is-mine]="group.mine"
+                    [attr.aria-pressed]="group.mine"
+                    [attr.aria-label]="group.emoji + ' reaction, ' + group.count"
+                    (click)="onPillClick(group.emoji)"
+                >
+                    <span
+                        class="reaction-emoji"
+                        [innerHTML]="group.emoji | twemoji"
+                    ></span>
+                    <span class="reaction-count">{{ group.count }}</span>
+                </button>
+            }
+        </div>
+    }
 </div>

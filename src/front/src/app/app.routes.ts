@@ -1,6 +1,7 @@
 import { Routes } from '@angular/router';
 
 import { authGuard, guestGuard, unlockGuard } from './core/guards/session.guards';
+import { createDialogDeepLinkGuard } from './features/chat/create-dialog.service';
 import { settingsDeepLinkGuard } from './features/settings/settings.guard';
 
 export const routes: Routes = [
@@ -65,16 +66,19 @@ export const routes: Routes = [
             ),
     },
     {
-        path: 'new/group',
+        // Dialogs over the chat shell, not pages: the guard opens the dialog and keeps the user on the
+        // shell (see `createDialogDeepLinkGuard`). Nested so `authGuard` runs first.
+        path: '',
         canActivate: [authGuard],
-        loadComponent: () =>
-            import('./features/chat/create-group/create-group.component').then((m) => m.CreateGroupComponent),
-    },
-    {
-        path: 'new/channel',
-        canActivate: [authGuard],
-        loadComponent: () =>
-            import('./features/chat/create-channel/create-channel.component').then((m) => m.CreateChannelComponent),
+        children: [
+            { path: 'new/group', canActivate: [createDialogDeepLinkGuard], data: { kind: 'group' }, children: [] },
+            {
+                path: 'new/channel',
+                canActivate: [createDialogDeepLinkGuard],
+                data: { kind: 'channel' },
+                children: [],
+            },
+        ],
     },
     {
         path: 'chats/:chatId/info',

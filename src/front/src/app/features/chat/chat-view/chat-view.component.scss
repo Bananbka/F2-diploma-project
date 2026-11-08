@@ -444,6 +444,25 @@
     padding: 0.75rem 1rem;
     background: var(--card);
     border-top: 1px solid var(--border);
+    animation: selection-bar-in 0.2s ease-out;
+}
+
+@keyframes selection-bar-in {
+    from {
+        opacity: 0;
+        transform: translateY(0.75rem);
+    }
+
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .selection-bar {
+        animation: none;
+    }
 }
 
 .selection-cancel {

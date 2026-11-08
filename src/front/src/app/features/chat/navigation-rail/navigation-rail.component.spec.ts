@@ -106,6 +106,22 @@ describe('NavigationRailComponent avatar', () => {
             expect(button('Groups').getAttribute('aria-current')).toBeNull();
         });
 
+        it('has a Contacts entry that requests the view and takes the current mark from the chat view', async () => {
+            await session.restore();
+            fixture.detectChanges();
+            let requested = 0;
+            fixture.componentInstance.contactsRequested.subscribe(() => requested++);
+
+            button('Contacts').click();
+            expect(requested).toBe(1);
+            expect(button('Contacts').getAttribute('aria-current')).toBeNull();
+
+            fixture.componentRef.setInput('contactsActive', true);
+            fixture.detectChanges();
+            expect(button('Contacts').getAttribute('aria-current')).toBe('page');
+            expect(button('All chats').getAttribute('aria-current')).toBeNull();
+        });
+
         it('emits the chosen view, for system views and folders alike', async () => {
             TestBed.inject(FolderStoreService).folders.set([{ id: 'f1', title: 'Work', items: [] }]);
             await session.restore();

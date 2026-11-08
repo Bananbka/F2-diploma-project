@@ -1,6 +1,7 @@
 import { ChangeDetectionStrategy, Component, computed, inject, input, output, signal } from '@angular/core';
 import { Router } from '@angular/router';
 import {
+    BookUser,
     Hash,
     KeyRound,
     LogOut,
@@ -89,6 +90,10 @@ export class NavigationRailComponent {
     readonly viewChange = output<ChatViewKey>();
     /** Emitted by the shield: opens the safety number for whoever is on screen. */
     readonly securityRequested = output<void>();
+    /** True while the Contacts view replaces the chat list; no chat view is then the current one. */
+    readonly contactsActive = input(false);
+    readonly contactsRequested = output<void>();
+    readonly contactsIcon = BookUser;
 
     readonly menuOpen = signal(false);
 

@@ -1,0 +1,134 @@
+:host {
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    width: 100%;
+    height: 100%;
+    background: var(--secondary);
+    border-right: 1px solid var(--border);
+}
+
+.view-title {
+    flex-shrink: 0;
+    margin: 0;
+    padding: 1rem 1rem 0;
+    color: var(--foreground);
+    font-size: 1rem;
+    font-weight: 600;
+}
+
+.head {
+    flex-shrink: 0;
+    padding: 0.75rem 1rem;
+}
+
+.search {
+    position: relative;
+
+    lucide-icon {
+        position: absolute;
+        top: 50%;
+        left: 0.75rem;
+        width: 1rem;
+        height: 1rem;
+        color: var(--muted-foreground);
+        transform: translateY(-50%);
+        pointer-events: none;
+    }
+
+    input {
+        width: 100%;
+        padding: 0.625rem 1rem 0.625rem 2.25rem;
+        background: rgb(37 37 45 / 60%);
+        border: 1px solid transparent;
+        border-radius: var(--radius-lg);
+        color: var(--foreground);
+        font-size: 0.875rem;
+        outline: none;
+
+        &::-webkit-search-cancel-button {
+            display: none;
+        }
+
+        &:focus {
+            background: var(--muted);
+            border-color: rgb(163 88 249 / 30%);
+        }
+    }
+}
+
+.list {
+    margin: 0;
+    padding: 0 0 0.5rem;
+    overflow-y: auto;
+    list-style: none;
+}
+
+.row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    width: 100%;
+    padding: 0.625rem 1rem;
+    background: none;
+    border: none;
+    color: var(--foreground);
+    text-align: left;
+    cursor: pointer;
+
+    &:hover,
+    &:focus-visible {
+        background: rgb(255 255 255 / 5%);
+    }
+
+    &.is-editing {
+        cursor: default;
+    }
+}
+
+.body {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.name,
+.username {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.name {
+    font-size: 0.875rem;
+    font-weight: 500;
+}
+
+.username {
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+}
+
+.alias-input {
+    flex: 1;
+    min-width: 0;
+    padding: 0.5rem 0.75rem;
+    background: var(--background);
+    border: 1px solid rgb(163 88 249 / 60%);
+    border-radius: var(--radius-lg);
+    color: var(--foreground);
+    font-size: 0.875rem;
+    outline: none;
+}
+
+.empty {
+    margin: 0;
+    padding: 1.5rem 1rem;
+    color: var(--muted-foreground);
+    font-size: 0.8125rem;
+    text-align: center;
+
+    &.is-error {
+        color: var(--danger);
+    }
+}

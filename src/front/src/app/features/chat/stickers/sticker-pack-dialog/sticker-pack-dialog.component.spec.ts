@@ -63,24 +63,24 @@ describe('StickerPackDialogComponent', () => {
         expect(api.getPackByUrl).toHaveBeenCalledOnceWith(URL);
         expect(host.querySelector('.title')?.textContent).toContain('Cats');
         expect(host.querySelectorAll('.grid img').length).toBe(2);
-        expect(host.querySelector('.subscribe-btn')?.textContent).toContain('Subscribe');
+        expect(host.querySelector('.subscribe-btn')?.textContent).toContain('Add stickers');
     });
 
-    it('shows Unsubscribe when the pack is already in the tray, and toggles via the API', async () => {
+    it('shows Remove stickers when the pack is already in the tray, and toggles via the API', async () => {
         api.getMyPacks.and.returnValue(of([{ id: 'pack-a' } as StickerPackSummary]));
         const host = await render();
         const button = host.querySelector<HTMLButtonElement>('.subscribe-btn')!;
-        expect(button.textContent).toContain('Unsubscribe');
+        expect(button.textContent).toContain('Remove stickers');
 
         button.click();
         await fixture.whenStable();
         fixture.detectChanges();
 
         expect(api.unsubscribe).toHaveBeenCalledOnceWith('pack-a');
-        expect(host.querySelector('.subscribe-btn')?.textContent).toContain('Subscribe');
+        expect(host.querySelector('.subscribe-btn')?.textContent).toContain('Add stickers');
     });
 
-    it("offers no subscribe control for the viewer's own pack", async () => {
+    it("offers no add control for the viewer's own pack", async () => {
         directory.isMe.and.returnValue(true);
         const host = await render();
 

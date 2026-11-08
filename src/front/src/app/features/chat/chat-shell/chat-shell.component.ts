@@ -20,6 +20,10 @@ import { ResizablePanelComponent } from '../../../shared/ui/resizable-panel/resi
 import { ChatPanelComponent } from '../chat-panel/chat-panel.component';
 import { ChatSidebarComponent } from '../chat-sidebar/chat-sidebar.component';
 import { ChatViewKey, folderKey } from '../chat-views';
+import { ContactsListComponent } from '../contacts-list/contacts-list.component';
+import { CreateChannelComponent } from '../create-channel/create-channel.component';
+import { CreateDialogService } from '../create-dialog.service';
+import { CreateGroupComponent } from '../create-group/create-group.component';
 import { NavigationRailComponent } from '../navigation-rail/navigation-rail.component';
 
 /** Matches the `@media (width < 48rem)` breakpoint in the shell's own stylesheet. */
@@ -34,6 +38,9 @@ const NARROW_QUERY = '(width < 48rem)';
         ChatSidebarComponent,
         ResizablePanelComponent,
         ChatPanelComponent,
+        ContactsListComponent,
+        CreateGroupComponent,
+        CreateChannelComponent,
     ],
     templateUrl: './chat-shell.component.html',
     styleUrl: './chat-shell.component.scss',
@@ -53,6 +60,15 @@ export class ChatShellComponent {
     /** The selected view of the chat list: chosen on the rail, applied by the sidebar. */
     readonly view = signal<ChatViewKey>('all');
     readonly panelOpen = this.panel.open;
+
+    /** The Contacts view takes the chat list's place in the sidebar column while it is on. */
+    readonly contactsOpen = signal(false);
+    readonly createDialog = inject(CreateDialogService).open;
+
+    selectView(key: ChatViewKey): void {
+        this.contactsOpen.set(false);
+        this.view.set(key);
+    }
 
     readonly isOnline = this.store.isOnline;
     readonly activeChatId = this.store.activeChatId;

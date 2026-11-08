@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, input, signal } from '@angular/core';
 import { Hash, LucideAngularModule, Users, UserX } from 'lucide-angular';
 
 import { avatarColor, groupInitials, initials } from '../../utils/display';
@@ -29,6 +29,9 @@ export class AvatarComponent {
 
     /** People and groups share the same coloured circle; only how the letters are chosen differs. */
     readonly kind = input<AvatarKind>('person');
+
+    /** The last URL that failed to load; while `imageUrl` is still that value the monogram shows instead. */
+    readonly failedUrl = signal<string | null>(null);
 
     /** Letters (or a lone emoji) for the circle. Empty means "no letters": the kind's icon is shown. */
     readonly monogram = computed(() => (this.kind() === 'person' ? initials(this.name()) : groupInitials(this.name())));

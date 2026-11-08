@@ -384,6 +384,16 @@ describe('MessageBubbleComponent', () => {
             expect(footerOf(host).querySelector('.react-trigger')).not.toBeNull();
         });
 
+        it('places the reaction chips below the time/status footer, not above it', () => {
+            const host = create(
+                buildMessage({ reactions: [{ emoji: '👍', user_id: 'u1', created_at: '2024-01-01T00:00:00Z' }] })
+            );
+
+            const footer = footerOf(host);
+            const chips = host.querySelector('.reactions')!;
+            expect(footer.compareDocumentPosition(chips) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        });
+
         it('keeps the accessible names', () => {
             const host = create(buildMessage());
 

@@ -13,6 +13,14 @@
                 [value]="query()"
                 (input)="query.set($any($event.target).value)"
             />
+            <button
+                type="button"
+                class="tone"
+                [attr.aria-label]="'Skin tone: ' + toneLabel() + '. Click to change.'"
+                [title]="'Skin tone: ' + toneLabel()"
+                (click)="cycleTone()"
+                [innerHTML]="toneSample() | twemoji"
+            ></button>
         </div>
 
         <div
@@ -28,9 +36,10 @@
                             <button
                                 type="button"
                                 class="emoji"
-                                [attr.aria-label]="emoji"
-                                (click)="choose(emoji)"
-                                [innerHTML]="emoji | twemoji"
+                                [attr.aria-label]="names[emoji] ?? emoji"
+                                [title]="names[emoji] ?? emoji"
+                                (click)="choose(shown(emoji))"
+                                [innerHTML]="shown(emoji) | twemoji"
                             ></button>
                         }
                     </div>
@@ -56,17 +65,25 @@
                 @for (category of categories; track category.label; let i = $index) {
                     <section [attr.data-section]="i">
                         <h3 class="section-title">{{ category.label }}</h3>
-                        <div class="grid">
-                            @for (emoji of category.emoji; track emoji) {
-                                <button
-                                    type="button"
-                                    class="emoji"
-                                    [attr.aria-label]="emoji"
-                                    (click)="choose(emoji)"
-                                    [innerHTML]="emoji | twemoji"
-                                ></button>
-                            }
-                        </div>
+                        @if (loaded().has(i)) {
+                            <div class="grid">
+                                @for (emoji of category.emoji; track emoji) {
+                                    <button
+                                        type="button"
+                                        class="emoji"
+                                        [attr.aria-label]="names[emoji] ?? emoji"
+                                        [title]="names[emoji] ?? emoji"
+                                        (click)="choose(shown(emoji))"
+                                        [innerHTML]="shown(emoji) | twemoji"
+                                    ></button>
+                                }
+                            </div>
+                        } @else {
+                            <div
+                                class="grid-placeholder"
+                                [style.height.px]="placeholderHeight(i)"
+                            ></div>
+                        }
                     </section>
                 }
             }
@@ -131,7 +148,8 @@
                 <button
                     type="button"
                     class="emoji"
-                    [attr.aria-label]="emoji"
+                    [attr.aria-label]="names[emoji] ?? emoji"
+                    [title]="names[emoji] ?? emoji"
                     (click)="choose(emoji)"
                     [innerHTML]="emoji | twemoji"
                 ></button>

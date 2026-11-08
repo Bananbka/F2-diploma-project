@@ -1,6 +1,39 @@
 @use 'ui';
 
-:host {
-    @include ui.screen-page;
+.backdrop {
+    @include ui.modal-backdrop;
+}
+
+.dialog {
+    @include ui.modal-card(30rem);
+    @include ui.screen-page(true);
     @include ui.people-picker;
+
+    /* The card is a flex column; the form scrolls inside it, the header stays put. */
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    max-height: min(44rem, calc(100vh - 2rem));
+    padding: 0;
+    overflow: hidden;
+
+    .head {
+        justify-content: space-between;
+        padding: 0.875rem 1.25rem;
+    }
+
+    .body {
+        flex: 1;
+        min-height: 0;
+        padding: 1rem 1.25rem 1.25rem;
+        overflow-y: auto;
+    }
+}
+
+.close {
+    @include ui.icon-button(2rem);
+    lucide-icon {
+        width: 1.125rem;
+        height: 1.125rem;
+    }
 }

@@ -84,7 +84,7 @@ export class ChatPanelComponent {
     /** Why the sticker/emoji tabs cannot be used right now, or null. */
     readonly unavailableReason = computed(() => {
         const composer = this.panel.composer();
-        return composer ? composer.unavailableReason() : 'Open a conversation to use this.';
+        return composer ? composer.unavailableReason() : 'Finish selecting messages to use this.';
     });
 
     /** Set after a pick the composer turned down in the instant between render and click. */

@@ -1,7 +1,15 @@
-import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import {
+    afterNextRender,
+    ChangeDetectionStrategy,
+    Component,
+    computed,
+    ElementRef,
+    inject,
+    signal,
+} from '@angular/core';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { Router } from '@angular/router';
-import { ArrowLeft, Check, LucideAngularModule, Search, ShieldCheck, Users } from 'lucide-angular';
+import { Check, LucideAngularModule, Search, ShieldCheck, Users, X } from 'lucide-angular';
 import { firstValueFrom } from 'rxjs';
 
 import { UserSearchResult } from '../../../core/models/chat.model';
@@ -13,6 +21,8 @@ import { DirectoryService } from '../../../core/services/directory.service';
 import { applyServerErrors, errorTextFor } from '../../../shared/forms/server-errors';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
 import { EmojiButtonComponent } from '../../../shared/ui/emoji-field/emoji-button.component';
+import { trapTab } from '../../../shared/ui/focus-trap';
+import { CreateDialogService } from '../create-dialog.service';
 
 @Component({
     selector: 'app-create-group',
@@ -28,6 +38,13 @@ export class CreateGroupComponent {
     private readonly store = inject(ChatStoreService);
     private readonly router = inject(Router);
     private readonly fb = inject(FormBuilder);
+    private readonly dialogs = inject(CreateDialogService);
+    private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
+    private readonly opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+    constructor() {
+        afterNextRender(() => this.host.nativeElement.querySelector<HTMLElement>('#title')?.focus());
+    }
 
     readonly query = signal('');
     readonly results = signal<UserSearchResult[]>([]);
@@ -50,7 +67,7 @@ export class CreateGroupComponent {
         });
     }
 
-    readonly arrowLeftIcon = ArrowLeft;
+    readonly closeIcon = X;
     readonly searchIcon = Search;
     readonly checkIcon = Check;
     readonly shieldCheckIcon = ShieldCheck;
@@ -133,6 +150,7 @@ export class CreateGroupComponent {
             }
 
             await this.store.loadChats();
+            this.dialogs.close();
             await this.router.navigate(['/chats', chat.id]);
         } catch (error) {
             this.error.set(applyServerErrors(this.form, error) ?? 'Could not create the group.');
@@ -141,7 +159,19 @@ export class CreateGroupComponent {
         }
     }
 
-    async cancel(): Promise<void> {
-        await this.router.navigate(['/chats']);
+    cancel(): void {
+        this.dialogs.close();
+        this.opener?.focus();
+    }
+
+    /** Escape closes this dialog only; Tab is kept inside it. */
+    onKeydown(event: KeyboardEvent): void {
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            event.stopPropagation();
+            this.cancel();
+            return;
+        }
+        trapTab(event, this.host.nativeElement);
     }
 }

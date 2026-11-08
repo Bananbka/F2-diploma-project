@@ -24,8 +24,12 @@
     overflow-y: auto;
 }
 
+/* Pinned to the corner so the title row starts at the top of the dialog; content reserves room
+   for it with padding-right instead of spending a whole row on the button. */
 .close {
-    align-self: flex-end;
+    position: absolute;
+    top: 0.75rem;
+    right: 0.75rem;
     display: inline-flex;
     padding: 0.25rem;
     background: none;
@@ -43,6 +47,11 @@
     color: var(--muted-foreground);
     font-size: 0.8125rem;
     line-height: 1.5;
+}
+
+.unavailable,
+.dialog > .muted {
+    padding-right: 1.75rem;
 }
 
 .unavailable {

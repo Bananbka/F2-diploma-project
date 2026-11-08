@@ -49,6 +49,14 @@ describe('AvatarComponent', () => {
         expect(channel.querySelector('lucide-icon')).not.toBeNull();
     });
 
+    it('falls back to the monogram when the picture fails to load', () => {
+        const host = render({ name: 'string', kind: 'group', seed: 'c', imageUrl: 'string' });
+        host.querySelector('img.face')!.dispatchEvent(new Event('error'));
+        fixture.detectChanges();
+        expect(host.querySelector('img')).toBeNull();
+        expect(face(host).textContent?.trim()).toBe('S');
+    });
+
     it('shows the picture when there is one', () => {
         const host = render({ name: 'Team', kind: 'group', seed: 'c', imageUrl: 'https://x.test/a.png' });
         expect(host.querySelector('img.face')).not.toBeNull();

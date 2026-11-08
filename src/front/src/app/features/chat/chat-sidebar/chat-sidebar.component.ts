@@ -15,6 +15,7 @@ import { ConfirmService } from '../../../shared/ui/confirm-dialog/confirm.servic
 import { ContextMenuDirective, ContextMenuProvider } from '../../../shared/ui/context-menu/context-menu.directive';
 import { avatarKindFor, chatListTime, chatTitle } from '../../../shared/utils/display';
 import { chatsInView, ChatViewKey, isFolderKey, SYSTEM_VIEWS } from '../chat-views';
+import { CreateDialogService } from '../create-dialog.service';
 import { buildChatMenu } from './chat-menu';
 
 @Component({
@@ -32,6 +33,7 @@ export class ChatSidebarComponent {
     private readonly toast = inject(ToastService);
     private readonly router = inject(Router);
     private readonly confirm = inject(ConfirmService);
+    private readonly createDialogs = inject(CreateDialogService);
 
     /** The view picked on the rail: a system view or `folder:<id>`. */
     readonly view = input.required<ChatViewKey>();
@@ -235,9 +237,10 @@ export class ChatSidebarComponent {
         await this.openChat(chat.id);
     }
 
-    async goTo(path: string[]): Promise<void> {
+    /** Open the create dialog over the shell; no navigation, so the open conversation stays. */
+    openCreate(kind: 'group' | 'channel'): void {
         this.menuOpen.set(false);
-        await this.router.navigate(path);
+        this.createDialogs.show(kind);
     }
 
     private sortKey(chat: Chat): number {

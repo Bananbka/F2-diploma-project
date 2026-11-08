@@ -32,7 +32,7 @@
                     type="button"
                     role="menuitem"
                     class="menu-item"
-                    (click)="goTo(['/new/group'])"
+                    (click)="openCreate('group')"
                 >
                     <lucide-icon [img]="usersIcon" />
                     New group
@@ -41,7 +41,7 @@
                     type="button"
                     role="menuitem"
                     class="menu-item"
-                    (click)="goTo(['/new/channel'])"
+                    (click)="openCreate('channel')"
                 >
                     <lucide-icon [img]="hashIcon" />
                     New channel

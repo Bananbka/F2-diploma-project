@@ -1,151 +1,163 @@
-<header class="head">
-    <button
-        type="button"
-        class="back"
-        aria-label="Cancel"
-        (click)="cancel()"
-    >
-        <lucide-icon [img]="arrowLeftIcon" />
-    </button>
-    <h2>New group</h2>
-</header>
-
-<div class="body">
-    <form
-        [formGroup]="form"
-        (ngSubmit)="create()"
-    >
-        <div class="fields">
-            <div class="field">
-                <label for="title">Group name</label>
-                <div class="emoji-input-wrap">
-                    <input
-                        #titleField
-                        id="title"
-                        type="text"
-                        placeholder="Dev Team"
-                        formControlName="title"
-                        [attr.aria-invalid]="!!titleError()"
-                    />
-                    <app-emoji-button [target]="titleField" />
-                </div>
-                @if (titleError(); as message) {
-                    <p class="hint is-error">{{ message }}</p>
-                }
-            </div>
-
-            <div class="field">
-                <label for="description">Description</label>
-                <div class="emoji-input-wrap is-multiline">
-                    <textarea
-                        #descriptionField
-                        id="description"
-                        rows="2"
-                        placeholder="What is this group for?"
-                        formControlName="description"
-                    ></textarea>
-                    <app-emoji-button [target]="descriptionField" />
-                </div>
-            </div>
-        </div>
-
-        <p class="notice">
-            <lucide-icon [img]="shieldCheckIcon" />
-            <span>
-                Groups are end-to-end encrypted with a sender-key ratchet. Adding or removing a member rotates the group
-                key, so a departing member cannot read anything sent afterwards.
-            </span>
-        </p>
-
-        <p class="section">Members</p>
-
-        <div class="search">
-            <lucide-icon [img]="searchIcon" />
-            <input
-                type="search"
-                placeholder="Search people by username…"
-                aria-label="Search people"
-                [value]="query()"
-                (input)="onQuery($any($event.target).value)"
-            />
-        </div>
-
-        @if (selected().length > 0) {
-            <ul class="chips">
-                @for (person of selected(); track person.id) {
-                    <li>
-                        <button
-                            type="button"
-                            class="chip"
-                            (click)="toggle(person)"
-                        >
-                            {{ person.full_name }}
-                            <span aria-hidden="true">×</span>
-                            <span class="sr-only">Remove</span>
-                        </button>
-                    </li>
-                }
-            </ul>
-        }
-
-        <div class="people">
-            @if (searching()) {
-                <p class="muted">Searching…</p>
-            } @else if (results().length === 0 && query().trim().length >= 2) {
-                <p class="muted">Nobody matches “{{ query() }}”.</p>
-            } @else if (results().length === 0) {
-                <p class="muted">Type at least two characters to find people.</p>
-            }
-
-            @for (person of results(); track person.id) {
-                <button
-                    type="button"
-                    class="person"
-                    [class.is-selected]="isSelected(person)"
-                    (click)="toggle(person)"
-                >
-                    <app-avatar
-                        size="sm"
-                        [name]="person.full_name"
-                        [seed]="person.id"
-                        [imageUrl]="person.avatar_url"
-                    />
-                    <span class="person-text">
-                        <span class="person-name">{{ person.full_name }}</span>
-                        <span class="person-username">&#64;{{ person.username }}</span>
-                    </span>
-                    <span
-                        class="tick"
-                        [class.is-on]="isSelected(person)"
-                    >
-                        @if (isSelected(person)) {
-                            <lucide-icon [img]="checkIcon" />
-                        }
-                    </span>
-                </button>
-            }
-        </div>
-
-        @if (error()) {
-            <p
-                class="error"
-                role="alert"
-            >
-                {{ error() }}
-            </p>
-        }
-
+<div
+    class="backdrop"
+    (click)="cancel()"
+></div>
+<div
+    class="dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="create-group-title"
+    (keydown)="onKeydown($event)"
+>
+    <header class="head">
+        <h2 id="create-group-title">New group</h2>
         <button
-            type="submit"
-            class="submit"
-            [disabled]="!canCreate()"
+            type="button"
+            class="close"
+            aria-label="Close"
+            (click)="cancel()"
         >
-            <lucide-icon [img]="usersIcon" />
-            {{
-                submitting()
-                    ? 'Creating…'
-                    : 'Create group · ' + selected().length + (selected().length === 1 ? ' member' : ' members')
-            }}
+            <lucide-icon [img]="closeIcon" />
         </button>
-    </form>
+    </header>
+
+    <div class="body">
+        <form
+            [formGroup]="form"
+            (ngSubmit)="create()"
+        >
+            <div class="fields">
+                <div class="field">
+                    <label for="title">Group name</label>
+                    <div class="emoji-input-wrap">
+                        <input
+                            #titleField
+                            id="title"
+                            type="text"
+                            placeholder="Dev Team"
+                            formControlName="title"
+                            [attr.aria-invalid]="!!titleError()"
+                        />
+                        <app-emoji-button [target]="titleField" />
+                    </div>
+                    @if (titleError(); as message) {
+                        <p class="hint is-error">{{ message }}</p>
+                    }
+                </div>
+
+                <div class="field">
+                    <label for="description">Description</label>
+                    <div class="emoji-input-wrap is-multiline">
+                        <textarea
+                            #descriptionField
+                            id="description"
+                            rows="2"
+                            placeholder="What is this group for?"
+                            formControlName="description"
+                        ></textarea>
+                        <app-emoji-button [target]="descriptionField" />
+                    </div>
+                </div>
+            </div>
+
+            <p class="notice">
+                <lucide-icon [img]="shieldCheckIcon" />
+                <span>
+                    Groups are end-to-end encrypted with a sender-key ratchet. Adding or removing a member rotates the
+                    group key, so a departing member cannot read anything sent afterwards.
+                </span>
+            </p>
+
+            <p class="section">Members</p>
+
+            <div class="search">
+                <lucide-icon [img]="searchIcon" />
+                <input
+                    type="search"
+                    placeholder="Search people by username…"
+                    aria-label="Search people"
+                    [value]="query()"
+                    (input)="onQuery($any($event.target).value)"
+                />
+            </div>
+
+            @if (selected().length > 0) {
+                <ul class="chips">
+                    @for (person of selected(); track person.id) {
+                        <li>
+                            <button
+                                type="button"
+                                class="chip"
+                                (click)="toggle(person)"
+                            >
+                                {{ person.full_name }}
+                                <span aria-hidden="true">×</span>
+                                <span class="sr-only">Remove</span>
+                            </button>
+                        </li>
+                    }
+                </ul>
+            }
+
+            <div class="people">
+                @if (searching()) {
+                    <p class="muted">Searching…</p>
+                } @else if (results().length === 0 && query().trim().length >= 2) {
+                    <p class="muted">Nobody matches “{{ query() }}”.</p>
+                } @else if (results().length === 0) {
+                    <p class="muted">Type at least two characters to find people.</p>
+                }
+
+                @for (person of results(); track person.id) {
+                    <button
+                        type="button"
+                        class="person"
+                        [class.is-selected]="isSelected(person)"
+                        (click)="toggle(person)"
+                    >
+                        <app-avatar
+                            size="sm"
+                            [name]="person.full_name"
+                            [seed]="person.id"
+                            [imageUrl]="person.avatar_url"
+                        />
+                        <span class="person-text">
+                            <span class="person-name">{{ person.full_name }}</span>
+                            <span class="person-username">&#64;{{ person.username }}</span>
+                        </span>
+                        <span
+                            class="tick"
+                            [class.is-on]="isSelected(person)"
+                        >
+                            @if (isSelected(person)) {
+                                <lucide-icon [img]="checkIcon" />
+                            }
+                        </span>
+                    </button>
+                }
+            </div>
+
+            @if (error()) {
+                <p
+                    class="error"
+                    role="alert"
+                >
+                    {{ error() }}
+                </p>
+            }
+
+            <button
+                type="submit"
+                class="submit"
+                [disabled]="!canCreate()"
+            >
+                <lucide-icon [img]="usersIcon" />
+                {{
+                    submitting()
+                        ? 'Creating…'
+                        : 'Create group · ' + selected().length + (selected().length === 1 ? ' member' : ' members')
+                }}
+            </button>
+        </form>
+    </div>
 </div>

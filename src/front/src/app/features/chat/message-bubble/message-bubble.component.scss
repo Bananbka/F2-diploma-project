@@ -10,6 +10,33 @@
 
 /* ── Bulk selection ───────────────────────────────────────────────────────────────────────── */
 
+:host {
+    transition: background-color 0.15s ease;
+}
+
+@keyframes pick-in {
+    from {
+        opacity: 0;
+        transform: translateX(-0.5rem) scale(0.7);
+    }
+
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    :host {
+        transition: none;
+    }
+
+    .pick {
+        animation: none;
+        transition: none;
+    }
+}
+
 :host(.is-selectable) {
     cursor: pointer;
     /* A double-click picks messages here rather than replying, so let it select text as usual. */
@@ -35,6 +62,10 @@
     border: 2px solid rgb(139 139 154 / 40%);
     border-radius: 50%;
     color: #fff;
+    animation: pick-in 0.18s ease-out;
+    transition:
+        background-color 0.15s ease,
+        border-color 0.15s ease;
 
     &.is-on {
         background: var(--primary);

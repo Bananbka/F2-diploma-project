@@ -9,11 +9,14 @@
         />
     </span>
     <span class="sr-only">{{ name() }}</span>
-} @else if (imageUrl()) {
+} @else if (imageUrl() && failedUrl() !== imageUrl()) {
+    <!-- A URL that does not load (a placeholder such as "string", a deleted object) falls back to the
+         monogram instead of showing the browser's broken-image alt text clipped inside the circle. -->
     <img
         class="face"
         [src]="imageUrl()"
         [alt]="name()"
+        (error)="failedUrl.set(imageUrl())"
     />
 } @else {
     <span
