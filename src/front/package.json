@@ -23,6 +23,7 @@
     "@angular/core": "^19.2.0",
     "@angular/forms": "^19.2.0",
     "@angular/platform-browser": "^19.2.0",
+    "@angular/platform-browser-dynamic": "^19.2.0",
     "@angular/router": "^19.2.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0",
