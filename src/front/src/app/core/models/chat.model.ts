@@ -12,8 +12,8 @@ export interface ChatParticipant {
 /**
  * One participant's read high-water mark for a chat, from `GET /chats/{id}/read-state`.
  *
- * Deliberately per-user rather than a chat-level value: `MessageDocument.is_read` is one shared
- * boolean per message, so one member reading a group message used to mark it read for everyone.
+ * Deliberately per-user rather than a per-message flag: a single shared boolean per message would
+ * mean one member reading a group message marked it read for everyone.
  * `last_read_message_id` is a canonical (lowercase, 24-hex-char) Mongo ObjectId string, or `null`
  * if this participant has never marked anything read — safe to compare directly against a
  * message's own `_id` with plain string `>=`.

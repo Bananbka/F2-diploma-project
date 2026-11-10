@@ -67,7 +67,6 @@ function messageResponse(overrides: Partial<MessageResponse> = {}): MessageRespo
         created_at: '2026-01-01T00:00:00Z',
         attachments: null,
         reactions: [],
-        is_read: false,
         is_pinned: false,
         pinned_at: null,
         pinned_by: null,

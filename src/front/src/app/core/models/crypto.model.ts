@@ -220,7 +220,6 @@ export interface MessageResponse {
     created_at: string;
     attachments: MessageAttachment[] | null;
     reactions: MessageReaction[];
-    is_read: boolean;
     is_pinned: boolean;
     pinned_at: string | null;
     pinned_by: string | null;

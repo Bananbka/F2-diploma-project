@@ -311,8 +311,7 @@ async def get_chat_read_state(
     """Per-participant read state for a chat: `user_id` paired with `last_read_message_id`.
 
     Deliberately returns every participant's own high-water mark rather than a single shared
-    flag. `MessageDocument.is_read` is a single boolean per message, so one member reading a group
-    message marked it read for everyone else too — this is the per-user replacement. The caller
+    flag, so each member's progress is tracked independently. The caller
     (and the client) derives "has user X read message Y" by comparing `last_read_message_id`
     against the message's ObjectId (`$lte`) — ObjectId monotonicity is the ordering key throughout this codebase, so no extra sort
     field is needed here either.
@@ -349,8 +348,7 @@ async def update_participant_last_read(
     reader's mark backwards, which would both under-report their progress to peers and make the
     unread count be computed against a stale cursor.
 
-    This is the only read state: the Mongo `is_read` field is no longer written by anything (it
-    was one boolean shared by every member), so nothing may depend on it being flipped.
+    This is the only read state; messages carry no read flag of their own.
 
     The return value is what the caller uses to decide whether the `message_read` broadcast is
     worth publishing — see `ws_router`.
@@ -565,12 +563,6 @@ async def clear_chat_history(
     )
     await db.commit()
     return floor
-
-
-async def get_chat_participants_by_user(db: AsyncSession, user_id: uuid.UUID):
-    stmt = select(ChatParticipant).where(ChatParticipant.user_id == user_id)
-    res = await db.execute(stmt)
-    return res.scalars().all()
 
 
 async def enrich_chats_with_mongo_data(
