@@ -2,7 +2,6 @@ import uuid
 
 import jwt
 from fastapi import Depends, Request, WebSocketException
-from fastapi.security import OAuth2PasswordBearer
 from redis import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,8 +15,6 @@ from app.domains.users.models.user import User
 from app.domains.users.services.user_service import get_user_by_id
 from app.infrastructure.postgres import AsyncSessionLocal, get_db
 from app.infrastructure.redis import get_redis
-
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 
 async def get_current_unverified_user(

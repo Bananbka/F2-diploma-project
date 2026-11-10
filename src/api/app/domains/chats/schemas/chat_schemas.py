@@ -169,8 +169,7 @@ class ParticipantReadState(BaseModel):
 
     `last_read_message_id` is the newest Mongo ObjectId this user has acknowledged, or `None` if
     they have never marked anything read. It is deliberately per-user rather than a single
-    chat-level value: `MessageDocument.is_read` is one shared boolean per message, so any one
-    member reading a group message flipped it for every other member too. The client derives
+    chat-level value or a per-message flag, so each member's progress is independent. The client derives
     "has user X read message Y" itself by comparing `last_read_message_id >= Y._id` — the same
     ObjectId-monotonicity comparison the unread count performs server-side — so one
     small per-chat payload is enough to compute read status for an entire rendered message list,

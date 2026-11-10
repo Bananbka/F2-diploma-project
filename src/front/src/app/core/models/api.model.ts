@@ -17,11 +17,3 @@ export interface ValidationDetail {
     msg: string;
     input?: unknown;
 }
-
-/** Errors are rendered by the handlers registered in api/app/main.py. */
-export interface ErrorResponse {
-    status: string;
-    error_code: string;
-    message: string;
-    details?: ValidationDetail[] | unknown;
-}
