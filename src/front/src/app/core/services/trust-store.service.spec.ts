@@ -133,6 +133,129 @@ describe('TrustStoreService', () => {
         expect(reloaded.stateFor(ME, 'good', NUMBER_A).kind).toBe('verified');
     });
 
+    /**
+     * G2: every tab of the origin shares one record set. A tab that kept a private copy sent to a
+     * peer verified elsewhere as if unverified, and its next write erased that verification.
+     */
+    describe('shared across tabs', () => {
+        /** What another tab's `markVerified` leaves in storage. */
+        function writeFromAnotherTab(records: Record<string, { safetyNumber: string; verifiedAt: string }>): void {
+            localStorage.setItem('ns.trusted_peers', JSON.stringify(records));
+        }
+
+        it("adopts another tab's verification when the storage event arrives", () => {
+            writeFromAnotherTab({ [`${ME}:${PEER}`]: { safetyNumber: NUMBER_A, verifiedAt: '2026-01-01T00:00:00Z' } });
+            expect(service.stateFor(ME, PEER, NUMBER_B).kind)
+                .withContext('not seen yet')
+                .toBe('unverified');
+            const before = service.revision();
+
+            window.dispatchEvent(new StorageEvent('storage', { key: 'ns.trusted_peers' }));
+
+            expect(service.stateFor(ME, PEER, NUMBER_B).kind).toBe('changed');
+            expect(service.revision()).toBeGreaterThan(before);
+        });
+
+        it('ignores storage events for other keys', () => {
+            writeFromAnotherTab({ [`${ME}:${PEER}`]: { safetyNumber: NUMBER_A, verifiedAt: '2026-01-01T00:00:00Z' } });
+
+            window.dispatchEvent(new StorageEvent('storage', { key: 'ns.device_id' }));
+
+            expect(service.stateFor(ME, PEER, NUMBER_A).kind).toBe('unverified');
+        });
+
+        it('refresh() picks up a write the storage event has not delivered yet', () => {
+            writeFromAnotherTab({ [`${ME}:${PEER}`]: { safetyNumber: NUMBER_A, verifiedAt: '2026-01-01T00:00:00Z' } });
+
+            service.refresh();
+
+            expect(service.stateFor(ME, PEER, NUMBER_A).kind).toBe('verified');
+        });
+
+        it('does not bump the revision when a refresh finds nothing new', () => {
+            service.markVerified(ME, PEER, NUMBER_A);
+            const before = service.revision();
+
+            service.refresh();
+
+            expect(service.revision()).toBe(before);
+        });
+
+        it("markVerified merges into storage instead of overwriting another tab's records", () => {
+            const elsewhere = 'f0000000-0000-4000-8000-00000000000f';
+            writeFromAnotherTab({
+                [`${ME}:${elsewhere}`]: { safetyNumber: NUMBER_B, verifiedAt: '2026-01-01T00:00:00Z' },
+            });
+
+            service.markVerified(ME, PEER, NUMBER_A);
+
+            const stored = JSON.parse(localStorage.getItem('ns.trusted_peers')!) as Record<string, unknown>;
+            expect(Object.keys(stored).sort()).toEqual([`${ME}:${PEER}`, `${ME}:${elsewhere}`].sort());
+            expect(service.stateFor(ME, elsewhere, NUMBER_B).kind).toBe('verified');
+        });
+
+        it("forget removes only its own record, keeping another tab's", () => {
+            service.markVerified(ME, PEER, NUMBER_A);
+            const elsewhere = 'f0000000-0000-4000-8000-00000000000f';
+            const stored = JSON.parse(localStorage.getItem('ns.trusted_peers')!) as Record<string, unknown>;
+            writeFromAnotherTab({
+                ...(stored as Record<string, { safetyNumber: string; verifiedAt: string }>),
+                [`${ME}:${elsewhere}`]: { safetyNumber: NUMBER_B, verifiedAt: '2026-01-01T00:00:00Z' },
+            });
+
+            service.forget(ME, PEER);
+
+            expect(service.stateFor(ME, PEER, NUMBER_A).kind).toBe('unverified');
+            expect(service.stateFor(ME, elsewhere, NUMBER_B).kind).toBe('verified');
+            expect(localStorage.getItem('ns.trusted_peers')).toContain(elsewhere);
+        });
+
+        it('keeps in-memory records when storage cannot be read at all', () => {
+            service.markVerified(ME, PEER, NUMBER_A);
+            spyOn(Storage.prototype, 'getItem').and.throwError('SecurityError');
+
+            service.refresh();
+
+            expect(service.stateFor(ME, PEER, NUMBER_A).kind).toBe('verified');
+        });
+
+        it('bumps the revision on every write, which is what retires cached sending chains', () => {
+            const start = service.revision();
+            service.markVerified(ME, PEER, NUMBER_A);
+            const afterVerify = service.revision();
+            service.markVerified(ME, PEER, NUMBER_B);
+            const afterAccept = service.revision();
+            service.forget(ME, PEER);
+
+            expect(afterVerify).toBeGreaterThan(start);
+            expect(afterAccept).toBeGreaterThan(afterVerify);
+            expect(service.revision()).toBeGreaterThan(afterAccept);
+        });
+    });
+
+    /** Round 2, item 7: a failed write must not lose the verification on the next refresh. */
+    describe('when storage cannot be written', () => {
+        it('reports the failure and keeps memory authoritative over the stale stored copy', () => {
+            const setItem = spyOn(Storage.prototype, 'setItem').and.throwError('QuotaExceededError');
+
+            expect(service.markVerified(ME, PEER, NUMBER_A)).toBe('unsaved');
+
+            service.refresh();
+            window.dispatchEvent(new StorageEvent('storage', { key: 'ns.trusted_peers' }));
+            expect(service.stateFor(ME, PEER, NUMBER_A).kind).toBe('verified');
+
+            // Once a write succeeds again, storage is the shared copy once more.
+            setItem.and.callThrough();
+            expect(service.markVerified(ME, PEER, NUMBER_A)).toBe('saved');
+            expect(localStorage.getItem('ns.trusted_peers')).toContain(PEER);
+        });
+
+        it('reports a successful save as such', () => {
+            expect(service.markVerified(ME, PEER, NUMBER_A)).toBe('saved');
+            expect(service.forget(ME, PEER)).toBe('saved');
+        });
+    });
+
     it('treats a non-object stored value as empty', () => {
         for (const raw of ['[]', '"x"', '7', 'null']) {
             localStorage.setItem('ns.trusted_peers', raw);

@@ -92,6 +92,7 @@ describe('ChatInfoComponent', () => {
             activeChatId: { set: () => {} },
             loadChats: async () => {},
             setMuted: async () => {},
+            adoptCreatedPrivateChat: () => undefined,
         } as unknown as ChatStoreService;
 
         await TestBed.configureTestingModule({
@@ -556,7 +557,11 @@ describe('ChatInfoComponent', () => {
             cryptoApi.getRoster.and.returnValue(rosterOf([OWNER_ID, PEER_ID]) as never);
             chatApi.getChat.and.returnValue(of(GROUP));
             // The embedded view derives the number locally; stub the key store it asks.
-            spyOn(TestBed.inject(KeyStoreService), 'computeSafetyNumber').and.resolveTo(NUMBER);
+            spyOn(TestBed.inject(KeyStoreService), 'computeSafetyNumber').and.resolveTo({
+                number: NUMBER,
+                ownDevicesUnknown: false,
+                ownDevicesAdded: false,
+            });
         });
 
         async function mount(chatId = CHAT_ID): Promise<HTMLElement> {

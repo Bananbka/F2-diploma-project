@@ -30,9 +30,108 @@ export class MemberSetMismatchError extends RosterVerificationError {
     }
 }
 
+/**
+ * The roster (or the chat itself) names people this client does not accept as the chat's members:
+ * a user id outside the chat, a different counterpart for a private chat than the one pinned when it
+ * was first opened, a private chat now reported as some other type, or a roster that leaves us out.
+ * Every key in it may be perfectly self-consistent; the refusal is about *who*, not *which key*.
+ */
+export class MembershipMismatchError extends RosterVerificationError {
+    override readonly code: RosterFailureCode = 'MEMBERSHIP_MISMATCH';
+
+    constructor(message: string) {
+        super(message);
+        this.name = 'MembershipMismatchError';
+    }
+}
+
+/**
+ * The roster lists a device under *our own* user id that neither our device list at unlock nor a
+ * fresh `GET /crypto/identity/me` contains. Raised whatever anyone's verification state: a device
+ * under our id would read every message we send in every chat, and no peer's safety number is
+ * guaranteed to catch it (an unverified peer's never does).
+ */
+export class UnknownOwnDeviceError extends RosterVerificationError {
+    override readonly code: RosterFailureCode = 'OWN_DEVICE_UNKNOWN';
+
+    constructor(message: string) {
+        super(message);
+        this.name = 'UnknownOwnDeviceError';
+    }
+}
+
 /** Typed client error names from the delivery algorithm (docs/event-queue-plan.md, TB-30). */
-export type RosterFailureCode = 'ROSTER_VERIFICATION_FAILED' | 'MEMBER_SET_MISMATCH';
-export type ClientErrorCode = RosterFailureCode | 'RETRY_LIMIT_EXCEEDED';
+export type RosterFailureCode =
+    'ROSTER_VERIFICATION_FAILED' | 'MEMBER_SET_MISMATCH' | 'MEMBERSHIP_MISMATCH' | 'OWN_DEVICE_UNKNOWN';
+export type ClientErrorCode = RosterFailureCode | 'RETRY_LIMIT_EXCEEDED' | 'KEY_CHANGED' | 'MEMBERSHIP_UNCONFIRMED';
+
+/**
+ * Nothing is known to be wrong, but this client cannot yet say who the chat's members are — the
+ * private chat's participant list is missing or does not have the shape {me, one peer}, and no
+ * counterpart has been pinned for it. No key was distributed. Not a roster alarm (the server has not
+ * been caught lying); an honest, retryable "not sent" with its own wording (docs/ui-states.md).
+ */
+export class MembershipUnconfirmedError extends Error {
+    readonly code: ClientErrorCode = 'MEMBERSHIP_UNCONFIRMED';
+
+    constructor(message = 'The members of this chat could not be confirmed, so no key was distributed.') {
+        super(message);
+        this.name = 'MembershipUnconfirmedError';
+    }
+}
+
+export function isMembershipUnconfirmed(error: unknown): error is MembershipUnconfirmedError {
+    return error instanceof MembershipUnconfirmedError;
+}
+
+/** One member whose safety number no longer matches the one the user confirmed out of band. */
+export interface KeyChangedPeer {
+    userId: string;
+    /** The number derived from the keys the roster presents now. */
+    current: string;
+    /** The number the user verified, as remembered by `TrustStoreService`. */
+    previous: string;
+}
+
+/**
+ * A *verified* peer's key changed, so no chain key was wrapped for the roster.
+ *
+ * A sibling of `RosterVerificationError`, deliberately not a subclass: the roster passed both of
+ * §5.0.2's checks — every entry is self-consistent and matches the epoch commitment — but a
+ * self-consistent roster is exactly what a server substituting a whole device produces. The one
+ * thing it cannot forge is the safety number the user already compared with that person, so this
+ * is the state where that comparison pays off. Blocking, never retried: only the user re-confirming
+ * the new number in the safety-number screen can clear it.
+ */
+export class KeyChangedError extends Error {
+    readonly code: ClientErrorCode = 'KEY_CHANGED';
+
+    /**
+     * @param ownDevicesChanged The roster lists keys under *our own* user id that our own device
+     *   list (`GET /crypto/identity/me`) does not. A safety number covers both sides, so a device
+     *   added under our id changes the number with every verified peer at once — and blaming each
+     *   of those peers for it would point the user at the wrong person entirely.
+     */
+    constructor(
+        readonly chatId: string,
+        readonly peers: readonly KeyChangedPeer[],
+        readonly ownDevicesChanged = false
+    ) {
+        super(
+            ownDevicesChanged
+                ? 'Your own device list changed, which changes the safety number with every verified member. ' +
+                      'Refusing to distribute keys until the new safety numbers are confirmed.'
+                : `The security key of ${peers.length === 1 ? 'a verified member' : `${peers.length} verified members`} ` +
+                      'changed. Refusing to distribute keys until the new safety number is confirmed.'
+        );
+        this.name = 'KeyChangedError';
+    }
+}
+
+/** Sending must be blocked until the user reviews the changed safety number. */
+export function isKeyChanged(error: unknown): error is KeyChangedError {
+    return error instanceof KeyChangedError;
+}
 
 /**
  * Publishing the sender key kept failing for reasons that may well be transient, and the retry

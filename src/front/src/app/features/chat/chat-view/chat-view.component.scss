@@ -99,6 +99,14 @@
     }
 }
 
+/* A verified member's key changed. Text only: the shield icons were removed from chrome on purpose. */
+.badge.is-danger {
+    @include ui.badge(var(--danger-strong), var(--danger-surface), var(--danger-border));
+
+    padding: 0.125rem 0.5rem;
+    font-size: 0.6875rem;
+}
+
 .head-actions {
     display: flex;
     align-items: center;
@@ -119,6 +127,42 @@
         width: 1.125rem;
         height: 1.125rem;
     }
+}
+
+/* ── Own device added since unlock (informational) ────────────────────────────────────────── */
+
+.device-notice {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    flex-shrink: 0;
+    padding: 0.5rem 1rem;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+
+    > lucide-icon {
+        flex-shrink: 0;
+        width: 1rem;
+        height: 1rem;
+    }
+
+    p {
+        flex: 1;
+        margin: 0;
+    }
+}
+
+.device-notice-button {
+    padding: 0.25rem 0.625rem;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--foreground);
+    font-size: 0.75rem;
+    white-space: nowrap;
+    cursor: pointer;
 }
 
 /* ── Member verification failure ──────────────────────────────────────────────────────────── */
@@ -165,6 +209,12 @@
     align-items: center;
     gap: 0.5rem;
     flex-shrink: 0;
+
+    /* One review button per changed member, so they do not run off the right edge in a group. */
+    &.is-stacked {
+        flex-direction: column;
+        align-items: stretch;
+    }
 }
 
 .alarm-button {
@@ -705,6 +755,12 @@
 
     &:hover {
         text-decoration: underline;
+    }
+
+    &:disabled {
+        color: var(--muted-foreground);
+        text-decoration: none;
+        cursor: not-allowed;
     }
 
     lucide-icon {

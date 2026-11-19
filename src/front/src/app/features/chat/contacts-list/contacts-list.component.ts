@@ -81,6 +81,8 @@ export class ContactsListComponent {
     async message(contact: Contact): Promise<void> {
         try {
             const chat = await firstValueFrom(this.chatApi.createPrivateChat(contact.contact_id));
+            // Pinned to this contact; a response naming anyone else is not opened.
+            this.chatStore.adoptCreatedPrivateChat(chat, contact.contact_id);
             await this.chatStore.loadChats();
             await this.router.navigate(['/chats', chat.id]);
         } catch {

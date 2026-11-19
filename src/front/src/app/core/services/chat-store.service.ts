@@ -21,12 +21,18 @@ import {
     isCryptoNotEnabled,
     isEnableForbidden,
     isEncryptionRefused,
+    isKeyChanged,
+    isMembershipUnconfirmed,
     isRetryLimitExceeded,
     isRosterVerificationFailure,
+    MembershipMismatchError,
     RosterFailureCode,
     RosterVerificationError,
 } from './crypto-errors';
 import { DirectoryService } from './directory.service';
+import { KeyChangeStateService } from './key-change-state.service';
+import { KeyStoreService } from './key-store.service';
+import { GroupMembersSink, MembershipGuardService } from './membership-guard.service';
 import { contentOf, DecryptedMessage, MessageService } from './message.service';
 import { PollStoreService } from './poll-store.service';
 import { SessionService } from './session.service';
@@ -41,6 +47,13 @@ interface FlightState<T> {
 }
 
 const PAGE_SIZE = 50;
+
+/** A forward refused because a verified member of the target chat has a changed key. */
+export const FORWARD_KEY_CHANGED_NOTICE =
+    'Not forwarded: the security key of a verified member of that chat changed. Review their safety number first.';
+
+/** A forward refused because the target chat's members could not be confirmed or contradict its pin. */
+export const FORWARD_MEMBERSHIP_NOTICE = 'Not forwarded: the members of that chat could not be verified.';
 
 /** Shown in the composer when the other party of a private chat has deleted their account. */
 export const PEER_DELETED_NOTICE =
@@ -69,6 +82,18 @@ export interface PendingMessage {
      * roster - the send just did not go through - so it is a retryable failure with its own wording.
      */
     keyPublishFailure?: boolean;
+    /**
+     * Refused with KEY_CHANGED: a verified member's key changed and nothing was encrypted to it.
+     * Kept as a failed row rather than dropped, so the draft survives while the user reviews the
+     * safety number; Retry is refused until the block lifts.
+     */
+    keyChangedFailure?: boolean;
+    /**
+     * Refused with MEMBERSHIP_UNCONFIRMED: this client could not establish who the chat's members
+     * are, so nothing was distributed. Not an alarm and retryable, but worded for what happened
+     * rather than as a generic "Send failed." (docs/ui-states.md).
+     */
+    membershipFailure?: boolean;
     /**
      * Idempotency key for this logical message, minted once and kept across every retry — the
      * automatic EPOCH_STALE one and the user-pressed "Retry" alike.
@@ -162,6 +187,9 @@ export class ChatStoreService {
     private readonly router = inject(Router);
     private readonly polls = inject(PollStoreService);
     private readonly toast = inject(ToastService);
+    private readonly keyChange = inject(KeyChangeStateService);
+    private readonly keyStore = inject(KeyStoreService);
+    private readonly membership = inject(MembershipGuardService);
 
     readonly chats = signal<Chat[]>([]);
     readonly chatsLoading = signal(false);
@@ -249,11 +277,60 @@ export class ChatStoreService {
     readonly isOnline = this.ws.isConnected;
 
     /**
-     * Sending is impossible while the member set is in doubt, or while there is no key to seal with.
-     * Refusing in both cases is the whole point.
+     * Members of the open chat whom the user verified out of band and whose key has since changed.
+     *
+     * Derived, not set: `KeyStoreService` notes every safety number it derives — before wrapping a
+     * chain key to the roster, when ingesting a peer's distribution, and on the safety-number
+     * screen — in `TrustStoreService`, and this compares those observations with the confirmed
+     * records. Being derived is what lets sending resume the moment the user accepts the new
+     * number in the safety-number screen, with no reload and nothing for this service to clear.
+     *
+     * Distinct from `memberVerificationError`. That alarm says the roster is *inconsistent*; this
+     * one says the roster is perfectly consistent and still not the person the user compared
+     * numbers with — which is precisely the shape a substituted device takes.
+     *
+     * Also unions in the peers this chat has an outstanding refusal for (`KeyChangeStateService`),
+     * so the block and its banner never depend on the server-supplied participant list alone: if
+     * `GET /chats/{id}` failed or omitted the peer, the refusal would otherwise leave no trace.
+     */
+    readonly keyChangedPeers = computed<string[]>(() => {
+        const chatId = this.activeChatId();
+        return chatId ? this.keyChangedPeersFor(chatId) : [];
+    });
+
+    /**
+     * The open chat's key change involves *our own* device list, not (only) the peers'. A device
+     * under our own user id changes the number with every verified peer at once; the banner must
+     * not blame them for it.
+     */
+    /**
+     * After `POST /chats/private`: pin the person the user chose before anything else can name the
+     * counterpart (`MembershipGuardService.pinCreatedPrivateChat`). Throws `MembershipMismatchError`
+     * when the response disagrees; the caller must then not open the chat.
+     */
+    adoptCreatedPrivateChat(chat: Chat, targetUserId: string): void {
+        this.membership.pinCreatedPrivateChat(chat, targetUserId);
+    }
+
+    /** A device was added to our account since unlock (`KeyStoreService.ownDevicesAdded`). */
+    readonly ownDevicesAdded = computed(() => this.keyStore.ownDevicesAdded());
+
+    readonly ownDevicesChanged = computed(() => {
+        const chatId = this.activeChatId();
+        const me = this.session.user()?.id;
+        return !!chatId && !!me && this.keyChange.ownDevicesChangedIn(chatId, me) && this.keyChangedPeers().length > 0;
+    });
+
+    /**
+     * Sending is impossible while the member set is in doubt, while a verified member's key has
+     * changed, or while there is no key to seal with. Refusing in every case is the whole point.
      */
     readonly canSend = computed(
-        () => this.memberVerificationError() === null && !this.peerDeleted() && this.encryptionUnavailable() === null
+        () =>
+            this.memberVerificationError() === null &&
+            this.keyChangedPeers().length === 0 &&
+            !this.peerDeleted() &&
+            this.encryptionUnavailable() === null
     );
 
     /**
@@ -273,6 +350,16 @@ export class ChatStoreService {
     readonly sendBlockedReason = computed<string | null>(() => {
         if (this.memberVerificationError()) {
             return 'Blocked: the member set for this chat could not be verified.';
+        }
+        const changed = this.keyChangedPeers();
+        if (changed.length > 0 && this.ownDevicesChanged()) {
+            return 'Your own device list changed, so your safety numbers changed. Review them before sending.';
+        }
+        if (changed.length > 0) {
+            const names = changed.map((id) => this.directory.lookup(id).name);
+            const subject =
+                names.length === 1 ? `The security key of ${names[0]}` : `The security keys of ${names.join(', ')}`;
+            return `${subject} changed. Review ${names.length === 1 ? 'their' : 'each'} safety number before sending.`;
         }
         if (this.peerDeleted()) {
             return PEER_DELETED_NOTICE;
@@ -360,6 +447,7 @@ export class ChatStoreService {
                     this.chatQueues.clear();
                     this.countedUnread.clear();
                     this.polls.clear();
+                    this.keyChange.clearSession();
                 });
             }
         });
@@ -733,7 +821,7 @@ export class ChatStoreService {
      * Without the merge there is no counterpart id for a private chat, so the safety number — the
      * only defence against a substituted key — would have nothing to point at.
      */
-    private async hydrateChat(chatId: string): Promise<Chat | null> {
+    private async hydrateChat(chatId: string, checkMembership = true): Promise<Chat | null> {
         try {
             const detail = await firstValueFrom(this.chatApi.getChat(chatId));
 
@@ -753,6 +841,12 @@ export class ChatStoreService {
             // Names for anyone in this chat we cannot already identify. Awaited so the first paint
             // of the conversation has them, rather than showing ids and correcting itself.
             await this.directory.resolveMissing(detail.participants.map((p) => p.user_id));
+
+            // Pins a private chat's counterpart as of the moment it was opened — or raises the
+            // membership alarm at once if this chat contradicts the pin, rather than at first send.
+            if (checkMembership) {
+                await this.checkMembership(chatId);
+            }
 
             return this.chats().find((c) => c.id === chatId) ?? detail;
         } catch {
@@ -830,6 +924,64 @@ export class ChatStoreService {
     }
 
     /**
+     * Verified members of `chatId` whose key changed: those observed changed among the known
+     * participants, plus those with an outstanding refusal in this chat. Reactive.
+     */
+    private keyChangedPeersFor(chatId: string): string[] {
+        const me = this.session.user()?.id;
+        if (!me) {
+            return [];
+        }
+        const chat = this.chats().find((c) => c.id === chatId);
+        const fromObservations = this.keyChange.changedAmong(
+            me,
+            (chat?.participants ?? []).map((p) => p.user_id).filter((id) => id !== me)
+        );
+        // Refusals are recorded per chat by the key store when it refuses, so they hold whatever the
+        // participant list says — including when it failed to load or omits the member.
+        const fromRefusals = this.keyChange.refusedPeers(chatId, me);
+        return [...new Set([...fromObservations, ...fromRefusals])];
+    }
+
+    /**
+     * Tell the key store who may appear in this chat's roster before anything is sealed for it —
+     * `MembershipGuardService.register`, which throws `MembershipMismatchError` or
+     * `MembershipUnconfirmedError` when it cannot. A private chat's participants are loaded first
+     * when they are not (the chat list never carries them); that load skips its own membership check,
+     * so the check runs exactly once, here.
+     */
+    private async ensureMembership(chatId: string, hydrate = true): Promise<void> {
+        let chat = this.chats().find((c) => c.id === chatId);
+        if (!chat) {
+            return;
+        }
+        if (hydrate && chat.chat_type === 'private' && chat.participants.length === 0) {
+            chat = (await this.hydrateChat(chatId, false)) ?? chat;
+        }
+        this.membership.register(chat, this.adoptGroupMembers);
+    }
+
+    /** The participant list a group publish was checked against becomes the one the member list shows. */
+    private readonly adoptGroupMembers: GroupMembersSink = (chatId, participants) => {
+        this.chats.update((list) => list.map((c) => (c.id === chatId ? { ...c, participants } : c)));
+    };
+
+    /**
+     * `ensureMembership` outside a send: a contradiction raises the membership alarm for the open
+     * chat straight away; an unconfirmed membership is left for the send path to report.
+     */
+    private async checkMembership(chatId: string): Promise<void> {
+        try {
+            await this.ensureMembership(chatId, false);
+        } catch (error) {
+            if (isRosterVerificationFailure(error) && this.activeChatId() === chatId) {
+                this.memberVerificationError.set(error.message);
+                this.memberVerificationCode.set(error.code);
+            }
+        }
+    }
+
+    /**
      * Send, tracking the outcome as its own state.
      *
      * `MessageService.sendText` already re-encrypts and retries once on EPOCH_STALE — that path is
@@ -846,6 +998,12 @@ export class ChatStoreService {
         const chatId = this.activeChatId();
         const chat = this.activeChat();
         if (!chatId || !chat || (!content && !text.trim() && !attachments?.length) || this.peerDeleted()) {
+            return;
+        }
+        // A key change already on record blocks before any sealing. `ensureSenderChain` only
+        // re-checks the roster when it has no cached chain for the epoch, so a send here would
+        // otherwise go out on a chain whose key the substituted device already holds.
+        if (this.keyChangedPeers().length > 0) {
             return;
         }
         // Channel posts are signed text; there is no sealed payload to carry a poll or a location.
@@ -876,9 +1034,12 @@ export class ChatStoreService {
         ]);
 
         try {
+            // Every type, channels included: a private chat re-labelled as a channel would otherwise
+            // turn the user's next message into a readable post. `ensureMembership` refuses that.
+            await this.ensureMembership(chatId);
             const sent =
                 chat.chat_type === 'channel'
-                    ? await this.messages_.sendChannelPost(chatId, text, clientMessageId)
+                    ? await this.postToChannel(chatId, text, clientMessageId)
                     : await this.messages_.sendText(
                           chatId,
                           text,
@@ -913,6 +1074,38 @@ export class ChatStoreService {
                 return;
             }
 
+            if (isMembershipUnconfirmed(error)) {
+                // Nothing distributed and nothing known to be wrong: a retryable row that says what
+                // actually happened instead of a bare "Send failed.".
+                this.pending.update((p) =>
+                    p.map((item) =>
+                        item.localId === localId
+                            ? { ...item, status: 'failed' as const, membershipFailure: true }
+                            : item
+                    )
+                );
+                return;
+            }
+
+            if (isKeyChanged(error)) {
+                // Blocking, and only the user can lift it: a verified member's key changed, so no
+                // chain key was handed out. `KeyStoreService` recorded the refusal per chat as it
+                // threw, so the block and its banner hold even if the participant list is missing
+                // or omits that member.
+                //
+                // The draft is kept as a failed row, not dropped: retrying now cannot change the
+                // answer, but the user's words must survive while they re-compare the number, and
+                // Retry goes through once the new number is accepted.
+                this.pending.update((p) =>
+                    p.map((item) =>
+                        item.localId === localId
+                            ? { ...item, status: 'failed' as const, keyChangedFailure: true }
+                            : item
+                    )
+                );
+                return;
+            }
+
             this.pending.update((p) =>
                 p.map((item) =>
                     item.localId === localId
@@ -935,6 +1128,12 @@ export class ChatStoreService {
     async retry(localId: string): Promise<void> {
         const item = this.pending().find((p) => p.localId === localId);
         if (!item) {
+            return;
+        }
+
+        // Refused outright while sending is blocked: `send` would return early, and removing the row
+        // first would silently discard the draft the failed row exists to keep.
+        if (!this.canSend()) {
             return;
         }
 
@@ -970,8 +1169,25 @@ export class ChatStoreService {
         if (!chatId || !this.canSend()) {
             throw new Error('sending is blocked');
         }
-        const { sent, message } = await this.messages_.sendControl(chatId, content);
-        this.polls.ingestSent(sent, message);
+        try {
+            await this.ensureMembership(chatId);
+            const { sent, message } = await this.messages_.sendControl(chatId, content);
+            this.polls.ingestSent(sent, message);
+        } catch (error) {
+            this.noteBlockingRefusal(error);
+            throw error;
+        }
+    }
+
+    /**
+     * Raise the roster alarm for a send that has no pending row of its own (vote, edit). A key
+     * change needs nothing here: the key store recorded the refusal as it threw.
+     */
+    private noteBlockingRefusal(error: unknown): void {
+        if (isRosterVerificationFailure(error)) {
+            this.memberVerificationError.set(error.message);
+            this.memberVerificationCode.set(error.code);
+        }
     }
 
     discardPending(localId: string): void {
@@ -1040,7 +1256,32 @@ export class ChatStoreService {
      */
     async forwardSelected(targetChatId: string): Promise<number> {
         const picked = this.selectedIds();
-        const target = this.chats().find((c) => c.id === targetChatId);
+        let target = this.chats().find((c) => c.id === targetChatId);
+
+        // The target is usually not the open chat, so its participants may never have been loaded;
+        // without them neither the key-change check below nor the member expectation has anything
+        // to go on. Loaded without the hydrate's own membership check: it runs once, just below.
+        if (target && target.chat_type !== 'channel' && target.participants.length === 0) {
+            target = (await this.hydrateChat(targetChatId, false)) ?? target;
+        }
+
+        // Membership first, for every target type. Gating it on "not a channel" let a pinned private
+        // chat the server re-labels as a channel receive the forward as a readable post.
+        try {
+            await this.ensureMembership(targetChatId, false);
+        } catch (error) {
+            this.refuseForward(targetChatId, error);
+            return 0;
+        }
+
+        // The same block `send` applies to the open chat. A forward is a send into the target, so a
+        // verified member there whose key changed must stop it before anything is sealed — the
+        // target's cached chain could otherwise carry it to the substituted device. The selection
+        // is kept so the user can forward again once the number is reviewed.
+        if (this.keyChangedPeersFor(targetChatId).length > 0) {
+            this.realtimeError.set(FORWARD_KEY_CHANGED_NOTICE);
+            return 0;
+        }
 
         const readable = this.messages()
             .filter((m) => picked.has(m.id) && m.text !== null)
@@ -1058,18 +1299,84 @@ export class ChatStoreService {
                     // Channel posts carry no forward metadata, so attribution would be dropped
                     // silently. Sending the text unchanged is honest: it is a post by us, and that is
                     // what the recipient sees.
-                    await this.messages_.sendChannelPost(targetChatId, message.text!);
+                    await this.postToChannel(targetChatId, message.text!);
                 } else {
                     await this.messages_.sendText(targetChatId, message.text!, undefined, undefined, origin);
                 }
                 sent += 1;
-            } catch {
+            } catch (error) {
+                // Every later message would be refused the same way, so stop at the first blocking
+                // refusal and keep the selection for another try after review.
+                if (isKeyChanged(error)) {
+                    this.realtimeError.set(FORWARD_KEY_CHANGED_NOTICE);
+                    return sent;
+                }
+                if (isRosterVerificationFailure(error) || isMembershipUnconfirmed(error)) {
+                    this.refuseForward(targetChatId, error);
+                    return sent;
+                }
                 this.realtimeError.set('Some messages could not be forwarded.');
             }
         }
 
         this.clearSelection();
         return sent;
+    }
+
+    /** Say why a forward was refused; a roster alarm for the open chat also shows as its banner. */
+    private refuseForward(targetChatId: string, error: unknown): void {
+        if (isRosterVerificationFailure(error) && this.activeChatId() === targetChatId) {
+            this.memberVerificationError.set(error.message);
+            this.memberVerificationCode.set(error.code);
+        }
+        this.realtimeError.set(FORWARD_MEMBERSHIP_NOTICE);
+    }
+
+    /**
+     * The one way this store publishes a signed, readable channel post. Refuses a chat pinned as
+     * private, whatever type it is reported as now: `ensureMembership` already refuses that, and this
+     * is the second line, so a future caller that forgets the first cannot publish a private chat's
+     * message in the clear.
+     */
+    private postToChannel(chatId: string, text: string, clientMessageId?: string): Promise<MessageResponse> {
+        if (this.membership.isPinnedPrivate(chatId)) {
+            return Promise.reject(
+                new MembershipMismatchError(
+                    'Member verification failed: this was a private chat and is now reported as a channel. ' +
+                        'Refusing to post it in the clear.'
+                )
+            );
+        }
+        return this.messages_.sendChannelPost(chatId, text, clientMessageId);
+    }
+
+    /**
+     * The key-changed banner's "Re-check": re-run the open chat's roster check now. A refusal blocks
+     * the composer, so no send could ever re-check it — if the peer's key changed again, or the user
+     * confirmed the new number elsewhere, the chat would otherwise stay blocked on a stale number.
+     * Success lifts the block; a roster that still differs is refused again, on its current number.
+     */
+    async recheckKeyChange(): Promise<void> {
+        const chatId = this.activeChatId();
+        if (!chatId) {
+            return;
+        }
+        try {
+            await this.ensureMembership(chatId);
+            const keys = await firstValueFrom(this.cryptoApi.getChatKeys(chatId));
+            await this.keyStore.recheckRoster(chatId, keys.current_epoch);
+        } catch (error) {
+            if (isKeyChanged(error)) {
+                // Still refused; the key store re-recorded it on the number in force now.
+                return;
+            }
+            if (isRosterVerificationFailure(error)) {
+                this.memberVerificationError.set(error.message);
+                this.memberVerificationCode.set(error.code);
+                return;
+            }
+            this.realtimeError.set('Could not re-check the keys for this chat.');
+        }
     }
 
     /**
@@ -1086,6 +1393,11 @@ export class ChatStoreService {
         if (!chatId || !text.trim()) {
             return;
         }
+        // An edit is sealed on the same sending chain as a new message, so whatever blocks sending
+        // blocks it too — loudly, so the caller can say so instead of the edit silently vanishing.
+        if (!this.canSend()) {
+            throw new Error('sending is blocked');
+        }
 
         const existing = this.messages().find((m) => m.id === messageId);
         // Only text can be re-sealed from the composer. A poll or location edited this way would
@@ -1093,12 +1405,19 @@ export class ChatStoreService {
         if (existing && contentOf(existing).kind !== 'text') {
             return;
         }
-        const edited = await this.messages_.editText(
-            chatId,
-            messageId,
-            text.trim(),
-            attachments ?? existing?.attachments
-        );
+        let edited: DecryptedMessage;
+        try {
+            await this.ensureMembership(chatId);
+            edited = await this.messages_.editText(
+                chatId,
+                messageId,
+                text.trim(),
+                attachments ?? existing?.attachments
+            );
+        } catch (error) {
+            this.noteBlockingRefusal(error);
+            throw error;
+        }
         this.messages.update((list) => list.map((m) => (m.id === edited.id ? edited : m)));
         this.cachePreview(chatId, [edited]);
     }

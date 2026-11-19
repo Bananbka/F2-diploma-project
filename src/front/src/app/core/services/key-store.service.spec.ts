@@ -7,7 +7,14 @@ import { v4 as uuidv4 } from 'uuid';
 
 import { sealMessage } from '../crypto/envelope';
 import { computeMemberSetHash, signDistribution, wrapChainKey } from '../crypto/grants';
-import { generateIdentity, IdentityBundle, KdfParams, sealPrivateBundle } from '../crypto/identity';
+import {
+    generateIdentity,
+    IdentityBundle,
+    KdfParams,
+    safetyNumber,
+    sealPrivateBundle,
+    userFingerprintMaterial,
+} from '../crypto/identity';
 import { b64uDecode, b64uEncode, utf8 } from '../crypto/primitives';
 import { generateChainKey, SenderChain } from '../crypto/ratchet';
 import {
@@ -20,10 +27,20 @@ import {
 } from '../models/crypto.model';
 import { ChatApiService } from './chat-api.service';
 import { CryptoApiService } from './crypto-api.service';
-import { MemberSetMismatchError, RetryLimitExceededError, RosterVerificationError } from './crypto-errors';
+import {
+    KeyChangedError,
+    MemberSetMismatchError,
+    MembershipMismatchError,
+    MembershipUnconfirmedError,
+    RetryLimitExceededError,
+    RosterVerificationError,
+    UnknownOwnDeviceError,
+} from './crypto-errors';
+import { KeyChangeStateService } from './key-change-state.service';
 import { KeyStoreService, SENDER_KEY_PUBLISH_POLICY } from './key-store.service';
 import { MessageService } from './message.service';
 import { SKIPPED_KEY_DB_NAME, SKIPPED_KEY_IDB, SkippedKeyStore } from './skipped-key-store.service';
+import { TrustStoreService } from './trust-store.service';
 
 const USER = 'a0000000-0000-4000-8000-000000000001';
 const DEVICE = 'b0000000-0000-4000-8000-000000000002';
@@ -181,7 +198,7 @@ describe('KeyStoreService', () => {
     afterEach(() => localStorage.clear());
 
     /** Unlocks the service against a freshly-sealed bundle this test fully controls. */
-    async function unlockWithBundle(withPrekey: boolean): Promise<IdentityBundle> {
+    async function unlockWithBundle(withPrekey: boolean, otherOwnDevices: OwnIdentity[] = []): Promise<IdentityBundle> {
         localStorage.setItem('ns.device_id', DEVICE);
 
         // Sealing costs a full Argon2id run; the bundle is immutable, so seal each shape once.
@@ -201,7 +218,7 @@ describe('KeyStoreService', () => {
             signed_prekey_created_at: null,
             display_name: 'test device',
         };
-        cryptoApi.getOwnIdentities.and.returnValue(of([own]));
+        cryptoApi.getOwnIdentities.and.returnValue(of([own, ...otherOwnDevices]));
 
         const ok = await service.unlock(USER, PASSWORD);
         expect(ok).toBeTrue();
@@ -625,6 +642,8 @@ describe('KeyStoreService', () => {
         const http = (status: number, code?: string) =>
             new HttpErrorResponse({ status, error: code ? { error_code: code } : null });
 
+        beforeEach(() => service.expectMembers(CHAT, { kind: 'private', selfId: USER, peerId: SENDER_USER }));
+
         it('publishes on the first try without sleeping', async () => {
             const bundle = await unlockWithBundle(true);
             cryptoApi.getRoster.and.returnValue(of(rosterFor(bundle)));
@@ -733,6 +752,812 @@ describe('KeyStoreService', () => {
 
             await expectAsync(service.ensureSenderChain(CHAT, 1)).toBeRejectedWithError('key store is locked');
             expect(cryptoApi.publishSenderKey).toHaveBeenCalledTimes(1);
+        });
+    });
+
+    /**
+     * The gap §5.0.2 leaves open: a roster whose every entry is self-consistent and whose hash
+     * matches the commitment is exactly what a server replacing a peer's device produces. The only
+     * thing it cannot forge is the safety number the user already compared with that person.
+     */
+    describe('key change of a verified peer', () => {
+        let trust: TrustStoreService;
+
+        /** The number the safety-number screen would show for `peer`, derived the same way. */
+        const numberFor = (mine: IdentityBundle, peer: IdentityBundle) =>
+            safetyNumber(userFingerprintMaterial([mine.signingPublic]), userFingerprintMaterial([peer.signingPublic]));
+
+        function entryFor(userId: string, deviceId: string, bundle: IdentityBundle): RosterEntry {
+            return {
+                user_id: userId,
+                device_id: deviceId,
+                identity_key_id: uuidv4(),
+                identity_public_key: b64uEncode(bundle.identityPublic),
+                signing_public_key: b64uEncode(bundle.signingPublic),
+                identity_key_signature: b64uEncode(bundle.identityKeySignature),
+                signed_prekey_public: bundle.prekeyPublic ? b64uEncode(bundle.prekeyPublic) : null,
+                signed_prekey_signature: bundle.signedPrekeySignature ? b64uEncode(bundle.signedPrekeySignature) : null,
+            };
+        }
+
+        /** A roster of us plus one peer device: self-consistent, with the hash the server would store. */
+        function rosterWith(mine: IdentityBundle, peer: IdentityBundle): ChatRoster {
+            const members = [entryFor(USER, DEVICE, mine), entryFor(SENDER_USER, SENDER_DEVICE, peer)];
+            return { chat_id: CHAT, current_epoch: 1, member_set_hash: computeMemberSetHash(members), members };
+        }
+
+        beforeEach(() => {
+            trust = TestBed.inject(TrustStoreService);
+            cryptoApi.publishSenderKey.and.returnValue(of({}));
+            service.expectMembers(CHAT, { kind: 'private', selfId: USER, peerId: SENDER_USER });
+        });
+
+        it('wraps for a verified peer whose key is unchanged', async () => {
+            const mine = await unlockWithBundle(true);
+            const peer = generateIdentity(SENDER_USER, SENDER_DEVICE);
+            trust.markVerified(USER, SENDER_USER, numberFor(mine, peer));
+            cryptoApi.getRoster.and.returnValue(of(rosterWith(mine, peer)));
+
+            await service.ensureSenderChain(CHAT, 1);
+
+            expect(cryptoApi.publishSenderKey).toHaveBeenCalledTimes(1);
+            const grants = cryptoApi.publishSenderKey.calls.mostRecent().args[2].grants;
+            expect(grants.map((g) => g.recipient_device_id)).toContain(SENDER_DEVICE);
+            expect(TestBed.inject(KeyChangeStateService).observedState(USER, SENDER_USER)?.kind).toBe('verified');
+        });
+
+        it('refuses to wrap for a verified peer whose key changed, and publishes nothing', async () => {
+            const mine = await unlockWithBundle(true);
+            const original = generateIdentity(SENDER_USER, SENDER_DEVICE);
+            trust.markVerified(USER, SENDER_USER, numberFor(mine, original));
+
+            // The server now presents a device it minted itself: valid self-binding, recomputed hash.
+            const planted = generateIdentity(SENDER_USER, SENDER_DEVICE);
+            cryptoApi.getRoster.and.returnValue(of(rosterWith(mine, planted)));
+
+            const failure = await service.ensureSenderChain(CHAT, 1).then(
+                () => null,
+                (error: unknown) => error
+            );
+
+            expect(failure).toBeInstanceOf(KeyChangedError);
+            expect(failure).not.toBeInstanceOf(RosterVerificationError);
+            const changed = failure as KeyChangedError;
+            expect(changed.code).toBe('KEY_CHANGED');
+            expect(changed.chatId).toBe(CHAT);
+            expect(changed.peers.map((p) => p.userId)).toEqual([SENDER_USER]);
+            expect(changed.peers[0].previous).toBe(numberFor(mine, original));
+            expect(changed.peers[0].current).toBe(numberFor(mine, planted));
+            expect(cryptoApi.publishSenderKey).not.toHaveBeenCalled();
+            // Not a transient failure: no retry, no second roster read.
+            expect(cryptoApi.getRoster).toHaveBeenCalledTimes(1);
+            expect(sleep).not.toHaveBeenCalled();
+            expect(TestBed.inject(KeyChangeStateService).observedState(USER, SENDER_USER)?.kind).toBe('changed');
+        });
+
+        it('keeps blocking while the trust store still says changed, and wraps once the new number is confirmed', async () => {
+            const mine = await unlockWithBundle(true);
+            const original = generateIdentity(SENDER_USER, SENDER_DEVICE);
+            const planted = generateIdentity(SENDER_USER, SENDER_DEVICE);
+            trust.markVerified(USER, SENDER_USER, numberFor(mine, original));
+            cryptoApi.getRoster.and.returnValue(of(rosterWith(mine, planted)));
+
+            await expectAsync(service.ensureSenderChain(CHAT, 1)).toBeRejectedWithError(KeyChangedError);
+            await expectAsync(service.ensureSenderChain(CHAT, 1)).toBeRejectedWithError(KeyChangedError);
+            expect(cryptoApi.publishSenderKey).not.toHaveBeenCalled();
+
+            // The user compared the new number out of band and accepted it in the safety-number screen.
+            trust.markVerified(USER, SENDER_USER, numberFor(mine, planted));
+
+            await service.ensureSenderChain(CHAT, 1);
+            expect(cryptoApi.publishSenderKey).toHaveBeenCalledTimes(1);
+        });
+
+        it('wraps for a peer the user never verified, whatever key they present', async () => {
+            const mine = await unlockWithBundle(true);
+            const peer = generateIdentity(SENDER_USER, SENDER_DEVICE);
+            cryptoApi.getRoster.and.returnValue(of(rosterWith(mine, peer)));
+
+            await service.ensureSenderChain(CHAT, 1);
+
+            expect(cryptoApi.publishSenderKey).toHaveBeenCalledTimes(1);
+            // Trust on first use: the number is noted so the safety-number screen and the chat header
+            // can read it, but nothing is claimed about it.
+            expect(TestBed.inject(KeyChangeStateService).observedState(USER, SENDER_USER)?.kind).toBe('unverified');
+        });
+
+        /**
+         * On receive the distribution is still ingested — the user should be able to read what the
+         * possibly-substituted sender wrote — but the change is recorded so sending blocks.
+         */
+        it('records a changed key when ingesting a distribution, without dropping the grant', async () => {
+            const mine = await unlockWithBundle(true);
+            const original = generateIdentity(SENDER_USER, SENDER_DEVICE);
+            trust.markVerified(USER, SENDER_USER, numberFor(mine, original));
+
+            const planted = generateIdentity(SENDER_USER, SENDER_DEVICE);
+            cryptoApi.getKeysBatch.and.returnValue(
+                of([publicKeyFor(USER, DEVICE, mine), publicKeyFor(SENDER_USER, SENDER_DEVICE, planted)])
+            );
+            const dist = await buildDistribution({
+                epoch: 1,
+                senderIdentity: planted,
+                recipientPublic: mine.prekeyPublic!,
+                recipientDeviceId: DEVICE,
+            });
+
+            await service.ingestDistributions(CHAT, [dist]);
+
+            expect(cryptoApi.getKeysBatch).toHaveBeenCalledWith([USER, SENDER_USER]);
+            expect(service.getReceiverChain(CHAT, 1, dist.sender_key_id)).toBeDefined();
+            const state = TestBed.inject(KeyChangeStateService).observedState(USER, SENDER_USER);
+            expect(state?.kind).toBe('changed');
+            expect(state?.kind === 'changed' && state.previous).toBe(numberFor(mine, original));
+        });
+
+        it('observes an unchanged key on ingest as still verified', async () => {
+            const mine = await unlockWithBundle(true);
+            const peer = generateIdentity(SENDER_USER, SENDER_DEVICE);
+            trust.markVerified(USER, SENDER_USER, numberFor(mine, peer));
+            cryptoApi.getKeysBatch.and.returnValue(
+                of([publicKeyFor(USER, DEVICE, mine), publicKeyFor(SENDER_USER, SENDER_DEVICE, peer)])
+            );
+            const dist = await buildDistribution({
+                epoch: 1,
+                senderIdentity: peer,
+                recipientPublic: mine.prekeyPublic!,
+                recipientDeviceId: DEVICE,
+            });
+
+            await service.ingestDistributions(CHAT, [dist]);
+
+            expect(service.getReceiverChain(CHAT, 1, dist.sender_key_id)).toBeDefined();
+            expect(TestBed.inject(KeyChangeStateService).observedState(USER, SENDER_USER)?.kind).toBe('verified');
+        });
+    });
+
+    /**
+     * Follow-ups to the key-change check from the security review (G1-G7). Each block names the gap
+     * it closes; together they make "a verified peer's number is unchanged" actually imply "nobody
+     * else can read what we wrap".
+     */
+    describe('roster membership and trust follow-ups', () => {
+        const OUTSIDER = 'f0000000-0000-4000-8000-00000000000f';
+        const OUTSIDER_DEVICE = 'f1000000-0000-4000-8000-00000000001f';
+        const SECOND_DEVICE = 'e2000000-0000-4000-8000-00000000002e';
+        let trust: TrustStoreService;
+
+        const numberFor = (mine: IdentityBundle[], peer: IdentityBundle[]) =>
+            safetyNumber(
+                userFingerprintMaterial(mine.map((b) => b.signingPublic)),
+                userFingerprintMaterial(peer.map((b) => b.signingPublic))
+            );
+
+        function entryFor(userId: string, deviceId: string, bundle: IdentityBundle): RosterEntry {
+            return {
+                user_id: userId,
+                device_id: deviceId,
+                identity_key_id: uuidv4(),
+                identity_public_key: b64uEncode(bundle.identityPublic),
+                signing_public_key: b64uEncode(bundle.signingPublic),
+                identity_key_signature: b64uEncode(bundle.identityKeySignature),
+                signed_prekey_public: bundle.prekeyPublic ? b64uEncode(bundle.prekeyPublic) : null,
+                signed_prekey_signature: bundle.signedPrekeySignature ? b64uEncode(bundle.signedPrekeySignature) : null,
+            };
+        }
+
+        /** A self-consistent roster with the hash the server would store — what a lying server can produce. */
+        function roster(...members: RosterEntry[]): ChatRoster {
+            return { chat_id: CHAT, current_epoch: 1, member_set_hash: computeMemberSetHash(members), members };
+        }
+
+        const failureOf = (promise: Promise<unknown>) =>
+            promise.then(
+                () => null,
+                (error: unknown) => error
+            );
+
+        const wrappedTo = () =>
+            cryptoApi.publishSenderKey.calls.mostRecent().args[2].grants.map((g) => g.recipient_device_id);
+
+        beforeEach(() => {
+            trust = TestBed.inject(TrustStoreService);
+            cryptoApi.publishSenderKey.and.returnValue(of({}));
+        });
+
+        describe('G1: user ids the chat does not contain', () => {
+            it('refuses a ghost device under a third user id in a private chat, though the verified number is unchanged', async () => {
+                const mine = await unlockWithBundle(true);
+                const peer = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                trust.markVerified(USER, SENDER_USER, numberFor([mine], [peer]));
+                service.expectMembers(CHAT, { kind: 'private', selfId: USER, peerId: SENDER_USER });
+
+                // Server-minted, validly self-bound, and the commitment recomputed to include it.
+                const ghost = generateIdentity(OUTSIDER, OUTSIDER_DEVICE);
+                cryptoApi.getRoster.and.returnValue(
+                    of(
+                        roster(
+                            entryFor(USER, DEVICE, mine),
+                            entryFor(SENDER_USER, SENDER_DEVICE, peer),
+                            entryFor(OUTSIDER, OUTSIDER_DEVICE, ghost)
+                        )
+                    )
+                );
+
+                const failure = await failureOf(service.ensureSenderChain(CHAT, 1));
+
+                expect(failure).toBeInstanceOf(MembershipMismatchError);
+                expect((failure as RosterVerificationError).code).toBe('MEMBERSHIP_MISMATCH');
+                expect((failure as Error).message).toContain(OUTSIDER_DEVICE);
+                expect(cryptoApi.publishSenderKey).not.toHaveBeenCalled();
+                expect(sleep).not.toHaveBeenCalled();
+            });
+
+            it('refuses to replace a private pin with a different counterpart, and keeps the pin', async () => {
+                const mine = await unlockWithBundle(true);
+                const ghost = generateIdentity(OUTSIDER, OUTSIDER_DEVICE);
+                service.expectMembers(CHAT, { kind: 'private', selfId: USER, peerId: SENDER_USER });
+                expect(() =>
+                    service.expectMembers(CHAT, { kind: 'private', selfId: USER, peerId: OUTSIDER })
+                ).toThrowError(MembershipMismatchError);
+                cryptoApi.getRoster.and.returnValue(
+                    of(roster(entryFor(USER, DEVICE, mine), entryFor(OUTSIDER, OUTSIDER_DEVICE, ghost)))
+                );
+
+                await expectAsync(service.ensureSenderChain(CHAT, 1)).toBeRejectedWithError(RosterVerificationError);
+                expect(cryptoApi.publishSenderKey).not.toHaveBeenCalled();
+            });
+
+            it('refuses a roster that leaves us out entirely', async () => {
+                await unlockWithBundle(true);
+                const peer = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                service.expectMembers(CHAT, { kind: 'private', selfId: USER, peerId: SENDER_USER });
+                cryptoApi.getRoster.and.returnValue(of(roster(entryFor(SENDER_USER, SENDER_DEVICE, peer))));
+
+                const failure = await failureOf(service.ensureSenderChain(CHAT, 1));
+
+                expect(failure).toBeInstanceOf(RosterVerificationError);
+                expect((failure as Error).message).toContain('does not include your own devices');
+                expect(cryptoApi.publishSenderKey).not.toHaveBeenCalled();
+            });
+
+            it('checks a group roster against a freshly fetched participant list', async () => {
+                const mine = await unlockWithBundle(true);
+                const peer = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                const ghost = generateIdentity(OUTSIDER, OUTSIDER_DEVICE);
+                const resolve = jasmine.createSpy('resolve').and.resolveTo([USER, SENDER_USER]);
+                service.expectMembers(CHAT, { kind: 'group', resolve });
+                cryptoApi.getRoster.and.returnValue(
+                    of(
+                        roster(
+                            entryFor(USER, DEVICE, mine),
+                            entryFor(SENDER_USER, SENDER_DEVICE, peer),
+                            entryFor(OUTSIDER, OUTSIDER_DEVICE, ghost)
+                        )
+                    )
+                );
+
+                await expectAsync(service.ensureSenderChain(CHAT, 1)).toBeRejectedWithError(MembershipMismatchError);
+                // Re-read once (roster and participants) before raising: item 8's honest race.
+                expect(resolve).toHaveBeenCalledTimes(2);
+                expect(cryptoApi.getRoster).toHaveBeenCalledTimes(2);
+                expect(cryptoApi.publishSenderKey).not.toHaveBeenCalled();
+
+                // The same user once the participant list says they joined: a member, not an intruder.
+                resolve.and.resolveTo([USER, SENDER_USER, OUTSIDER]);
+                await service.ensureSenderChain(CHAT, 1);
+                expect(resolve).toHaveBeenCalledTimes(3);
+                expect(wrappedTo()).toContain(OUTSIDER_DEVICE);
+            });
+
+            it('fails closed, without a roster alarm, when the chat membership is not known', async () => {
+                await unlockWithBundle(true);
+
+                const failure = await failureOf(service.ensureSenderChain(CHAT, 1));
+
+                expect(failure).toBeInstanceOf(MembershipUnconfirmedError);
+                expect(failure).not.toBeInstanceOf(RosterVerificationError);
+                expect(cryptoApi.getRoster).not.toHaveBeenCalled();
+                expect(cryptoApi.publishSenderKey).not.toHaveBeenCalled();
+            });
+
+            it('forgets every expectation on lock', async () => {
+                await unlockWithBundle(true);
+                service.expectMembers(CHAT, { kind: 'private', selfId: USER, peerId: SENDER_USER });
+
+                await service.lock();
+                await unlockWithBundle(true);
+
+                await expectAsync(service.ensureSenderChain(CHAT, 1)).toBeRejectedWithError(MembershipUnconfirmedError);
+            });
+        });
+
+        describe('G2: the send path reads the freshest stored record', () => {
+            it('blocks on a verification another tab stored, before any storage event arrives', async () => {
+                const mine = await unlockWithBundle(true);
+                const original = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                const planted = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                service.expectMembers(CHAT, { kind: 'private', selfId: USER, peerId: SENDER_USER });
+                // Written by another tab: this tab's TrustStoreService has never seen it.
+                localStorage.setItem(
+                    'ns.trusted_peers',
+                    JSON.stringify({
+                        [`${USER}:${SENDER_USER}`]: {
+                            safetyNumber: numberFor([mine], [original]),
+                            verifiedAt: '2026-01-01T00:00:00Z',
+                        },
+                    })
+                );
+                cryptoApi.getRoster.and.returnValue(
+                    of(roster(entryFor(USER, DEVICE, mine), entryFor(SENDER_USER, SENDER_DEVICE, planted)))
+                );
+
+                await expectAsync(service.ensureSenderChain(CHAT, 1)).toBeRejectedWithError(KeyChangedError);
+                expect(cryptoApi.publishSenderKey).not.toHaveBeenCalled();
+            });
+        });
+
+        describe('G3: a verification retires chains wrapped before it', () => {
+            it('reuses a cached chain while nothing the user confirmed has changed', async () => {
+                const mine = await unlockWithBundle(true);
+                const peer = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                service.expectMembers(CHAT, { kind: 'private', selfId: USER, peerId: SENDER_USER });
+                cryptoApi.getRoster.and.returnValue(
+                    of(roster(entryFor(USER, DEVICE, mine), entryFor(SENDER_USER, SENDER_DEVICE, peer)))
+                );
+
+                const first = await service.ensureSenderChain(CHAT, 1);
+                const second = await service.ensureSenderChain(CHAT, 1);
+
+                expect(second).toBe(first);
+                expect(cryptoApi.getRoster).toHaveBeenCalledTimes(1);
+                expect(cryptoApi.publishSenderKey).toHaveBeenCalledTimes(1);
+            });
+
+            /**
+             * The scenario from the review: while B was unverified the roster carried a ghost device
+             * for B and the chain was wrapped to it. The user then verifies B from the number the key
+             * lookup shows (B's real device only). Without re-checking, the rest of the epoch would go
+             * out on the chain the ghost already holds.
+             */
+            it('re-verifies the roster after the user verifies a peer, and refuses the ghost it now exposes', async () => {
+                const mine = await unlockWithBundle(true);
+                const real = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                const ghost = generateIdentity(SENDER_USER, SECOND_DEVICE);
+                service.expectMembers(CHAT, { kind: 'private', selfId: USER, peerId: SENDER_USER });
+                cryptoApi.getRoster.and.returnValue(
+                    of(
+                        roster(
+                            entryFor(USER, DEVICE, mine),
+                            entryFor(SENDER_USER, SENDER_DEVICE, real),
+                            entryFor(SENDER_USER, SECOND_DEVICE, ghost)
+                        )
+                    )
+                );
+                await service.ensureSenderChain(CHAT, 1);
+                expect(wrappedTo()).withContext('trust on first use').toContain(SECOND_DEVICE);
+
+                trust.markVerified(USER, SENDER_USER, numberFor([mine], [real]));
+
+                const failure = await failureOf(service.ensureSenderChain(CHAT, 1));
+                expect(failure).toBeInstanceOf(KeyChangedError);
+                expect(cryptoApi.getRoster).toHaveBeenCalledTimes(2);
+                expect(cryptoApi.publishSenderKey).toHaveBeenCalledTimes(1);
+            });
+
+            it('republishes after a verification even when the roster is clean', async () => {
+                const mine = await unlockWithBundle(true);
+                const peer = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                service.expectMembers(CHAT, { kind: 'private', selfId: USER, peerId: SENDER_USER });
+                cryptoApi.getRoster.and.returnValue(
+                    of(roster(entryFor(USER, DEVICE, mine), entryFor(SENDER_USER, SENDER_DEVICE, peer)))
+                );
+                const first = await service.ensureSenderChain(CHAT, 1);
+
+                trust.markVerified(USER, SENDER_USER, numberFor([mine], [peer]));
+                const second = await service.ensureSenderChain(CHAT, 1);
+
+                expect(second.senderKeyId).not.toBe(first.senderKeyId);
+                expect(cryptoApi.publishSenderKey).toHaveBeenCalledTimes(2);
+                // And the fresh chain is cached again until the next change.
+                expect(await service.ensureSenderChain(CHAT, 1)).toBe(second);
+            });
+
+            it('retires cached chains when a verification arrives from another tab', async () => {
+                const mine = await unlockWithBundle(true);
+                const peer = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                service.expectMembers(CHAT, { kind: 'private', selfId: USER, peerId: SENDER_USER });
+                cryptoApi.getRoster.and.returnValue(
+                    of(roster(entryFor(USER, DEVICE, mine), entryFor(SENDER_USER, SENDER_DEVICE, peer)))
+                );
+                const first = await service.ensureSenderChain(CHAT, 1);
+
+                localStorage.setItem(
+                    'ns.trusted_peers',
+                    JSON.stringify({
+                        [`${USER}:${SENDER_USER}`]: {
+                            safetyNumber: numberFor([mine], [peer]),
+                            verifiedAt: '2026-01-01T00:00:00Z',
+                        },
+                    })
+                );
+                window.dispatchEvent(new StorageEvent('storage', { key: 'ns.trusted_peers' }));
+
+                expect((await service.ensureSenderChain(CHAT, 1)).senderKeyId).not.toBe(first.senderKeyId);
+            });
+
+            it('invalidateOwnChains forces every chat to republish', async () => {
+                const mine = await unlockWithBundle(true);
+                service.expectMembers(CHAT, { kind: 'private', selfId: USER, peerId: SENDER_USER });
+                cryptoApi.getRoster.and.returnValue(of(roster(entryFor(USER, DEVICE, mine))));
+                const first = await service.ensureSenderChain(CHAT, 1);
+
+                service.invalidateOwnChains();
+
+                expect((await service.ensureSenderChain(CHAT, 1)).senderKeyId).not.toBe(first.senderKeyId);
+            });
+        });
+
+        describe('G5: a key lookup cannot clear what the roster showed', () => {
+            it('keeps the change and its blocking number when the batch lookup returns the old keys', async () => {
+                const mine = await unlockWithBundle(true);
+                const original = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                const planted = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                trust.markVerified(USER, SENDER_USER, numberFor([mine], [original]));
+                service.expectMembers(CHAT, { kind: 'private', selfId: USER, peerId: SENDER_USER });
+                cryptoApi.getRoster.and.returnValue(
+                    of(roster(entryFor(USER, DEVICE, mine), entryFor(SENDER_USER, SENDER_DEVICE, planted)))
+                );
+                await expectAsync(service.ensureSenderChain(CHAT, 1)).toBeRejectedWithError(KeyChangedError);
+
+                // The equivocating answer to the safety-number screen's lookup.
+                cryptoApi.getKeysBatch.and.returnValue(
+                    of([publicKeyFor(USER, DEVICE, mine), publicKeyFor(SENDER_USER, SENDER_DEVICE, original)])
+                );
+                expect((await service.computeSafetyNumber(SENDER_USER)).number).toBe(numberFor([mine], [original]));
+
+                expect(TestBed.inject(KeyChangeStateService).observedState(USER, SENDER_USER)?.kind).toBe('changed');
+                expect(TestBed.inject(KeyChangeStateService).blockingNumber(USER, SENDER_USER)).toBe(
+                    numberFor([mine], [planted])
+                );
+            });
+        });
+
+        describe('G6: a device under our own user id', () => {
+            /** `GET /crypto/identity/me` as it would list a device of ours (bundle fields unused here). */
+            const ownRow = (deviceId: string, bundle: IdentityBundle, isActive = true): OwnIdentity => ({
+                ...publicKeyFor(USER, deviceId, bundle),
+                is_active: isActive,
+                encrypted_private_bundle: '',
+                kdf_params: {} as OwnIdentity['kdf_params'],
+                created_at: '2026-01-01T00:00:00Z',
+                signed_prekey_created_at: null,
+                display_name: null,
+            });
+
+            /** Round 2, item 5: refused whatever anyone's verification state. */
+            it('refuses a device under our id that no device list of ours contains, with no verified peer', async () => {
+                const mine = await unlockWithBundle(true);
+                const peer = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                const ghostOfMine = generateIdentity(USER, SECOND_DEVICE);
+                service.expectMembers(CHAT, { kind: 'private', selfId: USER, peerId: SENDER_USER });
+                cryptoApi.getRoster.and.returnValue(
+                    of(
+                        roster(
+                            entryFor(USER, DEVICE, mine),
+                            entryFor(USER, SECOND_DEVICE, ghostOfMine),
+                            entryFor(SENDER_USER, SENDER_DEVICE, peer)
+                        )
+                    )
+                );
+
+                const failure = await failureOf(service.ensureSenderChain(CHAT, 1));
+
+                expect(failure).toBeInstanceOf(UnknownOwnDeviceError);
+                expect((failure as RosterVerificationError).code).toBe('OWN_DEVICE_UNKNOWN');
+                // The fresh device list was consulted before raising.
+                expect(cryptoApi.getOwnIdentities).toHaveBeenCalledTimes(2);
+                expect(cryptoApi.publishSenderKey).not.toHaveBeenCalled();
+            });
+
+            it('accepts a device of ours added since unlock, and attributes a verified number change to it', async () => {
+                const mine = await unlockWithBundle(true);
+                const peer = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                const newPhone = generateIdentity(USER, SECOND_DEVICE);
+                trust.markVerified(USER, SENDER_USER, numberFor([mine], [peer]));
+                service.expectMembers(CHAT, { kind: 'private', selfId: USER, peerId: SENDER_USER });
+                cryptoApi.getOwnIdentities.and.returnValue(of([ownRow(DEVICE, mine), ownRow(SECOND_DEVICE, newPhone)]));
+                cryptoApi.getRoster.and.returnValue(
+                    of(
+                        roster(
+                            entryFor(USER, DEVICE, mine),
+                            entryFor(USER, SECOND_DEVICE, newPhone),
+                            entryFor(SENDER_USER, SENDER_DEVICE, peer)
+                        )
+                    )
+                );
+
+                const failure = (await failureOf(service.ensureSenderChain(CHAT, 1))) as KeyChangedError;
+
+                expect(failure).toBeInstanceOf(KeyChangedError);
+                expect(failure.ownDevicesChanged).toBeTrue();
+                expect(failure.message).toContain('Your own device list changed');
+                expect(cryptoApi.publishSenderKey).not.toHaveBeenCalled();
+            });
+
+            it("does not flag our own devices when only the peer's key changed", async () => {
+                const mine = await unlockWithBundle(true);
+                const original = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                const planted = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                trust.markVerified(USER, SENDER_USER, numberFor([mine], [original]));
+                service.expectMembers(CHAT, { kind: 'private', selfId: USER, peerId: SENDER_USER });
+                cryptoApi.getRoster.and.returnValue(
+                    of(roster(entryFor(USER, DEVICE, mine), entryFor(SENDER_USER, SENDER_DEVICE, planted)))
+                );
+
+                const failure = (await failureOf(service.ensureSenderChain(CHAT, 1))) as KeyChangedError;
+
+                expect(failure.ownDevicesChanged).toBeFalse();
+            });
+
+            /** Round 2, item 9: only *extra* keys count; a revoked device merely being absent does not. */
+            it('does not flag a device of ours that is simply missing from the roster', async () => {
+                const revoked = generateIdentity(USER, SECOND_DEVICE);
+                // The unlock-time list holds both devices; the second is then revoked this session.
+                const mine = await unlockWithBundle(true, [ownRow(SECOND_DEVICE, revoked)]);
+                const original = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                const planted = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                service.noteOwnDeviceRevoked(SECOND_DEVICE);
+                trust.markVerified(USER, SENDER_USER, numberFor([mine], [original]));
+                service.expectMembers(CHAT, { kind: 'private', selfId: USER, peerId: SENDER_USER });
+                cryptoApi.getRoster.and.returnValue(
+                    of(roster(entryFor(USER, DEVICE, mine), entryFor(SENDER_USER, SENDER_DEVICE, planted)))
+                );
+
+                const failure = (await failureOf(service.ensureSenderChain(CHAT, 1))) as KeyChangedError;
+
+                expect(failure).toBeInstanceOf(KeyChangedError);
+                expect(failure.ownDevicesChanged).toBeFalse();
+            });
+
+            it('no longer explains a revoked device as ours once it was revoked this session', async () => {
+                const revoked = generateIdentity(USER, SECOND_DEVICE);
+                const mine = await unlockWithBundle(true, [ownRow(SECOND_DEVICE, revoked)]);
+                service.noteOwnDeviceRevoked(SECOND_DEVICE);
+                // The fresh list now marks it inactive, yet the roster still carries it.
+                cryptoApi.getOwnIdentities.and.returnValue(
+                    of([ownRow(DEVICE, mine), ownRow(SECOND_DEVICE, revoked, false)])
+                );
+                service.expectMembers(CHAT, { kind: 'private', selfId: USER, peerId: SENDER_USER });
+                cryptoApi.getRoster.and.returnValue(
+                    of(roster(entryFor(USER, DEVICE, mine), entryFor(USER, SECOND_DEVICE, revoked)))
+                );
+
+                await expectAsync(service.ensureSenderChain(CHAT, 1)).toBeRejectedWithError(UnknownOwnDeviceError);
+            });
+
+            it('reports an unknown own device from the safety-number lookup too', async () => {
+                const mine = await unlockWithBundle(true);
+                const peer = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                const ghostOfMine = generateIdentity(USER, SECOND_DEVICE);
+                cryptoApi.getKeysBatch.and.returnValue(
+                    of([
+                        publicKeyFor(USER, DEVICE, mine),
+                        publicKeyFor(USER, SECOND_DEVICE, ghostOfMine),
+                        publicKeyFor(SENDER_USER, SENDER_DEVICE, peer),
+                    ])
+                );
+
+                expect((await service.computeSafetyNumber(SENDER_USER)).ownDevicesUnknown).toBeTrue();
+
+                cryptoApi.getKeysBatch.and.returnValue(
+                    of([publicKeyFor(USER, DEVICE, mine), publicKeyFor(SENDER_USER, SENDER_DEVICE, peer)])
+                );
+                expect((await service.computeSafetyNumber(SENDER_USER)).ownDevicesUnknown).toBeFalse();
+            });
+
+            /** Round 3, N: a device our own list confirms is a notice, not an alarm. */
+            it('notes a device added to our account since unlock without refusing it', async () => {
+                const mine = await unlockWithBundle(true);
+                const peer = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                const newPhone = generateIdentity(USER, SECOND_DEVICE);
+                cryptoApi.getOwnIdentities.and.returnValue(of([ownRow(DEVICE, mine), ownRow(SECOND_DEVICE, newPhone)]));
+                service.expectMembers(CHAT, { kind: 'private', selfId: USER, peerId: SENDER_USER });
+                cryptoApi.getRoster.and.returnValue(
+                    of(
+                        roster(
+                            entryFor(USER, DEVICE, mine),
+                            entryFor(USER, SECOND_DEVICE, newPhone),
+                            entryFor(SENDER_USER, SENDER_DEVICE, peer)
+                        )
+                    )
+                );
+                expect(service.ownDevicesAdded()).toBeFalse();
+
+                await service.ensureSenderChain(CHAT, 1);
+
+                expect(cryptoApi.publishSenderKey).toHaveBeenCalledTimes(1);
+                expect(service.ownDevicesAdded()).toBeTrue();
+
+                cryptoApi.getKeysBatch.and.returnValue(
+                    of([
+                        publicKeyFor(USER, DEVICE, mine),
+                        publicKeyFor(USER, SECOND_DEVICE, newPhone),
+                        publicKeyFor(SENDER_USER, SENDER_DEVICE, peer),
+                    ])
+                );
+                const result = await service.computeSafetyNumber(SENDER_USER);
+                expect(result.ownDevicesAdded).toBeTrue();
+                expect(result.ownDevicesUnknown).toBeFalse();
+
+                await service.lock();
+                expect(service.ownDevicesAdded()).toBeFalse();
+            });
+        });
+
+        /** Round 2, item 1: a private expectation can never become a group one. */
+        describe('private pin versus a re-labelled chat', () => {
+            it('refuses a group expectation over a private one', async () => {
+                await unlockWithBundle(true);
+                service.expectMembers(CHAT, { kind: 'private', selfId: USER, peerId: SENDER_USER });
+
+                expect(() =>
+                    service.expectMembers(CHAT, { kind: 'group', resolve: async () => [USER, SENDER_USER, OUTSIDER] })
+                ).toThrowError(MembershipMismatchError);
+            });
+        });
+
+        /** Round 2, item 4: refusals are per chat, and clearing the verification does not lift one. */
+        describe('per-chat refusals', () => {
+            const OTHER_CHAT = 'c1000000-0000-4000-8000-0000000000c1';
+
+            it("keeps refusing a chat's ghost after another chat's honest roster and a cleared verification", async () => {
+                const mine = await unlockWithBundle(true);
+                const real = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                const ghost = generateIdentity(SENDER_USER, SECOND_DEVICE);
+                trust.markVerified(USER, SENDER_USER, numberFor([mine], [real]));
+                service.expectMembers(CHAT, { kind: 'private', selfId: USER, peerId: SENDER_USER });
+                service.expectMembers(OTHER_CHAT, { kind: 'private', selfId: USER, peerId: SENDER_USER });
+                const ghostRoster = roster(
+                    entryFor(USER, DEVICE, mine),
+                    entryFor(SENDER_USER, SENDER_DEVICE, real),
+                    entryFor(SENDER_USER, SECOND_DEVICE, ghost)
+                );
+                const honestRoster = {
+                    ...roster(entryFor(USER, DEVICE, mine), entryFor(SENDER_USER, SENDER_DEVICE, real)),
+                    chat_id: OTHER_CHAT,
+                };
+                cryptoApi.getRoster.and.callFake((id: string) => of(id === CHAT ? ghostRoster : honestRoster));
+
+                await expectAsync(service.ensureSenderChain(CHAT, 1)).toBeRejectedWithError(KeyChangedError);
+                const refused = numberFor([mine], [real, ghost]);
+
+                // The other chat's honest roster passes and observes the verified number...
+                await service.ensureSenderChain(OTHER_CHAT, 1);
+                // ...without erasing what CHAT was refused on.
+                expect(TestBed.inject(KeyChangeStateService).blockingNumber(USER, SENDER_USER, CHAT)).toBe(refused);
+                expect(TestBed.inject(KeyChangeStateService).observedState(USER, SENDER_USER)?.kind).toBe('changed');
+
+                // Clearing the verification must not turn the ghost into trust-on-first-use.
+                expect(trust.forget(USER, SENDER_USER)).withContext('refused while the refusal holds').toBe('refused');
+                await expectAsync(service.ensureSenderChain(CHAT, 1)).toBeRejectedWithError(KeyChangedError);
+                expect(cryptoApi.publishSenderKey).toHaveBeenCalledTimes(1);
+
+                // Only confirming that exact number lifts it.
+                trust.markVerified(USER, SENDER_USER, refused);
+                await service.ensureSenderChain(CHAT, 1);
+                expect(cryptoApi.publishSenderKey).toHaveBeenCalledTimes(2);
+            });
+
+            /**
+             * Round 3, C: N0 verified -> refused on N1 -> the user confirms N2 (the key changed again,
+             * or they compared elsewhere). The chat must not stay blocked on the stale N1: a re-check
+             * decides afresh — unblocking if the roster now derives N2, re-refusing on N2 otherwise.
+             */
+            describe('after a different number is confirmed (N0 -> N1 refused -> N2 confirmed)', () => {
+                let mine: IdentityBundle;
+                let n1Keys: IdentityBundle;
+                let n2Keys: IdentityBundle;
+                let keyChange: KeyChangeStateService;
+
+                beforeEach(async () => {
+                    mine = await unlockWithBundle(true);
+                    keyChange = TestBed.inject(KeyChangeStateService);
+                    const n0Keys = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                    n1Keys = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                    n2Keys = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                    trust.markVerified(USER, SENDER_USER, numberFor([mine], [n0Keys]));
+                    service.expectMembers(CHAT, { kind: 'private', selfId: USER, peerId: SENDER_USER });
+                    cryptoApi.getRoster.and.returnValue(
+                        of(roster(entryFor(USER, DEVICE, mine), entryFor(SENDER_USER, SENDER_DEVICE, n1Keys)))
+                    );
+                    await expectAsync(service.ensureSenderChain(CHAT, 1)).toBeRejectedWithError(KeyChangedError);
+                    trust.markVerified(USER, SENDER_USER, numberFor([mine], [n2Keys]));
+                });
+
+                it('no longer reports the stale refusal', () => {
+                    expect(keyChange.refusalFor(CHAT, USER, SENDER_USER)).toBeNull();
+                });
+
+                it('unblocks on re-check when the roster now derives N2', async () => {
+                    cryptoApi.getRoster.and.returnValue(
+                        of(roster(entryFor(USER, DEVICE, mine), entryFor(SENDER_USER, SENDER_DEVICE, n2Keys)))
+                    );
+
+                    await service.recheckRoster(CHAT, 1);
+
+                    expect(cryptoApi.publishSenderKey).toHaveBeenCalledTimes(1);
+                    expect(keyChange.observedState(USER, SENDER_USER)?.kind).toBe('verified');
+                    expect(keyChange.refusedPeers(CHAT, USER)).toEqual([]);
+                });
+
+                it('re-refuses on N2 when the roster still derives N1', async () => {
+                    const failure = (await failureOf(service.recheckRoster(CHAT, 1))) as KeyChangedError;
+
+                    expect(failure).toBeInstanceOf(KeyChangedError);
+                    expect(failure.peers[0].previous).toBe(numberFor([mine], [n2Keys]));
+                    expect(keyChange.refusalFor(CHAT, USER, SENDER_USER)?.current).toBe(numberFor([mine], [n1Keys]));
+                    expect(cryptoApi.publishSenderKey).not.toHaveBeenCalled();
+                });
+            });
+        });
+
+        describe("G7: a deleted account's retained keys", () => {
+            it('leaves inactive keys out of the safety number', async () => {
+                const mine = await unlockWithBundle(true);
+                const peer = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                const retired = generateIdentity(SENDER_USER, SECOND_DEVICE);
+                cryptoApi.getKeysBatch.and.returnValue(
+                    of([
+                        publicKeyFor(USER, DEVICE, mine),
+                        publicKeyFor(SENDER_USER, SENDER_DEVICE, peer),
+                        { ...publicKeyFor(SENDER_USER, SECOND_DEVICE, retired), is_active: false },
+                    ])
+                );
+
+                expect((await service.computeSafetyNumber(SENDER_USER)).number).toBe(numberFor([mine], [peer]));
+            });
+
+            it('does not report a change on ingest because of an inactive retained key', async () => {
+                const mine = await unlockWithBundle(true);
+                const peer = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                const retired = generateIdentity(SENDER_USER, SECOND_DEVICE);
+                trust.markVerified(USER, SENDER_USER, numberFor([mine], [peer]));
+                cryptoApi.getKeysBatch.and.returnValue(
+                    of([
+                        publicKeyFor(USER, DEVICE, mine),
+                        publicKeyFor(SENDER_USER, SENDER_DEVICE, peer),
+                        { ...publicKeyFor(SENDER_USER, SECOND_DEVICE, retired), is_active: false },
+                    ])
+                );
+                const dist = await buildDistribution({
+                    epoch: 1,
+                    senderIdentity: peer,
+                    recipientPublic: mine.prekeyPublic!,
+                    recipientDeviceId: DEVICE,
+                });
+
+                await service.ingestDistributions(CHAT, [dist]);
+
+                expect(TestBed.inject(KeyChangeStateService).observedState(USER, SENDER_USER)?.kind).toBe('verified');
+            });
+
+            it('notes nothing on ingest when the batch carries no key of ours', async () => {
+                const mine = await unlockWithBundle(true);
+                const peer = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                cryptoApi.getKeysBatch.and.returnValue(of([publicKeyFor(SENDER_USER, SENDER_DEVICE, peer)]));
+                const dist = await buildDistribution({
+                    epoch: 1,
+                    senderIdentity: peer,
+                    recipientPublic: mine.prekeyPublic!,
+                    recipientDeviceId: DEVICE,
+                });
+
+                await service.ingestDistributions(CHAT, [dist]);
+
+                expect(service.getReceiverChain(CHAT, 1, dist.sender_key_id)).toBeDefined();
+                expect(TestBed.inject(KeyChangeStateService).observedState(USER, SENDER_USER)).toBeNull();
+            });
         });
     });
 

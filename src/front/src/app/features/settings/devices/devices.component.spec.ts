@@ -38,7 +38,7 @@ describe('DevicesComponent (Security tab)', () => {
 
     beforeEach(() => {
         cryptoApi = jasmine.createSpyObj<CryptoApiService>('CryptoApiService', ['getOwnIdentities', 'revokeDevice']);
-        keyStore = jasmine.createSpyObj<KeyStoreService>('KeyStoreService', ['rotatePrekey']);
+        keyStore = jasmine.createSpyObj<KeyStoreService>('KeyStoreService', ['rotatePrekey', 'noteOwnDeviceRevoked']);
         Object.defineProperty(keyStore, 'deviceId', { get: () => 'd1' });
         keyStore.rotatePrekey.and.resolveTo();
 
@@ -87,6 +87,8 @@ describe('DevicesComponent (Security tab)', () => {
 
         expect(cryptoApi.revokeDevice).toHaveBeenCalledOnceWith('d2');
         expect(root.querySelectorAll('.device').length).toBe(1);
+        // A roster still listing the revoked device must no longer pass as "ours at unlock".
+        expect(keyStore.noteOwnDeviceRevoked).toHaveBeenCalledOnceWith('d2');
     });
 
     it('lets the user back out of an armed revoke', async () => {

@@ -50,6 +50,15 @@
                             Signed · not encrypted
                         </span>
                     }
+                    @if (keyChangedPeers().length; as changedCount) {
+                        <!-- Same chip family as the channel badge; the banner below carries the detail. -->
+                        <span
+                            class="badge is-danger"
+                            [title]="sendBlockedReason()"
+                        >
+                            {{ changedCount === 1 ? 'Key changed' : changedCount + ' keys changed' }}
+                        </span>
+                    }
                 </span>
                 <span class="identity-sub">{{ subtitle() }}</span>
             </span>
@@ -80,7 +89,26 @@
         >
             <lucide-icon [img]="shieldAlertIcon" />
             <div class="alarm-body">
-                @if (memberVerificationCode() === 'ROSTER_VERIFICATION_FAILED') {
+                @if (memberVerificationCode() === 'MEMBERSHIP_MISMATCH') {
+                    <!-- About people, not keys. One code covers several causes (a different counterpart, a
+                         private chat re-labelled, a non-member's device, a roster without your own
+                         devices), so the wording says what they share instead of naming one. -->
+                    <p class="alarm-title">This chat doesn't match who it is with — the server may be lying to you</p>
+                    <p class="alarm-note">
+                        What the server now says about this chat's members does not match what this device knows about
+                        it: a different person in a private chat, a private chat turned into a group or channel, a
+                        device of someone who is not a member, or a member list that leaves out your own devices. Anyone
+                        added that way would be able to read your future messages. Keys will not be distributed and
+                        sending is blocked. Check who this chat is with out of band before continuing.
+                    </p>
+                } @else if (memberVerificationCode() === 'OWN_DEVICE_UNKNOWN') {
+                    <p class="alarm-title">A device you do not have is listed under your account</p>
+                    <p class="alarm-note">
+                        This chat lists a device under your own account that your device list does not contain. Such a
+                        device would be able to read everything you send. Keys will not be distributed and sending is
+                        blocked. Check your devices in Settings before continuing.
+                    </p>
+                } @else if (memberVerificationCode() === 'ROSTER_VERIFICATION_FAILED') {
                     <p class="alarm-title">A member's key is not vouched for — the server may be lying to you</p>
                     <p class="alarm-note">
                         A device in this chat presents a key that its own signing key does not vouch for. Nobody holding
@@ -112,6 +140,92 @@
                     (click)="bannerDismissed.set(true)"
                 >
                     <lucide-icon [img]="closeIcon" />
+                </button>
+            </div>
+        </div>
+    }
+
+    <!-- A verified member's key changed. Not the roster alarm: the roster is self-consistent and
+         matches its commitment, which is exactly what a server replacing a whole device produces. The
+         safety number the user already compared is the one thing it cannot forge, so this blocks
+         sending until that number is re-compared in the safety-number screen. Not dismissible: the
+         composer stays disabled until then, and the button here is the way to resolve it. -->
+    <!-- Not an alarm and never blocking: a device our account gained since unlock, which our own
+         device list confirms. Usually the user signing in elsewhere; the link lets them make sure. -->
+    @if (ownDevicesAdded()) {
+        <div
+            class="device-notice"
+            role="status"
+        >
+            <lucide-icon [img]="infoIcon" />
+            <p>A device was added to your account since you unlocked. If that was not you, review your devices.</p>
+            <button
+                type="button"
+                class="device-notice-button"
+                (click)="reviewDevices()"
+            >
+                Review devices
+            </button>
+        </div>
+    }
+
+    @if (keyChangedMembers().length > 0) {
+        <div
+            class="alarm is-key-changed"
+            role="alert"
+        >
+            <lucide-icon [img]="shieldAlertIcon" />
+            <div class="alarm-body">
+                @if (ownDevicesChanged()) {
+                    <!-- The change is on our side: a device under our own account that our own device
+                         list did not have. Every verified number changes at once, so naming the peers
+                         as the cause would send the user to question the wrong person. -->
+                    <p class="alarm-title">Your own device list changed</p>
+                    <p class="alarm-note">
+                        This chat now lists a device under your account that your device list did not, so your safety
+                        number with every verified member changed. If you did not just sign in on a new device, a device
+                        you do not control may have been added to your account. Check your devices in Settings, then
+                        review the safety numbers below before sending; nothing is encrypted to the new keys until you
+                        do.
+                    </p>
+                } @else if (keyChangedMembers().length === 1) {
+                    <p class="alarm-title">The security key of {{ keyChangedMembers()[0].name }} changed</p>
+                    <p class="alarm-note">
+                        You verified {{ keyChangedMembers()[0].name }}'s safety number before, and the keys this chat
+                        now presents for them derive a different one. That happens when they reinstall or add a device —
+                        and it is also what a server substituting a key looks like. Review their safety number out of
+                        band before sending; nothing is encrypted to the new key until you do.
+                    </p>
+                } @else {
+                    <p class="alarm-title">
+                        The security keys of {{ keyChangedMembers().length }} verified members changed
+                    </p>
+                    <p class="alarm-note">
+                        The keys this chat now presents for these members derive different safety numbers from the ones
+                        you verified. Review each number out of band before sending; nothing is encrypted to the new
+                        keys until you do.
+                    </p>
+                }
+            </div>
+            <div class="alarm-actions is-stacked">
+                @for (member of keyChangedMembers(); track member.userId) {
+                    <button
+                        type="button"
+                        class="alarm-button"
+                        (click)="reviewSafetyNumber(member.userId)"
+                    >
+                        Review {{ keyChangedMembers().length === 1 ? '' : member.name + "'s " }}safety number
+                    </button>
+                }
+                <!-- After accepting a number (here or in another tab), or if the key changed again:
+                     re-run the roster check, since no send can while the composer is blocked. -->
+                <button
+                    type="button"
+                    class="alarm-button"
+                    [disabled]="rechecking()"
+                    (click)="recheckKeys()"
+                >
+                    {{ rechecking() ? 'Re-checking…' : 'Re-check' }}
                 </button>
             </div>
         </div>
@@ -265,13 +379,20 @@
                                         Send failed — the chat re-keyed again mid-send.
                                     } @else if (item.pending.keyPublishFailure) {
                                         Not sent — your key could not be shared with this chat after several tries.
+                                    } @else if (item.pending.membershipFailure) {
+                                        Not sent — chat membership could not be confirmed.
+                                    } @else if (item.pending.keyChangedFailure) {
+                                        Not sent — a security key changed. Review the safety number, then retry.
                                     } @else {
                                         Send failed.
                                     }
                                 </span>
+                                <!-- Retry cannot succeed while sending is blocked; the store refuses it
+                                     too, so the draft is never dropped by a premature retry. -->
                                 <button
                                     type="button"
                                     class="pending-action"
+                                    [disabled]="!canSend()"
                                     (click)="retry(item.pending.localId)"
                                 >
                                     <lucide-icon [img]="refreshIcon" />

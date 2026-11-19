@@ -231,6 +231,13 @@ export class ChatSidebarComponent {
 
     async startPrivateChat(person: UserSearchResult): Promise<void> {
         const chat = await firstValueFrom(this.chatApi.createPrivateChat(person.id));
+        try {
+            // Pinned to the person picked here; a response naming anyone else is not opened.
+            this.store.adoptCreatedPrivateChat(chat, person.id);
+        } catch {
+            this.toast.error('That chat is not with the person you chose, so it was not opened.');
+            return;
+        }
         this.query.set('');
         this.people.set([]);
         await this.store.loadChats();

@@ -55,7 +55,7 @@ describe('EncryptionPanelComponent', () => {
                 if (id === 'nokey') {
                     throw new Error('This contact has not published a verifiable identity key.');
                 }
-                return `number-${id}`;
+                return { number: `number-${id}`, ownDevicesUnknown: false, ownDevicesAdded: false };
             }),
         };
         chatApi = { getChat: jasmine.createSpy('getChat') };

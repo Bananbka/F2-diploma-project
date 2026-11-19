@@ -27,17 +27,30 @@ import {
 import { b64uDecode, b64uEncode } from '../crypto/primitives';
 import { generateChainKey, MessageKey, ReceiverChain, SenderChain } from '../crypto/ratchet';
 import { unwrapSkippedKey, wrapSkippedKey } from '../crypto/skipped-wrap';
-import { ChatRoster, Distribution, GrantUpload, OwnIdentity, PublicKey } from '../models/crypto.model';
+import { ChatRoster, Distribution, GrantUpload, OwnIdentity, PublicKey, RosterEntry } from '../models/crypto.model';
 import { CryptoApiService } from './crypto-api.service';
 import {
     isRetryablePublishError,
+    KeyChangedError,
+    KeyChangedPeer,
     MemberSetMismatchError,
+    MembershipMismatchError,
+    MembershipUnconfirmedError,
     RetryLimitExceededError,
     RosterVerificationError,
+    UnknownOwnDeviceError,
 } from './crypto-errors';
+import { KeyChangeStateService, ObservationSource } from './key-change-state.service';
 import { MAX_SKIPPED_AGE_MS, SkippedKeyStore } from './skipped-key-store.service';
+import { TrustStoreService } from './trust-store.service';
 
 const DEVICE_ID_KEY = 'ns.device_id';
+
+function ownDevicesMissing(): MembershipMismatchError {
+    return new MembershipMismatchError(
+        'Member verification failed: the roster does not include your own devices. Refusing to distribute keys.'
+    );
+}
 
 /**
  * Retry policy for publishing a sender key (TB-30): at most `maxAttempts` tries, waiting
@@ -97,7 +110,53 @@ interface OwnChain {
     senderKeyId: string;
     chain: SenderChain;
     chainSigningPrivate: Uint8Array;
+    /**
+     * `TrustStoreService.revision` when the roster this chain was wrapped to was checked. A chain
+     * stamped with an older revision is never reused: it was checked against confirmed numbers the
+     * user has since changed (e.g. wrapped to a ghost device while that peer was unverified).
+     */
+    trustRevision: number;
 }
+
+/** A published key as the roster, the batch lookup and `GET /crypto/identity/me` all carry it. */
+interface KeyRow {
+    user_id: string;
+    device_id: string;
+    identity_public_key: string;
+    signing_public_key: string;
+    identity_key_signature: string;
+    is_active?: boolean;
+}
+
+/** A safety number as `computeSafetyNumber` derives it, with what it found about our own side. */
+export interface SafetyNumberResult {
+    number: string;
+    /**
+     * Our side covers a device that neither our device list at unlock nor a fresh one contains.
+     * Matching digits would then confirm that device too.
+     */
+    ownDevicesUnknown: boolean;
+    /** Our side covers a device our account gained since unlock (listed by our device list now). */
+    ownDevicesAdded: boolean;
+}
+
+/**
+ * Who may legitimately appear in a chat's roster, as this client knows it — independently of the
+ * roster itself. `verifyRoster` proves the roster is self-consistent; it says nothing about whether
+ * a user id in it belongs in the chat at all, and an unverified third user is exactly where a server
+ * can plant a device that nobody's safety number covers.
+ *
+ * - `private` — exactly the two people the user opened the chat with. Pinned at registration (and
+ *   persisted by `MembershipGuardService`): a private chat's counterpart
+ *   never changes, so a later, different answer — including the same chat reported as a group — is
+ *   refused, never adopted.
+ * - `group` — the chat's participant list, re-read from the server for every publish so a member
+ *   who joined since the chat was opened is not treated as an intruder. The resolver is expected to
+ *   publish what it read to the UI before returning, so the member list shows exactly the set that
+ *   was checked.
+ */
+export type MemberExpectation =
+    { kind: 'private'; selfId: string; peerId: string } | { kind: 'group'; resolve: () => Promise<readonly string[]> };
 
 /**
  * Holds unlocked key material and ratchet state for the session.
@@ -121,6 +180,8 @@ export class KeyStoreService {
     private readonly cryptoApi = inject(CryptoApiService);
     private readonly skippedStore = inject(SkippedKeyStore);
     private readonly publishPolicy = inject(SENDER_KEY_PUBLISH_POLICY);
+    private readonly trust = inject(TrustStoreService);
+    private readonly keyChange = inject(KeyChangeStateService);
 
     private identity: UnlockedIdentity | null = null;
 
@@ -142,6 +203,25 @@ export class KeyStoreService {
      * the sender id, but whoever holds a chain can seal a message claiming to be someone else.
      */
     private readonly chainOwners = new Map<string, string>();
+
+    /** chatId -> who may appear in its roster; see `MemberExpectation`. */
+    private readonly memberExpectations = new Map<string, MemberExpectation>();
+
+    /**
+     * deviceId -> signing key (b64u) of this account's active devices as `GET /crypto/identity/me`
+     * listed them at unlock, minus any revoked since (`noteOwnDeviceRevoked`). A roster key under
+     * our id outside this set *and* outside a fresh device list is refused outright
+     * (`UnknownOwnDeviceError`); one outside this set only is attributed to our side when a verified
+     * peer's number changes.
+     */
+    private ownDevicesAtUnlock = new Map<string, string>();
+
+    /**
+     * A device was added to our account since unlock: seen under our id in a roster or a lookup,
+     * absent from the unlock-time list, present in a fresh device list. Not blocking — the user may
+     * well have just signed in elsewhere — but worth a notice pointing at Settings → Devices.
+     */
+    readonly ownDevicesAdded = signal(false);
 
     readonly isUnlocked = signal(false);
 
@@ -202,6 +282,7 @@ export class KeyStoreService {
             kek: wrapped.kek,
             kdfParams: wrapped.kdfParams,
         };
+        this.ownDevicesAtUnlock = new Map([[deviceId, b64uEncode(bundle.signingPublic)]]);
         this.sessionToken = {};
         this.isUnlocked.set(true);
         void this.skippedStore.pruneOlderThan(Date.now() - MAX_SKIPPED_AGE_MS);
@@ -242,6 +323,11 @@ export class KeyStoreService {
                 kek: opened.kek,
                 kdfParams: mine.kdf_params as unknown as KdfParams,
             };
+            this.ownDevicesAtUnlock = new Map(
+                identities
+                    .filter((i) => i.user_id === userId && i.is_active !== false)
+                    .map((i) => [i.device_id, b64uEncode(b64uDecode(i.signing_public_key))])
+            );
             this.sessionToken = {};
             this.isUnlocked.set(true);
             void this.skippedStore.pruneOlderThan(Date.now() - MAX_SKIPPED_AGE_MS);
@@ -366,20 +452,11 @@ export class KeyStoreService {
      * the client will actually encrypt to, and each of those keys has to be checked against its
      * own binding signature first, or "the key changed" is again just something the server says.
      */
-    async computeSafetyNumber(peerUserId: string): Promise<string> {
+    async computeSafetyNumber(peerUserId: string): Promise<SafetyNumberResult> {
         const identity = this.requireIdentity();
 
         const keys = await firstValueFrom(this.cryptoApi.getKeysBatch([identity.userId, peerUserId]));
-
-        const verified = keys.filter((key) =>
-            verifyIdentityBinding(
-                key.user_id,
-                key.device_id,
-                b64uDecode(key.identity_public_key),
-                b64uDecode(key.signing_public_key),
-                b64uDecode(key.identity_key_signature)
-            )
-        );
+        const verified = this.bindingVerifiedActive(keys);
 
         const mine = verified.filter((k) => k.user_id === identity.userId).map((k) => b64uDecode(k.signing_public_key));
         const theirs = verified.filter((k) => k.user_id === peerUserId).map((k) => b64uDecode(k.signing_public_key));
@@ -391,7 +468,229 @@ export class KeyStoreService {
             throw new Error('This contact has not published a verifiable identity key.');
         }
 
+        const number = this.safetyNumberFor(mine, theirs);
+        // A lookup, not the roster: it may raise an alarm but cannot clear one the send path raised.
+        this.keyChange.observe(identity.userId, peerUserId, number, 'lookup');
+
+        // Our own side of this number may include a device neither our device list at unlock nor a
+        // fresh one knows. It is part of the digits being compared, so the screen must say so: two
+        // people can match a number that covers a device neither of them controls.
+        const extra = this.extraOwnKeys(identity, verified);
+        let ownDevicesUnknown: boolean;
+        try {
+            ownDevicesUnknown = (await this.unknownOwnKeys(identity, verified)).length > 0;
+        } catch {
+            // Could not re-check our own device list: warn rather than imply it was confirmed.
+            ownDevicesUnknown = extra.length > 0;
+        }
+        const ownDevicesAdded = extra.length > 0 && !ownDevicesUnknown;
+        if (ownDevicesAdded) {
+            this.ownDevicesAdded.set(true);
+        }
+        return { number, ownDevicesUnknown, ownDevicesAdded };
+    }
+
+    /** Signing keys under our own id in `keys` that are not among our devices as known at unlock. */
+    private extraOwnKeys(identity: UnlockedIdentity, keys: readonly KeyRow[]): string[] {
+        const known = new Set(this.ownDevicesAtUnlock.values());
+        return [...this.activeSigningKeys(keys, identity.userId)].filter((key) => !known.has(key));
+    }
+
+    /**
+     * Signing keys under our own id in `keys` that neither our device list at unlock nor a fresh
+     * `GET /crypto/identity/me` contains. Only *extra* keys count: a device revoked this session
+     * is simply absent from a roster, which is not suspicious. The fresh list is fetched only when
+     * the unlock-time list does not already account for every key; a transient failure of that
+     * fetch propagates (the publish retry policy handles it) rather than being read as an alarm.
+     */
+    private async unknownOwnKeys(identity: UnlockedIdentity, keys: readonly KeyRow[]): Promise<string[]> {
+        const extra = this.extraOwnKeys(identity, keys);
+        if (extra.length === 0) {
+            return [];
+        }
+        const fresh = this.activeSigningKeys(await firstValueFrom(this.cryptoApi.getOwnIdentities()), identity.userId);
+        return extra.filter((key) => !fresh.has(key));
+    }
+
+    /**
+     * A device of ours was revoked this session. It leaves the unlock-time list, so a roster that
+     * still carries it later is no longer explained by "it was ours at unlock".
+     */
+    noteOwnDeviceRevoked(deviceId: string): void {
+        this.ownDevicesAtUnlock.delete(deviceId);
+    }
+
+    /**
+     * Signing keys of `userId`'s devices among `keys` that pass `bindingVerifiedActive`, re-encoded so
+     * encodings compare equal.
+     */
+    private activeSigningKeys(keys: readonly KeyRow[], userId: string): Set<string> {
+        return new Set(
+            this.bindingVerifiedActive(keys.filter((key) => key.user_id === userId)).map((key) =>
+                b64uEncode(b64uDecode(key.signing_public_key))
+            )
+        );
+    }
+
+    /**
+     * The only keys anything here fingerprints or compares: active, and with an identity key that
+     * their own signing key vouches for. One filter for every caller (safety number, roster check,
+     * ingest, own-device comparison), so they can never disagree about which devices count.
+     *
+     * Inactive keys are a deleted account's retained devices, kept only so old messages stay
+     * verifiable. Nothing is wrapped to them, so they are no part of any number: counting them made
+     * every deleted user's revoked device read as a key change. Unvouched keys are what a server
+     * could substitute freely; fingerprinting one would make "the key changed" its say-so again.
+     */
+    private bindingVerifiedActive<T extends KeyRow>(keys: readonly T[]): T[] {
+        return keys.filter(
+            (key) =>
+                key.is_active !== false &&
+                verifyIdentityBinding(
+                    key.user_id,
+                    key.device_id,
+                    b64uDecode(key.identity_public_key),
+                    b64uDecode(key.signing_public_key),
+                    b64uDecode(key.identity_key_signature)
+                )
+        );
+    }
+
+    /**
+     * The one place a safety number is assembled from signing keys (crypto-spec-v1.md §2.3). The
+     * roster check in `publishSenderChain`, the ingest check in `ingestDistributions` and the
+     * safety-number screen all go through here, so the number the user compares out of band is
+     * byte-for-byte the number those checks compare it against.
+     */
+    private safetyNumberFor(mine: Uint8Array[], theirs: Uint8Array[]): string {
         return safetyNumber(userFingerprintMaterial(mine), userFingerprintMaterial(theirs));
+    }
+
+    /**
+     * Derive each peer's safety number, and report the peers whose number no longer matches what the
+     * user confirmed. Named for its side effects, which are the point: it *records* every number it
+     * derives as an observation, and settles this chat's refusals (clearing one whose roster now
+     * derives the confirmed number).
+     *
+     * Only keys passing `bindingVerifiedActive` are fingerprinted, whatever the caller passes — the
+     * batch lookup in particular may carry a key the server could not vouch for. Grouped by user because a safety
+     * number is a property of a person: every one of their devices contributes (§2.3), so a device
+     * the server planted shows up as a change even if the original keys are still listed. Our own
+     * side is taken from the same key set, and only from it.
+     *
+     * Returns null when the set carries no active key of ours. There used to be a fallback to this
+     * device's signing key alone, but a number built from it can never equal the one the
+     * safety-number screen shows (which covers all our devices), so it compared nothing — callers
+     * decide what an absent self means instead (the roster path refuses outright).
+     *
+     * Same filter as `computeSafetyNumber`, so both derive the same number from the same devices.
+     * The confirmed records are re-read first: another tab may have verified someone a moment ago.
+     */
+    private recordNumbersAndFindChanges(
+        identity: UnlockedIdentity,
+        keys: readonly KeyRow[],
+        source: ObservationSource,
+        chatId?: string
+    ): KeyChangedPeer[] | null {
+        this.trust.refresh();
+
+        const byUser = new Map<string, Uint8Array[]>();
+        for (const key of this.bindingVerifiedActive(keys)) {
+            const list = byUser.get(key.user_id) ?? [];
+            list.push(b64uDecode(key.signing_public_key));
+            byUser.set(key.user_id, list);
+        }
+
+        const mine = byUser.get(identity.userId);
+        if (!mine) {
+            return null;
+        }
+        const changed: KeyChangedPeer[] = [];
+
+        for (const [userId, theirs] of byUser) {
+            if (userId === identity.userId) {
+                continue;
+            }
+            const current = this.safetyNumberFor(mine, theirs);
+            const state = this.trust.stateFor(identity.userId, userId, current);
+            // A refusal outstanding in this chat holds until the user confirms a number: clearing
+            // the verification must not turn the refused keys into trust-on-first-use.
+            const refusal = chatId ? this.keyChange.refusalFor(chatId, identity.userId, userId) : null;
+            if (state.kind === 'changed') {
+                changed.push({ userId, current, previous: state.previous });
+            } else if (refusal && state.kind !== 'verified') {
+                changed.push({ userId, current, previous: refusal.previous });
+            } else if (chatId && state.kind === 'verified') {
+                // This chat's roster now derives the confirmed number: its refusal is over.
+                this.keyChange.clearRefusal(chatId, identity.userId, userId);
+            }
+            // Observed after the refusal is settled, so a roster that cleared its own refusal can
+            // also replace the refused observation (which an outstanding refusal would protect).
+            this.keyChange.observe(identity.userId, userId, current, source);
+        }
+
+        return changed;
+    }
+
+    /**
+     * Whether the roster carries a key under our own user id that was not ours at unlock — i.e. a
+     * device of ours added since (by the time this runs, `unknownOwnKeys` has already refused any
+     * key the fresh device list does not have either). Asked once a verified peer's number changed,
+     * to say *whose* side changed: a device under our id changes the number with every verified
+     * peer at once, and blaming each peer would mislead. Extra keys only: a device revoked this
+     * session is merely absent, which changes the number but is our own doing.
+     *
+     * TODO(G6): attribute precisely by storing our own fingerprint material in each trust record at
+     * verification time; then a change can be pinned to whichever side's material moved, without
+     * relying on any server-supplied device list.
+     */
+    private ownDevicesDiffer(identity: UnlockedIdentity, roster: ChatRoster): boolean {
+        return this.extraOwnKeys(identity, roster.members).length > 0;
+    }
+
+    /**
+     * Refuse a roster that names anyone the chat is not known to contain, or that leaves us out.
+     *
+     * Every other roster check is about keys. This one is about people: a device the server mints
+     * under a *third* user id with a valid self-binding passes `verifyRoster`, and leaves every
+     * verified number unchanged — nobody has a safety number with a user they never expected to
+     * be there. Inactive entries are skipped (nothing is wrapped to them).
+     */
+    private async verifyRosterMembership(
+        identity: UnlockedIdentity,
+        roster: ChatRoster,
+        expectation: MemberExpectation
+    ): Promise<RosterEntry | null> {
+        let allowed: Set<string>;
+        if (expectation.kind === 'private') {
+            if (expectation.selfId !== identity.userId || expectation.peerId === identity.userId) {
+                throw new MembershipMismatchError(
+                    'Member verification failed: this private chat was not opened by the unlocked account. ' +
+                        'Refusing to distribute keys.'
+                );
+            }
+            allowed = new Set([identity.userId, expectation.peerId]);
+        } else {
+            // Residual: the participant list is server-asserted, like the roster. This stops a
+            // device under a user id the chat does not even claim to have; it cannot stop a server
+            // that adds a member to both answers consistently. What it does guarantee is that such a
+            // member is not hidden: `MembershipGuardService`'s resolver writes the list it returns into
+            // the chat state the member list and header render from, before anything is wrapped.
+            allowed = new Set([identity.userId, ...(await expectation.resolve())]);
+        }
+
+        const active = roster.members.filter((member) => member.is_active !== false);
+        if (!active.some((member) => member.user_id === identity.userId)) {
+            throw ownDevicesMissing();
+        }
+        return active.find((member) => !allowed.has(member.user_id)) ?? null;
+    }
+
+    private outsiderError(outsider: RosterEntry): MembershipMismatchError {
+        return new MembershipMismatchError(
+            `Member verification failed: device ${outsider.device_id} belongs to a user who is not a member of ` +
+                'this chat. Refusing to distribute keys.'
+        );
     }
 
     /**
@@ -407,6 +706,9 @@ export class KeyStoreService {
         this.peerChains.clear();
         this.chainSigningKeys.clear();
         this.chainOwners.clear();
+        this.memberExpectations.clear();
+        this.ownDevicesAtUnlock = new Map();
+        this.ownDevicesAdded.set(false);
         this.isUnlocked.set(false);
         // Persisted skipped keys go with the KEK that wraps them: lock, logout, password reset and
         // account deletion all land here.
@@ -520,12 +822,27 @@ export class KeyStoreService {
      */
     async ensureSenderChain(chatId: string, epoch: number): Promise<OwnChain> {
         const cacheKey = `${chatId}:${epoch}`;
+        // Pick up a verification made in another tab before deciding whether the cache is current.
+        this.trust.refresh();
         const existing = this.ownChains.get(cacheKey);
-        if (existing) {
+        if (existing && existing.trustRevision === this.trust.revision()) {
             return existing;
+        }
+        if (existing) {
+            // What the user has confirmed changed since this chain's roster was checked. The chain
+            // may already be wrapped to a device the user would now refuse, so no further message
+            // goes out on it: republish, which re-reads and re-verifies the roster.
+            this.invalidateOwnChains();
         }
 
         const identity = this.requireIdentity();
+        const expectation = this.memberExpectations.get(chatId);
+        if (!expectation) {
+            // Fail closed, but not as a roster alarm: nothing is known to be wrong, the chat's
+            // membership simply has not been confirmed. Surfaces as a retryable failed send with its
+            // own wording.
+            throw new MembershipUnconfirmedError();
+        }
         const token = this.sessionToken;
         const { maxAttempts, baseDelayMs, sleep } = this.publishPolicy;
 
@@ -536,7 +853,7 @@ export class KeyStoreService {
                 // member set may be exactly why the last upload was refused), and the chain is
                 // new, because a lost response may still have stored the previous sender_key_id
                 // and the server would refuse a duplicate.
-                return await this.publishSenderChain(identity, chatId, epoch, cacheKey);
+                return await this.publishSenderChain(identity, chatId, epoch, cacheKey, expectation);
             } catch (error) {
                 // Roster refusals and every non-transient 4xx fall through here untouched.
                 if (!isRetryablePublishError(error)) {
@@ -559,11 +876,70 @@ export class KeyStoreService {
         identity: UnlockedIdentity,
         chatId: string,
         epoch: number,
-        cacheKey: string
+        cacheKey: string,
+        expectation: MemberExpectation
     ): Promise<OwnChain> {
-        const roster = await firstValueFrom(this.cryptoApi.getRoster(chatId));
+        let roster = await firstValueFrom(this.cryptoApi.getRoster(chatId));
 
         this.verifyRoster(roster);
+        let outsider = await this.verifyRosterMembership(identity, roster, expectation);
+        if (outsider && expectation.kind === 'group') {
+            // The roster is read before the participant list, so a member removed in between looks
+            // like an outsider for one round trip. Re-read both once before raising the alarm.
+            roster = await firstValueFrom(this.cryptoApi.getRoster(chatId));
+            this.verifyRoster(roster);
+            outsider = await this.verifyRosterMembership(identity, roster, expectation);
+        }
+        if (outsider) {
+            throw this.outsiderError(outsider);
+        }
+
+        // A device under our own id reads everything we send, in every chat, and no unverified
+        // peer's number would ever reveal it — so this is checked regardless of verification state.
+        const unknownOwn = await this.unknownOwnKeys(identity, roster.members);
+        if (unknownOwn.length === 0 && this.extraOwnKeys(identity, roster.members).length > 0) {
+            // A device our account gained since unlock, confirmed by our own device list: allowed,
+            // but surfaced as a notice (`ownDevicesAdded`).
+            this.ownDevicesAdded.set(true);
+        }
+        if (unknownOwn.length > 0) {
+            throw new UnknownOwnDeviceError(
+                'Member verification failed: this chat lists a device under your account that your own device ' +
+                    'list does not contain. Refusing to distribute keys.'
+            );
+        }
+
+        // §5.0.2 proves the roster is self-consistent; this is what makes that proof bite. A server
+        // can mint a whole device — valid self-binding, recomputed commitment — and it passes both
+        // checks above. What it cannot do is reproduce the safety number the user already compared
+        // with that person. So for every peer the user has verified, the number the roster's keys
+        // derive to must still be the one on record, or nothing is wrapped. Peers never verified
+        // (trust on first use) are unaffected, as are peers whose number still matches.
+        //
+        // The revision is read after `recordNumbersAndFindChanges` refreshed the records it compared against,
+        // and stamped on the chain: any later change to what the user confirmed retires the chain.
+        const changed = this.recordNumbersAndFindChanges(identity, roster.members, 'roster', chatId);
+        const trustRevision = this.trust.revision();
+        if (changed === null) {
+            // `verifyRosterMembership` already refused a roster without us; kept as a type guard.
+            throw ownDevicesMissing();
+        }
+        if (changed.length > 0) {
+            // Remembered per chat, so another chat's honest roster for the same person cannot erase
+            // what this one was refused on (see `KeyChangeStateService.refusals`).
+            const ownDevicesChanged = this.ownDevicesDiffer(identity, roster);
+            for (const peer of changed) {
+                this.keyChange.recordRefusal(
+                    chatId,
+                    identity.userId,
+                    peer.userId,
+                    peer.current,
+                    peer.previous,
+                    ownDevicesChanged
+                );
+            }
+            throw new KeyChangedError(chatId, changed, ownDevicesChanged);
+        }
 
         const chainKey = generateChainKey();
         const senderKeyId = uuidv4();
@@ -627,6 +1003,7 @@ export class KeyStoreService {
             senderKeyId,
             chain: new SenderChain(chainKey),
             chainSigningPrivate: chainIdentity.signingPrivate,
+            trustRevision,
         };
 
         this.ownChains.set(cacheKey, own);
@@ -634,9 +1011,63 @@ export class KeyStoreService {
         return own;
     }
 
+    /**
+     * Re-run this chat's roster check now, rather than on the next send — the way out of a block
+     * that no send can reach (the composer is disabled while it holds). Drops the cached chain for
+     * the epoch and publishes a fresh one, which re-reads and re-verifies the roster: on success the
+     * refusal is cleared and the observation updated; otherwise the same refusal is thrown again.
+     * Publishing a chain nobody has sent on yet is harmless; the server keeps several per epoch.
+     */
+    async recheckRoster(chatId: string, epoch: number): Promise<void> {
+        this.invalidateSenderChain(chatId, epoch);
+        await this.ensureSenderChain(chatId, epoch);
+    }
+
     /** Drop a cached sending chain, forcing a fresh one on next send (used after EPOCH_STALE). */
     invalidateSenderChain(chatId: string, epoch: number): void {
         this.ownChains.delete(`${chatId}:${epoch}`);
+    }
+
+    /**
+     * Drop every cached sending chain, so the next send in any chat republishes and re-verifies its
+     * roster. `ensureSenderChain` already does this by itself whenever `TrustStoreService.revision`
+     * moved past a chain's stamp — which is how a verification, an accepted change or a cleared
+     * verification (here or in another tab) reaches this service without the trust store depending
+     * on it. Exposed for callers that know a re-check is due for any other reason.
+     *
+     * All chains rather than those whose roster held the affected peer: a verification is rare, a
+     * republish is one request per chat on its next send, and the narrower version would have to
+     * remember every roster to be sure it missed none.
+     */
+    invalidateOwnChains(): void {
+        this.ownChains.clear();
+    }
+
+    /**
+     * Register who may appear in this chat's roster; see `MemberExpectation`.
+     *
+     * A private expectation is never replaced by anything else for the same account — not by a
+     * different counterpart, and not by a group expectation (a server re-labelling an A-B chat as a
+     * group with a third member must not get that member a key). A conflicting registration throws
+     * `MembershipMismatchError`; `ChatStoreService` checks its persisted pin first and raises the
+     * same alarm, so this is the second line, not the first.
+     */
+    expectMembers(chatId: string, expectation: MemberExpectation): void {
+        const existing = this.memberExpectations.get(chatId);
+        if (existing?.kind === 'private' && existing.selfId === this.identity?.userId) {
+            if (
+                expectation.kind === 'private' &&
+                expectation.selfId === existing.selfId &&
+                expectation.peerId === existing.peerId
+            ) {
+                return;
+            }
+            throw new MembershipMismatchError(
+                'Member verification failed: this private chat is now reported with different members. ' +
+                    'Refusing to distribute keys.'
+            );
+        }
+        this.memberExpectations.set(chatId, expectation);
     }
 
     /** Unwrap every grant addressed to us and build the matching receiver chains. */
@@ -664,9 +1095,15 @@ export class KeyStoreService {
                 continue;
             }
 
-            // Verify the sender's long-term key vouches for this chain before trusting it.
-            const senderKeys = await firstValueFrom(this.cryptoApi.getKeysBatch([dist.sender_user_id]));
-            const senderKey = senderKeys.find((k) => k.device_id === dist.sender_device_id);
+            // Verify the sender's long-term key vouches for this chain before trusting it. Our own
+            // keys ride along in the same request (one round trip, not two) so the sender's safety
+            // number can be derived below exactly as the safety-number screen derives it.
+            const batchIds =
+                dist.sender_user_id === identity.userId ? [identity.userId] : [identity.userId, dist.sender_user_id];
+            const batchKeys = await firstValueFrom(this.cryptoApi.getKeysBatch(batchIds));
+            const senderKey = batchKeys.find(
+                (k) => k.user_id === dist.sender_user_id && k.device_id === dist.sender_device_id
+            );
 
             // Fail closed on a missing key, not open. This used to read `senderKey && !verify(...)`,
             // so a server that simply omitted the sender's device from the batch response skipped
@@ -694,6 +1131,19 @@ export class KeyStoreService {
                 // A forged or unverifiable distribution: skip it rather than decrypt messages we
                 // cannot attribute.
                 continue;
+            }
+
+            // The receive-side half of the check `publishSenderChain` makes before wrapping. A
+            // changed key is *noted* here, never acted on: the distribution is still ingested, so
+            // the user can read what the (possibly substituted) sender wrote and judge it against
+            // the alarm, while the trust store's observation blocks sending through `ChatStoreService`
+            // until the new number is confirmed. Only binding-verified, active keys are fingerprinted —
+            // the batch may carry one the server could not vouch for, or a deleted account's
+            // retained device, which `computeSafetyNumber` leaves out too. A `lookup` observation:
+            // it comes from the batch endpoint, so it cannot clear a change the roster showed. When
+            // the batch carries no key of ours nothing comparable can be derived, so nothing is noted.
+            if (dist.sender_user_id !== identity.userId) {
+                this.recordNumbersAndFindChanges(identity, batchKeys, 'lookup');
             }
 
             try {

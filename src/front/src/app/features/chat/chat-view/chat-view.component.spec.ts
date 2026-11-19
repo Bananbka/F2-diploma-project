@@ -7,10 +7,13 @@ import { provideRouter } from '@angular/router';
 import { Chat } from '../../../core/models/chat.model';
 import { ChatPanelStoreService } from '../../../core/services/chat-panel-store.service';
 import { ChatStoreService, ConversationItem, PendingMessage } from '../../../core/services/chat-store.service';
+import { RosterFailureCode } from '../../../core/services/crypto-errors';
 import { DirectoryService } from '../../../core/services/directory.service';
 import { DecryptedMessage } from '../../../core/services/message.service';
 import { SessionService } from '../../../core/services/session.service';
 import { RecordingState, VoiceRecorderService } from '../../../core/services/voice-recorder.service';
+import { SettingsService } from '../../settings/settings.service';
+import { InfoDialogService } from '../info-dialog/info-dialog.service';
 import { ChatViewComponent } from './chat-view.component';
 
 const CHAT_ID = 'a0000000-0000-4000-8000-000000000001';
@@ -76,7 +79,10 @@ function fakeStore() {
         isRekeying: signal(false),
         canSend: signal(true),
         memberVerificationError: signal<string | null>(null),
-        memberVerificationCode: signal<'MEMBER_SET_MISMATCH' | 'ROSTER_VERIFICATION_FAILED' | null>(null),
+        memberVerificationCode: signal<RosterFailureCode | null>(null),
+        keyChangedPeers: signal<string[]>([]),
+        ownDevicesChanged: signal(false),
+        ownDevicesAdded: signal(false),
         encryptionUnavailable: signal<string | null>(null),
         sendBlockedReason: signal<string | null>(null),
         peerDeleted: signal(false),
@@ -99,6 +105,7 @@ function fakeStore() {
         editMessage: jasmine.createSpy('editMessage').and.resolveTo(undefined),
         sendTyping: jasmine.createSpy('sendTyping'),
         retry: jasmine.createSpy('retry').and.resolveTo(undefined),
+        recheckKeyChange: jasmine.createSpy('recheckKeyChange').and.resolveTo(undefined),
         discardPending: jasmine.createSpy('discardPending'),
         refreshKeys: jasmine.createSpy('refreshKeys').and.resolveTo(undefined),
         deleteMessage: jasmine.createSpy('deleteMessage').and.resolveTo(undefined),
@@ -220,6 +227,154 @@ describe('ChatViewComponent', () => {
             const alarm = host.querySelector('.alarm');
             expect(alarm?.textContent).toContain('not vouched for');
             expect(alarm?.textContent).not.toContain('does not match the commitment');
+        });
+
+        /**
+         * A verified member's key changed. Its own banner and header chip, worded for a key change
+         * rather than a roster inconsistency, with the safety-number screen as the only way out.
+         */
+        it('shows the key-changed banner and header chip, and opens the safety number for that member', () => {
+            store.keyChangedPeers.set([OTHER]);
+            store.canSend.set(false);
+            store.sendBlockedReason.set(
+                'The security key of Alice changed. Review their safety number before sending.'
+            );
+            const infoDialog = TestBed.inject(InfoDialogService);
+            spyOn(infoDialog, 'openSafety');
+            const host = create();
+
+            const alarm = host.querySelector('.alarm.is-key-changed');
+            expect(alarm?.textContent).toContain('The security key of Alice changed');
+            expect(alarm?.textContent).not.toContain('Member verification failed');
+            expect(alarm?.querySelector('.alarm-dismiss')).withContext('not dismissible').toBeNull();
+            expect(host.querySelector('.badge.is-danger')?.textContent?.trim()).toBe('Key changed');
+            expect((host.querySelector('app-composer textarea') as HTMLTextAreaElement).disabled).toBeTrue();
+
+            (alarm?.querySelector('.alarm-button') as HTMLButtonElement).click();
+            expect(infoDialog.openSafety).toHaveBeenCalledWith(CHAT_ID, OTHER);
+        });
+
+        /** Round 3, N: a device added since unlock is a notice linking to Settings, not an alarm. */
+        it('shows a non-blocking notice for a device added to the account since unlock', () => {
+            store.ownDevicesAdded.set(true);
+            const host = create();
+            const settings = TestBed.inject(SettingsService);
+            spyOn(settings, 'open');
+
+            const notice = host.querySelector('.device-notice');
+            expect(notice?.textContent).toContain('A device was added to your account');
+            expect(host.querySelector('.alarm')).withContext('not an alarm').toBeNull();
+            expect((host.querySelector('app-composer textarea') as HTMLTextAreaElement).disabled).toBeFalse();
+            (notice?.querySelector('button') as HTMLButtonElement).click();
+            expect(settings.open).toHaveBeenCalledWith('security');
+        });
+
+        /** Round 3, C: the key-changed banner offers a re-check, the only way to re-run the roster check. */
+        it('re-checks from the key-changed banner', async () => {
+            store.keyChangedPeers.set([OTHER]);
+            store.canSend.set(false);
+            const host = create();
+
+            const recheck = Array.from(host.querySelectorAll<HTMLButtonElement>('.alarm.is-key-changed button')).find(
+                (b) => b.textContent?.includes('Re-check')
+            )!;
+            recheck.click();
+            await fixture.whenStable();
+
+            expect(store.recheckKeyChange).toHaveBeenCalledTimes(1);
+        });
+
+        /** Round 2: membership and own-device refusals each get their own banner wording. */
+        it('words a membership refusal as being about people, not keys', () => {
+            store.memberVerificationError.set('Member verification failed: ...');
+            store.memberVerificationCode.set('MEMBERSHIP_MISMATCH');
+            store.canSend.set(false);
+            const host = create();
+
+            const title = host.querySelector('.alarm-title')?.textContent ?? '';
+            expect(title).toContain("This chat doesn't match who it is with");
+            expect(title).not.toContain('not vouched for');
+        });
+
+        it('words an unknown own device as such', () => {
+            store.memberVerificationError.set('Member verification failed: ...');
+            store.memberVerificationCode.set('OWN_DEVICE_UNKNOWN');
+            store.canSend.set(false);
+            const host = create();
+
+            expect(host.querySelector('.alarm-title')?.textContent).toContain(
+                'A device you do not have is listed under your account'
+            );
+        });
+
+        /** Round 2, item 10: an unconfirmed membership is a specific, honest failed row. */
+        it('words a membership failure on its failed row', () => {
+            store.conversation.set([
+                {
+                    kind: 'pending',
+                    pending: {
+                        localId: 'local-2',
+                        text: 'draft',
+                        createdAt: '2024-01-01T00:00:00Z',
+                        status: 'failed',
+                        rekeyFailure: false,
+                        membershipFailure: true,
+                        clientMessageId: 'cmid-2',
+                    },
+                },
+            ]);
+            const host = create();
+
+            expect(host.querySelector('.pending-error')?.textContent).toContain(
+                'chat membership could not be confirmed'
+            );
+        });
+
+        /** G6: a device under our own account changes every number; the banner must not blame the peer. */
+        it('words the key-changed banner as our own device list when that is the cause', () => {
+            store.keyChangedPeers.set([OTHER]);
+            store.ownDevicesChanged.set(true);
+            store.canSend.set(false);
+            const host = create();
+
+            const alarm = host.querySelector('.alarm.is-key-changed');
+            expect(alarm?.querySelector('.alarm-title')?.textContent).toContain('Your own device list changed');
+            expect(alarm?.querySelector('.alarm-title')?.textContent).not.toContain('Alice');
+            // The way out is still the safety number, per member.
+            expect(alarm?.querySelector('.alarm-button')).not.toBeNull();
+        });
+
+        /** G4: a send refused on a key change keeps its draft as a failed row, with Retry held until it lifts. */
+        it('keeps a key-change refusal as a failed row whose Retry waits for the block to lift', () => {
+            store.keyChangedPeers.set([OTHER]);
+            store.canSend.set(false);
+            store.conversation.set([
+                {
+                    kind: 'pending',
+                    pending: {
+                        localId: 'local-1',
+                        text: 'draft',
+                        createdAt: '2024-01-01T00:00:00Z',
+                        status: 'failed',
+                        rekeyFailure: false,
+                        keyChangedFailure: true,
+                        clientMessageId: 'cmid-1',
+                    },
+                },
+            ]);
+            const host = create();
+
+            const row = host.querySelector('.pending-error');
+            expect(row?.textContent).toContain('a security key changed');
+            const retry = Array.from(row?.querySelectorAll('button') ?? []).find((b) =>
+                b.textContent?.includes('Retry')
+            ) as HTMLButtonElement;
+            expect(retry.disabled).toBeTrue();
+
+            store.keyChangedPeers.set([]);
+            store.canSend.set(true);
+            fixture.detectChanges();
+            expect(retry.disabled).toBeFalse();
         });
 
         /**
@@ -442,6 +597,19 @@ describe('ChatViewComponent', () => {
     });
 
     describe('send()', () => {
+        /** Round 3, I: an edit while sending is blocked is reported and kept, never silently dropped. */
+        it('keeps the edit in the composer and says why while sending is blocked', async () => {
+            create();
+            store.canSend.set(false);
+            fixture.componentInstance.editing.set(buildMessage({ id: 'msg-9', senderId: ME, status: 'ok' }));
+
+            await fixture.componentInstance.send({ text: 'updated', attachments: [] });
+
+            expect(store.editMessage).not.toHaveBeenCalled();
+            expect(fixture.componentInstance.editing()?.id).withContext('still editing').toBe('msg-9');
+            expect(store.realtimeError()).toContain('Not edited');
+        });
+
         it('routes to editMessage, not send, while editing an existing message', async () => {
             create();
             fixture.componentInstance.editing.set(buildMessage({ id: 'msg-9', senderId: ME, status: 'ok' }));

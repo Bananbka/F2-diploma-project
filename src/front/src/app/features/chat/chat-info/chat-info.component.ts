@@ -588,6 +588,8 @@ export class ChatInfoComponent {
         this.busy.set(true);
         try {
             const chat = await firstValueFrom(this.chatApi.createPrivateChat(member.userId));
+            // Pinned to the person chosen here; a response naming anyone else is not opened.
+            this.store.adoptCreatedPrivateChat(chat, member.userId);
             // The chat exists now; a failed list refresh must not strand the user on this screen.
             try {
                 await this.store.loadChats();

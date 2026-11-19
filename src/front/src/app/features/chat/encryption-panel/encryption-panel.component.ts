@@ -125,7 +125,7 @@ export class EncryptionPanelComponent {
             }
             let status: MemberKeyStatus;
             try {
-                const number = await this.keyStore.computeSafetyNumber(participant.user_id);
+                const { number } = await this.keyStore.computeSafetyNumber(participant.user_id);
                 status = this.trust.stateFor(me, participant.user_id, number).kind;
             } catch (error) {
                 status = classifySafetyError(error) === 'peer-no-keys' ? 'no-keys' : 'error';
