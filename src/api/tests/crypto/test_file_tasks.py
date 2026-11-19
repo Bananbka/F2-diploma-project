@@ -43,13 +43,15 @@ async def _upload_message_object(content: bytes) -> str:
     )
 
 
-async def _upload_avatar_object(content: bytes) -> str:
+async def _upload_avatar_object(content: bytes, owner_id=None) -> str:
     return await minio_manager.upload_file(
         file_bytes=content,
         original_filename="avatar.png",
         content_type="image/png",
         bucket_name=settings.MINIO_AVATAR_BUCKET,
         public=True,
+        # `PATCH /profile/me` only accepts an avatar the caller uploaded, read from this metadata.
+        owner_id=str(owner_id) if owner_id is not None else None,
     )
 
 
@@ -138,7 +140,9 @@ async def test_cleanup_minio_avatar_orphans_keeps_a_users_current_avatar():
         # public=True, matching how the real upload endpoint stores avatars: the browser-reachable
         # MINIO_PUBLIC_URL form, which is what `_validate_avatar_url` requires and what
         # `cleanup_minio_avatar_orphans` reads back out of the `avatar_url` column.
-        avatar_url = await _upload_avatar_object(f"avatar-{uuid.uuid4()}".encode())
+        avatar_url = await _upload_avatar_object(
+            f"avatar-{uuid.uuid4()}".encode(), owner_id=alice_id
+        )
         r = await alice.patch("/profile/me", json={"avatar_url": avatar_url})
         assert r.status_code == 200, r.text
 

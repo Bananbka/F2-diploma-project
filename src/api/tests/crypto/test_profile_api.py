@@ -9,6 +9,8 @@ actually changed.
 
 import uuid
 
+import pytest
+
 from app.core.config import settings
 from app.infrastructure.minio import minio_manager
 
@@ -186,6 +188,144 @@ async def test_is_username_available():
         r = await alice.get(f"/profile/is-username-available/nobody{uuid.uuid4().hex[:8]}")
         assert r.status_code == 200, r.text
         assert r.json()["data"] is True
+    finally:
+        await alice.aclose()
+        await bob.aclose()
+
+
+# --- Avatar ownership -------------------------------------------------------------------------
+#
+# The avatar bucket is public, so every avatar url is known to anyone who has seen it. Setting a
+# victim's url and then switching away from it used to make the reap above delete the victim's
+# object. `avatar_url` must now name an object the caller uploaded, and only such an object is
+# ever reaped.
+
+
+async def _avatar_exists(url: str) -> bool:
+    exists, _ = await minio_manager.get_object_owner(_key_of(url), settings.MINIO_AVATAR_BUCKET)
+    return exists
+
+
+async def test_setting_another_users_avatar_is_refused_and_it_survives():
+    alice, alice_id = await _register_user()
+    bob, bob_id = await _register_user()
+    try:
+        victim = await _upload_avatar(bob)
+        r = await bob.patch("/profile/me", json={"avatar_url": victim["url"]})
+        assert r.status_code == 200, r.text
+
+        r = await alice.patch("/profile/me", json={"avatar_url": victim["url"]})
+        assert r.status_code == 403, r.text
+        assert r.json()["error_code"] == "AVATAR_NOT_OWNED"
+        assert (await alice.get("/profile/me")).json()["data"]["avatar_url"] != victim["url"]
+
+        # The second half of the attack: switching to an own avatar must not reap the victim's.
+        own = await _upload_avatar(alice)
+        r = await alice.patch("/profile/me", json={"avatar_url": own["url"]})
+        assert r.status_code == 200, r.text
+        assert r.json()["data"]["avatar_url"] == own["url"]
+
+        assert await _avatar_exists(victim["url"]), "the victim's avatar must survive"
+        assert (await bob.get("/profile/me")).json()["data"]["avatar_url"] == victim["url"]
+    finally:
+        await alice.aclose()
+        await bob.aclose()
+
+
+async def test_an_avatar_with_no_recorded_owner_is_refused():
+    """Objects stored before ownership was recorded belong to nobody, so nobody can claim them."""
+    alice, alice_id = await _register_user()
+    try:
+        png = bytes.fromhex("89504e470d0a1a0a") + uuid.uuid4().bytes
+        url = await minio_manager.upload_file(
+            file_bytes=png,
+            original_filename="legacy.png",
+            content_type="image/png",
+            bucket_name=settings.MINIO_AVATAR_BUCKET,
+            public=True,
+        )
+        try:
+            r = await alice.patch("/profile/me", json={"avatar_url": url})
+            assert r.status_code == 403, r.text
+            assert r.json()["error_code"] == "AVATAR_NOT_OWNED"
+        finally:
+            await minio_manager.delete_file(url, settings.MINIO_AVATAR_BUCKET)
+    finally:
+        await alice.aclose()
+
+
+async def test_an_avatar_key_that_does_not_exist_is_refused():
+    alice, alice_id = await _register_user()
+    try:
+        url = f"{settings.MINIO_PUBLIC_URL}/{settings.MINIO_AVATAR_BUCKET}/{uuid.uuid4()}.png"
+        r = await alice.patch("/profile/me", json={"avatar_url": url})
+        assert r.status_code == 400, r.text
+        assert r.json()["error_code"] == "AVATAR_UNKNOWN"
+    finally:
+        await alice.aclose()
+
+
+async def test_resending_the_current_avatar_is_accepted():
+    alice, alice_id = await _register_user()
+    try:
+        avatar = await _upload_avatar(alice)
+        assert (await alice.patch("/profile/me", json={"avatar_url": avatar["url"]})).status_code == 200
+
+        r = await alice.patch("/profile/me", json={"avatar_url": avatar["url"], "bio": "same face"})
+        assert r.status_code == 200, r.text
+        assert await _avatar_exists(avatar["url"])
+    finally:
+        await alice.aclose()
+
+
+async def test_clearing_the_avatar_reaps_the_own_object():
+    alice, alice_id = await _register_user()
+    try:
+        avatar = await _upload_avatar(alice)
+        assert (await alice.patch("/profile/me", json={"avatar_url": avatar["url"]})).status_code == 200
+
+        r = await alice.patch("/profile/me", json={"avatar_url": None})
+        assert r.status_code == 200, r.text
+        assert r.json()["data"]["avatar_url"] is None
+        assert not await _avatar_exists(avatar["url"])
+    finally:
+        await alice.aclose()
+
+
+async def test_an_own_avatar_still_used_by_a_group_is_not_reaped():
+    alice, alice_id = await _register_user()
+    try:
+        shared = await _upload_avatar(alice)
+        assert (await alice.patch("/profile/me", json={"avatar_url": shared["url"]})).status_code == 200
+        r = await alice.post(
+            "/chats/group", json={"title": "same face", "avatar_url": shared["url"]}
+        )
+        assert r.status_code == 200, r.text
+
+        replacement = await _upload_avatar(alice)
+        r = await alice.patch("/profile/me", json={"avatar_url": replacement["url"]})
+        assert r.status_code == 200, r.text
+
+        assert await _avatar_exists(shared["url"]), "the group still displays it"
+    finally:
+        await alice.aclose()
+
+
+@pytest.mark.parametrize("path", ["/chats/group", "/chats/channel"])
+async def test_a_chat_cannot_be_created_wearing_another_users_avatar(path):
+    alice, alice_id = await _register_user()
+    bob, bob_id = await _register_user()
+    try:
+        victim = await _upload_avatar(bob)
+
+        r = await alice.post(path, json={"title": "impostor", "avatar_url": victim["url"]})
+        assert r.status_code == 403, r.text
+        assert r.json()["error_code"] == "AVATAR_NOT_OWNED"
+
+        own = await _upload_avatar(alice)
+        r = await alice.post(path, json={"title": "honest", "avatar_url": own["url"]})
+        assert r.status_code == 200, r.text
+        assert r.json()["data"]["avatar_url"] == own["url"]
     finally:
         await alice.aclose()
         await bob.aclose()
