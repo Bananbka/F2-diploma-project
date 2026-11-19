@@ -54,3 +54,25 @@ export function rosterMatchesCommitment(roster: ChatRoster): boolean {
 
     return bindingsValid && computeMemberSetHash(roster.members) === roster.member_set_hash;
 }
+
+/**
+ * True when every active roster entry belongs to someone in `participantIds`.
+ *
+ * `rosterMatchesCommitment` proves the roster is self-consistent; it says nothing about *who* is in
+ * it. The members a screen lists come from the chat's participant list, a different server answer,
+ * so a roster carrying a device under a user id the chat does not name is consistent with its own
+ * commitment and invisible in the list. Inactive entries are skipped, as everywhere: nothing is
+ * wrapped to them. The send path makes the same comparison in `KeyStoreService.verifyRosterMembership`.
+ */
+export function rosterWithinMembers(roster: ChatRoster, participantIds: Iterable<string>): boolean {
+    const allowed = new Set(participantIds);
+    return roster.members.every((member) => member.is_active === false || allowed.has(member.user_id));
+}
+
+/**
+ * What a screen must have checked before saying "the member list matches the commitment": the roster
+ * verifies against the commitment, *and* it names nobody outside the member list being shown.
+ */
+export function rosterMatchesMembers(roster: ChatRoster, participantIds: Iterable<string>): boolean {
+    return rosterMatchesCommitment(roster) && rosterWithinMembers(roster, participantIds);
+}

@@ -213,6 +213,75 @@ describe('MembershipGuardService', () => {
             expect(keyStore.expectMembers).not.toHaveBeenCalled();
         });
 
+        /** L6: the whole chat list is recorded, so a chat never opened here is covered too. */
+        describe('noteEncryptedChats', () => {
+            const SECOND = 'c0000000-0000-4000-8000-0000000000b2';
+            const THIRD = 'c0000000-0000-4000-8000-0000000000b3';
+
+            it('records listed private chats and groups, and refuses one later reported as a channel', () => {
+                service.noteEncryptedChats([
+                    { id: CHAT, chat_type: 'group' },
+                    { id: SECOND, chat_type: 'private' },
+                ]);
+
+                expect(service.encryptedTypeOf(CHAT)).toBe('group');
+                expect(service.encryptedTypeOf(SECOND)).toBe('private');
+                expect(() => service.register(chat('channel'), sink)).toThrowError(MembershipMismatchError);
+                expect(reload().encryptedTypeOf(SECOND)).withContext('persisted').toBe('private');
+            });
+
+            it('does not record a channel', () => {
+                service.noteEncryptedChats([{ id: CHAT, chat_type: 'channel' }]);
+
+                expect(service.encryptedTypeOf(CHAT)).toBeNull();
+                expect(localStorage.getItem('ns.encrypted_chats')).toBeNull();
+            });
+
+            it('keeps the first recorded type when the list later says otherwise', () => {
+                service.noteEncrypted(CHAT, 'private');
+
+                service.noteEncryptedChats([{ id: CHAT, chat_type: 'group' }]);
+
+                expect(service.encryptedTypeOf(CHAT)).toBe('private');
+            });
+
+            it("honours another tab's record and keeps its other entries", () => {
+                reload().noteEncrypted(THIRD, 'private');
+
+                service.noteEncryptedChats([
+                    { id: THIRD, chat_type: 'group' },
+                    { id: CHAT, chat_type: 'group' },
+                ]);
+
+                expect(JSON.parse(localStorage.getItem('ns.encrypted_chats')!)).toEqual({
+                    [`${ME}:${THIRD}`]: 'private',
+                    [`${ME}:${CHAT}`]: 'group',
+                });
+            });
+
+            it('writes storage once for the whole list, and not at all when nothing is new', () => {
+                const setItem = spyOn(Storage.prototype, 'setItem').and.callThrough();
+                const list = [
+                    { id: CHAT, chat_type: 'group' as const },
+                    { id: SECOND, chat_type: 'group' as const },
+                    { id: THIRD, chat_type: 'private' as const },
+                ];
+
+                service.noteEncryptedChats(list);
+                service.noteEncryptedChats(list);
+
+                expect(setItem).toHaveBeenCalledTimes(1);
+            });
+
+            it('still refuses in this tab when storage cannot be written', () => {
+                spyOn(Storage.prototype, 'setItem').and.throwError('QuotaExceededError');
+
+                service.noteEncryptedChats([{ id: CHAT, chat_type: 'group' }]);
+
+                expect(service.encryptedTypeOf(CHAT)).toBe('group');
+            });
+        });
+
         it('never replaces the first recorded type', () => {
             service.noteEncrypted(CHAT, 'private');
             service.noteEncrypted(CHAT, 'group');

@@ -320,8 +320,15 @@ export class KeyChangeStateService {
     /**
      * Adopt other tabs' refusals. Refusals fail closed, so this merges rather than replaces:
      *
-     * - another tab rewrote `ns.refusals` (read-merge-write, so its copy already holds every
-     *   refusal storage held) — take it, plus whatever this tab could not persist;
+     * - another tab rewrote `ns.refusals` — take its copy, plus whatever this tab could not
+     *   persist, plus any refusal this tab holds that the other tab *never saw*. A tab's write is
+     *   read-merge-write, and that is not atomic across tabs: a tab that read storage just before
+     *   our refusal landed writes back a copy without it, and adopting that copy would lift a
+     *   refusal nobody decided to lift. `event.oldValue` is what the writing tab had in front of it:
+     *   a refusal present there and absent from the new value was removed on purpose (its chat's
+     *   roster now derives the confirmed number), and is dropped here too; one absent from both was
+     *   simply unknown to that tab, and is kept and written back. A refusal that has lapsed by this
+     *   tab's own reckoning is not resurrected either way;
      * - storage was cleared or the key removed (`localStorage.clear()` elsewhere, `newValue` null) —
      *   that says nothing about whether any chat was refused, so keep everything this tab holds and
      *   write it back, so that a reload here still remembers it.
@@ -332,8 +339,24 @@ export class KeyChangeStateService {
             return;
         }
         const stored = readRefusals();
-        if (stored !== null) {
-            this.refusals.set({ ...stored, ...this.unpersisted });
+        if (stored === null) {
+            return;
+        }
+        // Lapsing is judged against the confirmed records, which the other tab may just have changed.
+        this.trust.refresh();
+        const seenByWriter = parseRefusals(event.oldValue);
+        const kept: Record<string, Refusal> = {};
+        for (const [id, refusal] of Object.entries(this.withoutLapsed(this.refusals()))) {
+            if (!(id in stored) && !(id in seenByWriter)) {
+                kept[id] = refusal;
+            }
+        }
+        const merged = { ...stored, ...kept, ...this.unpersisted };
+        if (Object.keys(kept).length > 0) {
+            // Storage lost them; put them back so a reload (here or there) still remembers.
+            this.writeRefusals(merged);
+        } else {
+            this.refusals.set(merged);
         }
     }
 }
@@ -361,6 +384,11 @@ function readRefusals(): Record<string, Refusal> | null {
     } catch {
         return null;
     }
+    return parseRefusals(raw);
+}
+
+/** A serialised refusal map (a stored value, or a `storage` event's `oldValue`), validated. */
+function parseRefusals(raw: string | null): Record<string, Refusal> {
     try {
         const parsed: unknown = raw ? JSON.parse(raw) : {};
         if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {

@@ -698,6 +698,9 @@ export class ChatStoreService {
             const chats = await firstValueFrom(this.chatApi.getChats());
             const merged = this.preserveKnownParticipants(chats);
             this.chats.set(merged);
+            // Every listed private chat and group is recorded as encrypted now, not when it is first
+            // opened: otherwise one never opened here could be relabelled as a channel unnoticed.
+            this.membership.noteEncryptedChats(chats);
             this.warmDirectoryFromChats(chats);
         } catch {
             this.chatsError.set('Could not load your chats.');
@@ -2114,6 +2117,11 @@ export class ChatStoreService {
      * The edit is sealed under a **fresh** chain index — the server rejects reuse, because repeating
      * a message key would repeat a (key, nonce) pair. So this is a new index to open, not a re-read of
      * one already consumed, and it must not go through the plaintext cache keyed on the old content.
+     *
+     * The event itself is unauthenticated: only the envelope inside it can prove anything. So the
+     * edit is opened *first* (`MessageService.decryptEdit`), and the message on screen - and the
+     * ciphertext kept for it - is replaced only if that succeeded. A forged or unreadable "edit"
+     * leaves the existing rendering untouched instead of turning an opened message into `failed`.
      */
     private async onMessageEdited(chatId: string | null, payload: Record<string, unknown>): Promise<void> {
         const raw = payload as unknown as MessageResponse;
@@ -2121,13 +2129,23 @@ export class ChatStoreService {
             return;
         }
 
-        this.rawMessages.set(raw._id, raw);
-        this.messages_.forgetOne(raw._id);
-
-        const decrypted = await this.messages_.decrypt(chatId, raw);
-        if (this.deletedIds.has(decrypted.id)) {
+        let outcome = await this.messages_.decryptEdit(chatId, raw);
+        if (!outcome.replaced && outcome.missingKey) {
+            // Sealed on a chain we do not hold yet (the sender re-keyed or reloaded before editing).
+            // The old content stays up; fetch grants once and try again rather than lose the edit.
+            try {
+                await this.messages_.refreshGrants(chatId);
+                outcome = await this.messages_.decryptEdit(chatId, raw);
+            } catch {
+                // Offline or a transient failure: the previous rendering stands.
+            }
+        }
+        if (!outcome.replaced || this.deletedIds.has(raw._id) || chatId !== this.activeChatId()) {
             return;
         }
+
+        const decrypted = outcome.message;
+        this.rawMessages.set(raw._id, raw);
         this.messages.update((list) => list.map((m) => (m.id === decrypted.id ? decrypted : m)));
 
         if (decrypted.status === 'no_key') {

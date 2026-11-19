@@ -1,6 +1,7 @@
 import { HttpErrorResponse } from '@angular/common/http';
 import { Injector } from '@angular/core';
 import { fakeAsync, TestBed, tick } from '@angular/core/testing';
+import { ed25519 } from '@noble/curves/ed25519.js';
 import { argon2id } from '@noble/hashes/argon2.js';
 import { of, throwError } from 'rxjs';
 import { v4 as uuidv4 } from 'uuid';
@@ -9,6 +10,7 @@ import { sealMessage } from '../crypto/envelope';
 import { computeMemberSetHash, signDistribution, wrapChainKey } from '../crypto/grants';
 import {
     generateIdentity,
+    identityBindingMessage,
     IdentityBundle,
     KdfParams,
     safetyNumber,
@@ -28,6 +30,7 @@ import {
 import { ChatApiService } from './chat-api.service';
 import { CryptoApiService } from './crypto-api.service';
 import {
+    IdentityMismatchError,
     KeyChangedError,
     MemberSetMismatchError,
     MembershipMismatchError,
@@ -225,6 +228,96 @@ describe('KeyStoreService', () => {
 
         return bundle;
     }
+
+    /**
+     * H1: the password opens the bundle whoever the server says we are. Every local trust record is
+     * keyed by our own user id, so that id has to be proven by the keys, not taken from `/auth/me`.
+     */
+    describe('unlock binds the opened keys to the account', () => {
+        const OTHER_USER = 'a9000000-0000-4000-8000-0000000000a9';
+        let bundle: IdentityBundle;
+        let row: OwnIdentity;
+
+        beforeAll(async () => {
+            bundle = generateIdentity(USER, DEVICE);
+            const wrapped = await sealCheaply(bundle);
+            row = {
+                ...publicKeyFor(USER, DEVICE, bundle),
+                encrypted_private_bundle: wrapped.encryptedPrivateBundle,
+                kdf_params: wrapped.kdfParams as unknown as OwnIdentity['kdf_params'],
+                created_at: new Date().toISOString(),
+                signed_prekey_created_at: null,
+                display_name: 'test device',
+            };
+        });
+
+        beforeEach(() => localStorage.setItem('ns.device_id', DEVICE));
+
+        async function expectRefused(userId: string, served: OwnIdentity): Promise<void> {
+            cryptoApi.getOwnIdentities.and.returnValue(of([served]));
+
+            await expectAsync(service.unlock(userId, PASSWORD)).toBeRejectedWithError(IdentityMismatchError);
+
+            expect(service.isUnlocked()).toBeFalse();
+            expect(service.currentIdentity).toBeNull();
+        }
+
+        it('unlocks when the published row is the one the opened keys vouch for', async () => {
+            cryptoApi.getOwnIdentities.and.returnValue(of([row]));
+
+            expect(await service.unlock(USER, PASSWORD)).toBeTrue();
+
+            expect(service.currentIdentity?.userId).toBe(USER);
+            expect(service.currentIdentity?.signingPublic).toEqual(bundle.signingPublic);
+        });
+
+        it('refuses when the server reports a different user id for the session', async () => {
+            await expectRefused(OTHER_USER, row);
+        });
+
+        it('refuses when the row itself is relabelled to that other user id', async () => {
+            await expectRefused(OTHER_USER, { ...row, user_id: OTHER_USER });
+        });
+
+        it('refuses a binding signature made for another user id, even by our own key', async () => {
+            const relabelled = ed25519.sign(
+                identityBindingMessage(OTHER_USER, DEVICE, bundle.identityPublic),
+                bundle.signingPrivate
+            );
+
+            await expectRefused(USER, { ...row, identity_key_signature: b64uEncode(relabelled) });
+            // ...and that signature does not make the other id acceptable either: the row's keys
+            // are compared with the opened ones, and the row would have to name that id throughout.
+            await expectRefused(OTHER_USER, { ...row, identity_key_signature: b64uEncode(relabelled) });
+        });
+
+        it('refuses a published signing key that is not the one in the bundle', async () => {
+            const other = generateIdentity(USER, DEVICE);
+
+            await expectRefused(USER, { ...row, signing_public_key: b64uEncode(other.signingPublic) });
+        });
+
+        it('refuses a published identity key that is not the one in the bundle', async () => {
+            const other = generateIdentity(USER, DEVICE);
+
+            await expectRefused(USER, {
+                ...row,
+                identity_public_key: b64uEncode(other.identityPublic),
+                identity_key_signature: b64uEncode(other.identityKeySignature),
+            });
+        });
+
+        it('refuses a row whose public fields do not even decode', async () => {
+            await expectRefused(USER, { ...row, identity_key_signature: '!!' });
+        });
+
+        it('still reports a wrong password as false, not as a mismatch', async () => {
+            cryptoApi.getOwnIdentities.and.returnValue(of([row]));
+
+            expect(await service.unlock(USER, 'not the password')).toBeFalse();
+            expect(service.isUnlocked()).toBeFalse();
+        });
+    });
 
     describe('ingestDistributions', () => {
         /** The bug this whole feature exists to fix: a grant wrapped to the signed prekey must be
@@ -1680,6 +1773,175 @@ describe('KeyStoreService', () => {
                 await service.ingestDistributions(CHAT, [dist]);
 
                 expect(TestBed.inject(KeyChangeStateService).observedState(USER, SENDER_USER)?.kind).toBe('verified');
+            });
+
+            /**
+             * H2(a): the device that vouches for a chain must be one the safety number covers. An
+             * inactive device is in no number, so a server could mark a self-bound device of its own
+             * inactive, sign a distribution with it, and have the chain accepted as the peer's while
+             * the verified number never moved.
+             */
+            describe('a distribution vouched for by an inactive device', () => {
+                /** The peer's real device is SECOND_DEVICE; the planted one answers as SENDER_DEVICE. */
+                async function plant(verified: boolean, peerActive = true) {
+                    const mine = await unlockWithBundle(true);
+                    const peer = generateIdentity(SENDER_USER, SECOND_DEVICE);
+                    const planted = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                    if (verified) {
+                        trust.markVerified(USER, SENDER_USER, numberFor([mine], [peer]));
+                    }
+                    cryptoApi.getKeysBatch.and.returnValue(
+                        of([
+                            publicKeyFor(USER, DEVICE, mine),
+                            { ...publicKeyFor(SENDER_USER, SECOND_DEVICE, peer), is_active: peerActive },
+                            { ...publicKeyFor(SENDER_USER, SENDER_DEVICE, planted), is_active: false },
+                        ])
+                    );
+                    const dist = await buildDistribution({
+                        epoch: 1,
+                        senderIdentity: planted,
+                        recipientPublic: mine.prekeyPublic!,
+                        recipientDeviceId: DEVICE,
+                    });
+                    await service.ingestDistributions(CHAT, [dist]);
+                    return dist;
+                }
+
+                it('is refused for a verified peer, whose number it would not have changed', async () => {
+                    const dist = await plant(true);
+
+                    expect(service.getReceiverChain(CHAT, 1, dist.sender_key_id)).toBeUndefined();
+                    expect(service.getChainSigningKey(CHAT, 1, dist.sender_key_id)).toBeUndefined();
+                    expect(service.getChainOwner(CHAT, 1, dist.sender_key_id)).toBeUndefined();
+                });
+
+                it('is refused beside active devices even when the peer was never verified', async () => {
+                    const dist = await plant(false);
+
+                    expect(service.getReceiverChain(CHAT, 1, dist.sender_key_id)).toBeUndefined();
+                });
+
+                it('is refused for a verified peer now presented as a deleted account', async () => {
+                    const dist = await plant(true, false);
+
+                    expect(service.getReceiverChain(CHAT, 1, dist.sender_key_id)).toBeUndefined();
+                });
+
+                it("still reads an unverified deleted account's history", async () => {
+                    const dist = await plant(false, false);
+
+                    expect(service.getReceiverChain(CHAT, 1, dist.sender_key_id)).toBeDefined();
+                    expect(service.getChainOwner(CHAT, 1, dist.sender_key_id)).toBe(SENDER_USER);
+                });
+
+                it('stops using such a chain once a number is confirmed for that peer', async () => {
+                    const dist = await plant(false, false);
+                    expect(service.getReceiverChain(CHAT, 1, dist.sender_key_id)).toBeDefined();
+
+                    trust.markVerified(USER, SENDER_USER, '11111 22222 33333 44444 55555 66666');
+
+                    expect(service.getReceiverChain(CHAT, 1, dist.sender_key_id)).toBeUndefined();
+                });
+
+                it('is refused under our own user id', async () => {
+                    const mine = await unlockWithBundle(true);
+                    const planted = generateIdentity(USER, SENDER_DEVICE);
+                    cryptoApi.getKeysBatch.and.returnValue(
+                        of([
+                            publicKeyFor(USER, DEVICE, mine),
+                            { ...publicKeyFor(USER, SENDER_DEVICE, planted), is_active: false },
+                        ])
+                    );
+                    const dist = {
+                        ...(await buildDistribution({
+                            epoch: 1,
+                            senderIdentity: planted,
+                            recipientPublic: mine.prekeyPublic!,
+                            recipientDeviceId: DEVICE,
+                        })),
+                        sender_user_id: USER,
+                    };
+
+                    await service.ingestDistributions(CHAT, [dist]);
+
+                    expect(service.getReceiverChain(CHAT, 1, dist.sender_key_id)).toBeUndefined();
+                });
+            });
+
+            /**
+             * H2(b): with our own keys left out of the answer no number can be derived, so the
+             * comparison against a confirmed number silently did not happen. For a verified peer
+             * that is a withheld check, not a passed one.
+             */
+            describe('a verified peer whose number cannot be derived', () => {
+                it('skips the distribution when the batch omits our keys, and takes it once they are there', async () => {
+                    const mine = await unlockWithBundle(true);
+                    const peer = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                    trust.markVerified(USER, SENDER_USER, numberFor([mine], [peer]));
+                    const dist = await buildDistribution({
+                        epoch: 1,
+                        senderIdentity: peer,
+                        recipientPublic: mine.prekeyPublic!,
+                        recipientDeviceId: DEVICE,
+                    });
+
+                    cryptoApi.getKeysBatch.and.returnValue(of([publicKeyFor(SENDER_USER, SENDER_DEVICE, peer)]));
+                    await service.ingestDistributions(CHAT, [dist]);
+                    expect(service.getReceiverChain(CHAT, 1, dist.sender_key_id)).toBeUndefined();
+                    expect(service.getChainSigningKey(CHAT, 1, dist.sender_key_id)).toBeUndefined();
+
+                    cryptoApi.getKeysBatch.and.returnValue(
+                        of([publicKeyFor(USER, DEVICE, mine), publicKeyFor(SENDER_USER, SENDER_DEVICE, peer)])
+                    );
+                    await service.ingestDistributions(CHAT, [dist]);
+                    expect(service.getReceiverChain(CHAT, 1, dist.sender_key_id)).toBeDefined();
+                });
+
+                it('skips it when the only key of ours in the batch is inactive', async () => {
+                    const mine = await unlockWithBundle(true);
+                    const peer = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                    trust.markVerified(USER, SENDER_USER, numberFor([mine], [peer]));
+                    cryptoApi.getKeysBatch.and.returnValue(
+                        of([
+                            { ...publicKeyFor(USER, DEVICE, mine), is_active: false },
+                            publicKeyFor(SENDER_USER, SENDER_DEVICE, peer),
+                        ])
+                    );
+                    const dist = await buildDistribution({
+                        epoch: 1,
+                        senderIdentity: peer,
+                        recipientPublic: mine.prekeyPublic!,
+                        recipientDeviceId: DEVICE,
+                    });
+
+                    await service.ingestDistributions(CHAT, [dist]);
+
+                    expect(service.getReceiverChain(CHAT, 1, dist.sender_key_id)).toBeUndefined();
+                });
+
+                it('still ingests, and notes the change, when the number is derivable but differs', async () => {
+                    const mine = await unlockWithBundle(true);
+                    const peer = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                    const before = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                    trust.markVerified(USER, SENDER_USER, numberFor([mine], [before]));
+                    cryptoApi.getKeysBatch.and.returnValue(
+                        of([publicKeyFor(USER, DEVICE, mine), publicKeyFor(SENDER_USER, SENDER_DEVICE, peer)])
+                    );
+                    const dist = await buildDistribution({
+                        epoch: 1,
+                        senderIdentity: peer,
+                        recipientPublic: mine.prekeyPublic!,
+                        recipientDeviceId: DEVICE,
+                    });
+
+                    await service.ingestDistributions(CHAT, [dist]);
+
+                    // Readable, with the alarm raised: the user judges the content against it.
+                    expect(service.getReceiverChain(CHAT, 1, dist.sender_key_id)).toBeDefined();
+                    expect(TestBed.inject(KeyChangeStateService).observedState(USER, SENDER_USER)?.kind).toBe(
+                        'changed'
+                    );
+                });
             });
 
             it('notes nothing on ingest when the batch carries no key of ours', async () => {

@@ -1,11 +1,13 @@
 import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
-import { Observable, of, throwError } from 'rxjs';
+import { Observable, of, Subject, throwError } from 'rxjs';
 
 import { computeMemberSetHash } from '../../../core/crypto/grants';
+import { generateIdentity } from '../../../core/crypto/identity';
+import { b64uEncode } from '../../../core/crypto/primitives';
 import { Chat, ChatParticipant } from '../../../core/models/chat.model';
-import { ChatRoster } from '../../../core/models/crypto.model';
+import { ChatRoster, RosterEntry } from '../../../core/models/crypto.model';
 import { ChatApiService } from '../../../core/services/chat-api.service';
 import { ChatStoreService } from '../../../core/services/chat-store.service';
 import { CryptoApiService } from '../../../core/services/crypto-api.service';
@@ -181,6 +183,112 @@ describe('EncryptionPanelComponent', () => {
             expect(root.textContent).toContain('Member set does not match');
             expect(root.textContent).not.toContain('matches the commitment for the current keys.');
             expect(root.querySelector('.status.is-alert')).not.toBeNull();
+        });
+    });
+
+    /**
+     * L7: the members listed are the chat's participants, so "matches" also needs the roster to name
+     * nobody outside them. A roster can agree with its own commitment and still carry a device for
+     * someone the list does not show.
+     */
+    describe('roster against the member list shown', () => {
+        const uuid = (n: number) => `d0000000-0000-4000-8000-00000000000${n}`;
+
+        /** A genuinely bound roster entry, so the commitment check itself passes. */
+        function entry(userId: string, deviceId: string, active = true): RosterEntry {
+            const bundle = generateIdentity(userId, deviceId, false);
+            return {
+                user_id: userId,
+                device_id: deviceId,
+                identity_key_id: deviceId,
+                identity_public_key: b64uEncode(bundle.identityPublic),
+                signing_public_key: b64uEncode(bundle.signingPublic),
+                identity_key_signature: b64uEncode(bundle.identityKeySignature),
+                signed_prekey_public: null,
+                signed_prekey_signature: null,
+                ...(active ? {} : { is_active: false }),
+            };
+        }
+
+        function rosterOf(...members: RosterEntry[]): ChatRoster {
+            return { chat_id: CHAT_ID, current_epoch: 4, member_set_hash: computeMemberSetHash(members), members };
+        }
+
+        const [MEMBER_A, MEMBER_B, OUTSIDER] = [uuid(1), uuid(2), uuid(3)];
+
+        it('claims a match when every roster entry belongs to a listed member', async () => {
+            getRoster.and.returnValue(of(rosterOf(entry(MEMBER_A, uuid(4)), entry(MEMBER_B, uuid(5)))));
+            const root = await open({ participants: participants(ME, MEMBER_A, MEMBER_B) });
+            expect(root.textContent).toContain('The member list matches the commitment for the current keys.');
+        });
+
+        it('raises the alarm for a self-consistent roster with a device of someone not listed', async () => {
+            getRoster.and.returnValue(of(rosterOf(entry(MEMBER_A, uuid(4)), entry(OUTSIDER, uuid(6)))));
+            const root = await open({ participants: participants(ME, MEMBER_A, MEMBER_B) });
+            expect(root.textContent).toContain('Member set does not match');
+            expect(root.textContent).not.toContain('matches the commitment for the current keys.');
+            expect(root.querySelector('.status.is-alert')).not.toBeNull();
+        });
+
+        it('ignores an inactive entry of someone not listed, as the send path does', async () => {
+            getRoster.and.returnValue(of(rosterOf(entry(MEMBER_A, uuid(4)), entry(OUTSIDER, uuid(6), false))));
+            const root = await open({ participants: participants(ME, MEMBER_A) });
+            expect(root.textContent).toContain('The member list matches the commitment for the current keys.');
+        });
+    });
+
+    /** L7: one instance serves every chat, so a slow answer must not land under the next chat. */
+    describe('switching chats while a load is in flight', () => {
+        const OTHER_CHAT = 'chat-2';
+
+        it("does not show the previous chat's roster, members or error under the new chat", async () => {
+            const slowRoster = new Subject<ChatRoster>();
+            getRoster.and.callFake(((chatId: string) =>
+                chatId === CHAT_ID ? slowRoster : throwError(() => new Error('network'))) as never);
+            chatApi.getChat.and.callFake((chatId: string) =>
+                of({
+                    id: chatId,
+                    chat_type: 'group',
+                    participants: participants(ME, chatId === CHAT_ID ? 'from-first' : 'from-second'),
+                })
+            );
+            fixture = TestBed.createComponent(EncryptionPanelComponent);
+            fixture.componentRef.setInput('chatId', CHAT_ID);
+            fixture.detectChanges();
+            await fixture.whenStable();
+
+            fixture.componentRef.setInput('chatId', OTHER_CHAT);
+            fixture.detectChanges();
+            await fixture.whenStable();
+            await new Promise((resolve) => setTimeout(resolve));
+
+            // The first chat's roster arrives only now, and a forged one at that.
+            slowRoster.next({ chat_id: CHAT_ID, current_epoch: 9, member_set_hash: 'forged', members: [] });
+            slowRoster.complete();
+            await new Promise((resolve) => setTimeout(resolve));
+            fixture.detectChanges();
+
+            const component = fixture.componentInstance;
+            const root = fixture.nativeElement as HTMLElement;
+            expect(component.chat()?.id).toBe(OTHER_CHAT);
+            expect(component.roster()).withContext('the second chat has no roster').toBeNull();
+            expect(component.memberSetCheck()).toBeNull();
+            expect(root.textContent).toContain('has not been checked');
+            expect(root.textContent).not.toContain('Member set does not match');
+            expect(root.textContent).toContain('Name from-second');
+            expect(root.textContent).not.toContain('Name from-first');
+        });
+
+        it('clears the previous roster as soon as another chat starts loading', async () => {
+            await open({ participants: participants(ME, 'a') });
+            expect(fixture.componentInstance.roster()).not.toBeNull();
+
+            chatApi.getChat.and.returnValue(new Subject());
+            fixture.componentRef.setInput('chatId', OTHER_CHAT);
+            fixture.detectChanges();
+
+            expect(fixture.componentInstance.roster()).toBeNull();
+            expect(fixture.componentInstance.chat()).toBeNull();
         });
     });
 

@@ -177,6 +177,20 @@ export function generateIdentity(userId: string, deviceId: string, withPrekey = 
     return { ...bundle, prekeyPrivate, prekeyPublic, signedPrekeySignature: signature };
 }
 
+/**
+ * Public halves of a device's two private keys. Used at unlock, where the published public keys are
+ * the server's copy and must be checked against what the opened bundle actually holds.
+ */
+export function derivePublicKeys(
+    signingPrivate: Uint8Array,
+    identityPrivate: Uint8Array
+): { signingPublic: Uint8Array; identityPublic: Uint8Array } {
+    return {
+        signingPublic: ed25519.getPublicKey(signingPrivate),
+        identityPublic: x25519.getPublicKey(identityPrivate),
+    };
+}
+
 export function verifyIdentityBinding(
     userId: string,
     deviceId: string,

@@ -255,12 +255,91 @@ describe('KeyChangeStateService', () => {
 
         it("adopts another tab's cleared refusal", () => {
             const other = reload().keyChange;
+            // What the other tab had in front of it when it wrote: the refusal was there, and it
+            // took it out on purpose.
+            const oldValue = localStorage.getItem('ns.refusals');
             other.clearRefusal(CHAT_A, ME, PEER);
             window.dispatchEvent(
-                new StorageEvent('storage', { key: 'ns.refusals', newValue: localStorage.getItem('ns.refusals') })
+                new StorageEvent('storage', {
+                    key: 'ns.refusals',
+                    oldValue,
+                    newValue: localStorage.getItem('ns.refusals'),
+                })
             );
 
             expect(service.refusalFor(CHAT_A, ME, PEER)).toBeNull();
+        });
+
+        /**
+         * L8: a tab's write is read-merge-write, which is not atomic across tabs. A tab that read
+         * storage before our refusal landed writes back a copy without it; `oldValue` shows it never
+         * had the refusal, so its absence is not a decision to lift it.
+         */
+        describe("another tab's write that never saw this tab's refusal", () => {
+            const KEY_A = `${CHAT_A}|${ME}:${PEER}`;
+            const KEY_B = `${CHAT_B}|${ME}:${PEER}`;
+            /** A refusal the other tab recorded, against the confirmation currently on record. */
+            const theirs = () => ({
+                current: NUMBER_C,
+                previous: NUMBER_A,
+                ownDevicesChanged: false,
+                recordedAgainst: trust.recordStamp(ME, PEER),
+            });
+
+            /** The other tab overwrites storage from a view that predates our refusal. */
+            function overwrite(oldValue: string | null, next: Record<string, unknown>): void {
+                const newValue = JSON.stringify(next);
+                localStorage.setItem('ns.refusals', newValue);
+                window.dispatchEvent(new StorageEvent('storage', { key: 'ns.refusals', oldValue, newValue }));
+            }
+
+            it('keeps the refusal and writes it back', () => {
+                overwrite('{}', {});
+
+                expect(service.refusalFor(CHAT_A, ME, PEER)?.current).toBe(NUMBER_B);
+                expect(Object.keys(JSON.parse(localStorage.getItem('ns.refusals')!))).toEqual([KEY_A]);
+                expect(reload().keyChange.refusalFor(CHAT_A, ME, PEER))
+                    .withContext('after a reload')
+                    .not.toBeNull();
+            });
+
+            it('keeps it when the key did not exist before that write', () => {
+                overwrite(null, {});
+
+                expect(service.refusalFor(CHAT_A, ME, PEER)?.current).toBe(NUMBER_B);
+            });
+
+            it("keeps it alongside the other tab's own refusals", () => {
+                overwrite('{}', { [KEY_B]: theirs() });
+
+                expect(service.refusalFor(CHAT_A, ME, PEER)?.current).toBe(NUMBER_B);
+                expect(service.refusalFor(CHAT_B, ME, PEER)?.current).toBe(NUMBER_C);
+                expect(Object.keys(JSON.parse(localStorage.getItem('ns.refusals')!)).sort()).toEqual(
+                    [KEY_A, KEY_B].sort()
+                );
+            });
+
+            it('drops it when the other tab had it and removed it', () => {
+                overwrite(localStorage.getItem('ns.refusals'), { [KEY_B]: theirs() });
+
+                expect(service.refusalFor(CHAT_A, ME, PEER)).toBeNull();
+                expect(service.refusalFor(CHAT_B, ME, PEER)?.current).toBe(NUMBER_C);
+            });
+
+            it('does not resurrect a refusal that has lapsed here', () => {
+                trust.markVerified(ME, PEER, NUMBER_B);
+
+                overwrite('{}', {});
+
+                expect(service.refusalFor(CHAT_A, ME, PEER)).toBeNull();
+                expect(localStorage.getItem('ns.refusals')).toBe('{}');
+            });
+
+            it('treats an unreadable old value as a view without the refusal', () => {
+                overwrite('not json', {});
+
+                expect(service.refusalFor(CHAT_A, ME, PEER)?.current).toBe(NUMBER_B);
+            });
         });
 
         /** C2: a lapsed refusal is deleted from storage, not merely ignored. */

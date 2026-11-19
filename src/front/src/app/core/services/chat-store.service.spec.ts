@@ -146,6 +146,7 @@ describe('ChatStoreService', () => {
                     useValue: jasmine.createSpyObj('MessageService', [
                         'loadMessages',
                         'decrypt',
+                        'decryptEdit',
                         'refreshGrants',
                         'sendText',
                         'sendChannelPost',
@@ -1076,6 +1077,32 @@ describe('ChatStoreService', () => {
 
             expect(directory.rememberPrivateChatPeer).toHaveBeenCalledWith(PEER, 'Deleted user', null, true);
         });
+
+        /**
+         * L6: a chat is recorded as encrypted when it is listed, not when it is first opened, so one
+         * never opened in this browser cannot be reported as a channel later without the alarm.
+         */
+        it('records every listed private chat and group as encrypted, and no channel', async () => {
+            const GROUP = 'c0000000-0000-4000-8000-0000000000a1';
+            const DIRECT = 'c0000000-0000-4000-8000-0000000000a2';
+            const CHANNEL = 'c0000000-0000-4000-8000-0000000000a3';
+            const guard = TestBed.inject(MembershipGuardService);
+            const chatApi = TestBed.inject(ChatApiService) as jasmine.SpyObj<ChatApiService>;
+            sessionUser = { id: ME };
+            chatApi.getChats.and.returnValue(
+                of([
+                    chat({ id: GROUP, chat_type: 'group' }),
+                    chat({ id: DIRECT, chat_type: 'private' }),
+                    chat({ id: CHANNEL, chat_type: 'channel' }),
+                ])
+            );
+
+            await store.loadChats();
+
+            expect(guard.encryptedTypeOf(GROUP)).toBe('group');
+            expect(guard.encryptedTypeOf(DIRECT)).toBe('private');
+            expect(guard.encryptedTypeOf(CHANNEL)).toBeNull();
+        });
     });
 
     describe('client_message_id', () => {
@@ -1799,12 +1826,18 @@ describe('ChatStoreService', () => {
 
         it('applies a replayed create, edit and delete in order, ending with the message gone', async () => {
             const order: string[] = [];
-            messages.decrypt.and.callFake(async () => {
+            const open = async () => {
                 order.push('decrypt');
                 // The first decrypt is slower than the events behind it.
                 await new Promise((resolve) => setTimeout(resolve, order.length === 1 ? 30 : 1));
                 return { ...decrypted(ID, 'ok'), text: `v${order.length}` };
-            });
+            };
+            messages.decrypt.and.callFake(open);
+            messages.decryptEdit.and.callFake(async () => ({
+                message: await open(),
+                replaced: true,
+                missingKey: false,
+            }));
 
             ws.messages.next(created);
             ws.messages.next(edited);
@@ -1814,6 +1847,81 @@ describe('ChatStoreService', () => {
 
             expect(order).toEqual(['decrypt', 'decrypt']);
             expect(store.messages().some((m) => m.id === ID)).toBeFalse();
+        });
+
+        /**
+         * M4: `message_edited` is only an event. What is on screen changes when the edit inside it
+         * opened, and stays exactly as it was when it did not.
+         */
+        describe('message_edited', () => {
+            const shown = () => store.messages().find((m) => m.id === ID);
+
+            beforeEach(async () => {
+                messages.decrypt.and.resolveTo({ ...decrypted(ID, 'ok'), text: 'v1' });
+                // Let the conversation finish opening first: its (empty) page replaces the list.
+                await settle();
+                ws.messages.next(created);
+                await store.whenIdle();
+                expect(shown()?.text).withContext('the message is on screen before the edit').toBe('v1');
+                messages.forgetOne.calls.reset();
+            });
+
+            it('shows an edit that opened', async () => {
+                messages.decryptEdit.and.resolveTo({
+                    message: { ...decrypted(ID, 'ok'), text: 'v2' },
+                    replaced: true,
+                    missingKey: false,
+                });
+
+                ws.messages.next(edited);
+                await store.whenIdle();
+
+                expect(shown()?.text).toBe('v2');
+            });
+
+            it('leaves the message as it was when the edit was refused, and forgets nothing', async () => {
+                const before = shown();
+                messages.decryptEdit.and.resolveTo({ message: before!, replaced: false, missingKey: false });
+
+                ws.messages.next(edited);
+                await store.whenIdle();
+
+                expect(shown()).toBe(before);
+                expect(shown()?.status).toBe('ok');
+                expect(messages.forgetOne).not.toHaveBeenCalled();
+                expect(messages.refreshGrants).not.toHaveBeenCalled();
+            });
+
+            it('fetches grants once and tries again when the edit is on a chain not held yet', async () => {
+                const before = shown()!;
+                messages.refreshGrants.and.resolveTo();
+                messages.decryptEdit.and.returnValues(
+                    Promise.resolve({ message: before, replaced: false, missingKey: true }),
+                    Promise.resolve({
+                        message: { ...decrypted(ID, 'ok'), text: 'v2' },
+                        replaced: true,
+                        missingKey: false,
+                    })
+                );
+
+                ws.messages.next(edited);
+                await store.whenIdle();
+
+                expect(messages.refreshGrants).toHaveBeenCalledOnceWith(CHAT);
+                expect(messages.decryptEdit).toHaveBeenCalledTimes(2);
+                expect(shown()?.text).toBe('v2');
+            });
+
+            it('keeps the old content when the key for the edit cannot be fetched', async () => {
+                const before = shown()!;
+                messages.refreshGrants.and.rejectWith(new Error('offline'));
+                messages.decryptEdit.and.resolveTo({ message: before, replaced: false, missingKey: true });
+
+                ws.messages.next(edited);
+                await store.whenIdle();
+
+                expect(shown()).toBe(before);
+            });
         });
 
         it('ignores a decrypt that finishes after the message was deleted', async () => {

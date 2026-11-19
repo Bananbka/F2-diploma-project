@@ -53,6 +53,7 @@ import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
 import { ContextMenuEntry, MenuSource } from '../../../shared/ui/context-menu/context-menu.model';
 import { messageTime } from '../../../shared/utils/display';
 import { resolveImageType, typeMayBeTransparent } from '../../../shared/utils/image-meta';
+import { safeFileName } from '../../../shared/utils/safe-file-name';
 import { LocationCardComponent } from '../location-card/location-card.component';
 import { MediaViewerService } from '../media-viewer/media-viewer.service';
 import { PollCardComponent } from '../poll-card/poll-card.component';
@@ -487,7 +488,7 @@ export class MessageBubbleComponent {
                         key: file.url,
                         messageId: message.id,
                         objectUrl,
-                        name: file.name,
+                        name: safeFileName(file.name),
                         contentType: this.mediaState().get(file.url)?.mime ?? file.content_type,
                         kind: file.kind,
                         sender,
@@ -800,7 +801,7 @@ export class MessageBubbleComponent {
         }
 
         try {
-            this.saveBlob(plaintext, file.name);
+            this.saveBlob(plaintext, safeFileName(file.name));
             this.setDownload(file.url, null);
         } catch {
             this.setDownload(file.url, { status: 'error', error: 'The browser refused to save this file.' });
@@ -814,6 +815,11 @@ export class MessageBubbleComponent {
      * page's origin, so a blob typed `text/html` would be same-origin markup if it were ever
      * navigated to rather than downloaded. The file name keeps its extension for the OS.
      */
+    /** The attachment's name with anything that could misrepresent it removed; see `safeFileName`. */
+    fileName(file: MessageAttachment): string {
+        return safeFileName(file.name);
+    }
+
     private saveBlob(plaintext: Uint8Array, name: string): void {
         const objectUrl = URL.createObjectURL(
             new Blob([plaintext as BufferSource], { type: 'application/octet-stream' })

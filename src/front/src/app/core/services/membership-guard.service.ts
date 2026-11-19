@@ -187,6 +187,44 @@ export class MembershipGuardService {
     }
 
     /**
+     * `noteEncrypted` for a whole chat list, with one storage read and at most one write.
+     *
+     * Called whenever the list loads. Recording a chat only once its keys had loaded left every chat
+     * the user had not opened in this browser unrecorded, so the server could report such a private
+     * chat or group as a channel and the first message typed into it would go out as a readable
+     * post. Channels are skipped; a chat already recorded keeps its first type.
+     *
+     * First sight is still the server's word (trust on first use), and the record lives in
+     * localStorage - see `docs/tech-debt.md` section 14.
+     */
+    noteEncryptedChats(chats: readonly Pick<Chat, 'id' | 'chat_type'>[]): void {
+        const me = this.session.user()?.id;
+        if (!me) {
+            return;
+        }
+        let stored: Record<string, string> | null | undefined;
+        const added: Record<string, string> = {};
+        for (const chat of chats) {
+            const key = pinKey(me, chat.id);
+            if (!key || !isEncryptedType(chat.chat_type) || this.encrypted[key]) {
+                continue;
+            }
+            stored ??= readStringMap(ENCRYPTED_CHATS_KEY, isEncryptedType);
+            // A record another tab wrote first wins, exactly as in `noteEncrypted`.
+            this.encrypted[key] = stored?.[key] ?? chat.chat_type;
+            added[key] = this.encrypted[key];
+        }
+        if (Object.keys(added).length === 0) {
+            return;
+        }
+        try {
+            localStorage.setItem(ENCRYPTED_CHATS_KEY, JSON.stringify({ ...(stored ?? {}), ...added }));
+        } catch {
+            // Held in memory for this tab; it still refuses here, just not after a reload.
+        }
+    }
+
+    /**
      * The encrypted type this chat was seen as — a pinned private chat counts — or null when it has
      * only ever been seen as a channel (or never seen). Such a chat must never get a readable post.
      */

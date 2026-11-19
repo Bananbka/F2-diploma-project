@@ -1,6 +1,22 @@
 import { HttpErrorResponse } from '@angular/common/http';
 
 /**
+ * The password opened the key bundle, but the keys inside are not the ones the server published for
+ * the account it says we are: a different user id, different public keys, or a binding signature
+ * that does not cover this user id and device. Thrown by `KeyStoreService.unlock`, which leaves the
+ * store locked. Not a wrong password, and not retryable by typing it again.
+ */
+export class IdentityMismatchError extends Error {
+    constructor() {
+        super(
+            'Your keys do not match the account the server reported. Nothing was unlocked. ' +
+                'Sign out and sign in again; if this repeats, the server may be misreporting your account.'
+        );
+        this.name = 'IdentityMismatchError';
+    }
+}
+
+/**
  * The roster could not be trusted, so no key was handed to it.
  *
  * A class rather than a message prefix. This was matched with

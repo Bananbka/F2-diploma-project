@@ -67,6 +67,21 @@ export interface DecryptedMessage {
     editedAt?: string | null;
 }
 
+/** What `MessageService.decryptEdit` did with an edit. */
+export interface EditOutcome {
+    /** What to render for this id now: the edit if it was accepted, otherwise what was there. */
+    message: DecryptedMessage;
+    /** False when the edit was refused and the previous rendering stands. */
+    replaced: boolean;
+    /** The edit was sealed on a chain we hold no grant for yet; worth retrying after a grant fetch. */
+    missingKey: boolean;
+}
+
+/** A rendering that carries a guarantee: opened, or a channel post whose signature verified. */
+function isAuthenticated(message: DecryptedMessage): boolean {
+    return message.status === 'ok' || (message.status === 'plaintext' && message.senderVerified);
+}
+
 /** The kind of content a message carries, defaulting to text. */
 export function contentOf(message: DecryptedMessage): MessageContent {
     return message.content ?? TEXT_CONTENT;
@@ -206,6 +221,8 @@ export class MessageService {
     private readonly opened = new Map<string, DecryptedMessage>();
     /** Envelope index each cached plaintext was opened from, so an older version cannot replace it. */
     private readonly openedIdx = new Map<string, number>();
+    /** Epoch and sender key each cached plaintext was opened under; an index only orders one chain. */
+    private readonly openedChain = new Map<string, { epoch: number; skid: string }>();
     private readonly inflight = new Map<string, Promise<DecryptedMessage>>();
     /**
      * Failed results that are not a verdict on the message itself, so never cached: "index already
@@ -617,7 +634,11 @@ export class MessageService {
         const current = this.opened.get(message._id);
         if (current) {
             const currentIdx = this.openedIdx.get(message._id) ?? -1;
-            if (idx < currentIdx || (withMeta.status === 'failed' && current.status !== 'failed')) {
+            if (
+                this.isOlderVersion(message, idx, currentIdx) ||
+                (withMeta.status === 'failed' && current.status !== 'failed') ||
+                !this.maySupersede(current, message, withMeta)
+            ) {
                 return current;
             }
         }
@@ -626,9 +647,119 @@ export class MessageService {
         // message itself, so it is reported but not remembered as its verdict.
         if (withMeta.status !== 'no_key' && !this.uncachedFailures.has(result)) {
             this.opened.set(message._id, withMeta);
-            this.openedIdx.set(message._id, idx);
+            this.rememberPosition(message);
         }
         return withMeta;
+    }
+
+    /** A lower index is an older version only on the chain the cached one was opened on. */
+    private isOlderVersion(message: MessageResponse, idx: number, currentIdx: number): boolean {
+        const chain = this.openedChain.get(message._id);
+        const envelope = message.envelope;
+        if (chain && envelope && (envelope.epoch !== chain.epoch || envelope.skid !== chain.skid)) {
+            return envelope.epoch < chain.epoch;
+        }
+        return idx < currentIdx;
+    }
+
+    private rememberPosition(message: MessageResponse): void {
+        this.openedIdx.set(message._id, message.envelope?.idx ?? -1);
+        if (message.envelope) {
+            this.openedChain.set(message._id, { epoch: message.envelope.epoch, skid: message.envelope.skid });
+        } else {
+            this.openedChain.delete(message._id);
+        }
+    }
+
+    /**
+     * Whether `incoming` could be a newer version of the authenticated message cached as `current`,
+     * judged from public fields alone - so it can be asked before the ratchet is touched.
+     *
+     * Only a rendering that carries a guarantee is protected: an opened message (`ok`) or a channel
+     * post whose signature verified. For those, a replacement must come from the same sender in the
+     * same format, and an envelope must be *later*: never from an earlier epoch, and on the same
+     * chain only at a strictly higher index (crypto-spec-v1.md section 4.3). A chain the cached
+     * version was not sealed on cannot be ordered against it, so it is allowed through - an edit
+     * after a re-key or a reload legitimately arrives on a new chain.
+     */
+    private couldSupersede(current: DecryptedMessage, incoming: MessageResponse): boolean {
+        if (!isAuthenticated(current)) {
+            return true;
+        }
+        if (incoming.sender_id !== current.senderId) {
+            return false;
+        }
+        if (current.status !== 'ok') {
+            return incoming.content_format === 'channel_signed_v1';
+        }
+        const envelope = incoming.envelope;
+        if (incoming.content_format !== 'sender_keys_v1' || !envelope || !isValidChainIndex(envelope.idx)) {
+            return false;
+        }
+        const chain = this.openedChain.get(incoming._id);
+        if (!chain) {
+            return true;
+        }
+        if (envelope.epoch !== chain.epoch) {
+            return envelope.epoch > chain.epoch;
+        }
+        return envelope.skid !== chain.skid || envelope.idx > (this.openedIdx.get(incoming._id) ?? -1);
+    }
+
+    /** `couldSupersede`, plus what only the attempt itself can tell: it authenticated as well. */
+    private maySupersede(current: DecryptedMessage, incoming: MessageResponse, result: DecryptedMessage): boolean {
+        if (!isAuthenticated(current)) {
+            return true;
+        }
+        return this.couldSupersede(current, incoming) && result.status === current.status && result.senderVerified;
+    }
+
+    /**
+     * Open an edit of a message (a `message_edited` broadcast) and say whether it replaced what was
+     * shown.
+     *
+     * The edit is tried first and the cached plaintext is given up only if it succeeds. The cache
+     * used to be dropped before the attempt, which let a forged event destroy a message: the server
+     * names a real message id, attaches anything that will not open, the genuine plaintext is
+     * forgotten, and its ciphertext can never be opened again because its index is consumed. An
+     * opened message is now replaced only by something that opens, authenticates as the same sender
+     * and is later on the chain. Anything else leaves the existing rendering exactly as it was.
+     *
+     * `missingKey` reports an edit sealed on a chain we do not hold yet: the caller can fetch grants
+     * and try again, and the old content stays up meanwhile.
+     *
+     * Residual: the envelope does not bind the message id, so a server can still present some
+     * *other* genuine, not-yet-opened message of the same sender as the edit. See
+     * `docs/tech-debt.md` section 14.
+     */
+    async decryptEdit(chatId: string, message: MessageResponse): Promise<EditOutcome> {
+        const current = this.opened.get(message._id);
+        if (!current || !isAuthenticated(current)) {
+            // Nothing readable to protect: a placeholder gives way to whatever the edit yields.
+            this.forgetOne(message._id);
+            const opened = await this.decrypt(chatId, message);
+            return { message: opened, replaced: true, missingKey: false };
+        }
+        // Refused before the ratchet is touched: a stale or foreign envelope must not get to spend
+        // a key (a retained skipped key at a lower index would open, and be gone).
+        if (!this.couldSupersede(current, message)) {
+            return { message: current, replaced: false, missingKey: false };
+        }
+
+        // Not through `decrypt`: that answers from the cache, which holds the version being edited.
+        // Callers serialise a chat's events, so one edit envelope is never attempted twice at once.
+        const result = await this.decryptOnce(chatId, message);
+
+        // Re-read: the entry may have been patched (a reaction) or dropped (a lock) meanwhile.
+        const latest = this.opened.get(message._id);
+        if (!latest || !this.maySupersede(latest, message, result)) {
+            return { message: latest ?? current, replaced: false, missingKey: result.status === 'no_key' };
+        }
+
+        const accepted = this.applyMetaOverride(result);
+        this.opened.set(message._id, accepted);
+        this.rememberPosition(message);
+        return { message: accepted, replaced: true, missingKey: false };
     }
 
     private applyMetaOverride(result: DecryptedMessage): DecryptedMessage {
@@ -643,19 +774,22 @@ export class MessageService {
     forgetOpened(): void {
         this.opened.clear();
         this.openedIdx.clear();
+        this.openedChain.clear();
         this.inflight.clear();
         this.metaOverrides.clear();
     }
 
     /**
-     * Forget one message's plaintext.
+     * Forget one message's plaintext, for a message that is gone.
      *
-     * Needed when a message is edited: the ciphertext behind that id has changed, so the cached
-     * plaintext is now the old content and returning it would show a stale edit forever.
+     * Not for edits: the ciphertext behind a cached plaintext can never be opened again, so
+     * forgetting it on the strength of an unauthenticated event destroys the message. An edit goes
+     * through `decryptEdit`, which replaces the entry only once the new version has opened.
      */
     forgetOne(messageId: string): void {
         this.opened.delete(messageId);
         this.openedIdx.delete(messageId);
+        this.openedChain.delete(messageId);
         this.metaOverrides.delete(messageId);
     }
 
@@ -739,6 +873,8 @@ export class MessageService {
         };
 
         this.opened.set(sent._id, message);
+        // Our own envelope's position, so a later `message_edited` for this id is ordered against it.
+        this.rememberPosition(sent);
         return message;
     }
 
@@ -842,6 +978,8 @@ export class MessageService {
             const messageKey = chain.messageKeyFor(envelope.idx);
             const plaintext = await openMessage({
                 messageKey: messageKey.key,
+                // The derived nonce, not `envelope.n`, which the signature does not cover.
+                nonce: messageKey.nonce,
                 envelope,
                 chatId,
                 senderId: message.sender_id,

@@ -13,7 +13,7 @@ import { KeyStoreService } from '../../../core/services/key-store.service';
 import { SessionService } from '../../../core/services/session.service';
 import { TrustStoreService } from '../../../core/services/trust-store.service';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
-import { rosterMatchesCommitment } from '../roster-commitment';
+import { rosterMatchesMembers } from '../roster-commitment';
 import { classifySafetyError } from '../safety-number/safety-number.component';
 
 export type MemberKeyStatus = 'checking' | 'verified' | 'unverified' | 'changed' | 'no-keys' | 'error';
@@ -67,10 +67,21 @@ export class EncryptionPanelComponent {
      * chat-info's `memberSetVerified`. Null when no roster could be fetched: nothing was checked, so
      * the header says so instead of claiming a match. The send path's alarm (`verificationError`)
      * still wins over a passing check, since it may have seen a roster this panel did not.
+     *
+     * The members listed here are the chat's participants, so a passing check also requires that the
+     * roster names nobody outside them (`rosterMatchesMembers`): a roster can agree with its own
+     * commitment while carrying a device for someone this list does not show.
      */
     readonly memberSetCheck = computed<boolean | null>(() => {
         const roster = this.roster();
-        return roster ? rosterMatchesCommitment(roster) : null;
+        const chat = this.chat();
+        if (!roster || !chat) {
+            return null;
+        }
+        return rosterMatchesMembers(
+            roster,
+            chat.participants.map((p) => p.user_id)
+        );
     });
     readonly epoch = computed(() => this.roster()?.current_epoch ?? this.store.chatKeys()?.current_epoch ?? null);
     /** When the current epoch began, i.e. the last key rotation, when the keys are loaded. */
@@ -107,32 +118,58 @@ export class EncryptionPanelComponent {
         effect(() => void this.load(this.chatId()));
     }
 
+    /**
+     * Bumped by every `load`. The panel keeps one instance across chat switches, so a response that
+     * arrives after the user moved on must not be written under the chat now shown.
+     */
+    private generation = 0;
+
     private async load(chatId: string): Promise<void> {
+        const generation = ++this.generation;
+        const current = () => generation === this.generation;
+
         this.loading.set(true);
         this.error.set(null);
+        // Nothing from the previous chat survives: its roster would be read as this chat's.
+        this.chat.set(null);
+        this.roster.set(null);
         this.statuses.set({});
         try {
             const chat = await firstValueFrom(this.chatApi.getChat(chatId));
-            this.chat.set(chat);
-            if (chat.chat_type === 'channel') {
+            if (!current()) {
                 return;
             }
-            try {
-                this.roster.set(await firstValueFrom(this.cryptoApi.getRoster(chatId)));
-            } catch {
-                this.roster.set(null);
+            if (chat.chat_type === 'channel') {
+                this.chat.set(chat);
+                return;
             }
+            let roster: ChatRoster | null;
+            try {
+                roster = await firstValueFrom(this.cryptoApi.getRoster(chatId));
+            } catch {
+                roster = null;
+            }
+            if (!current()) {
+                return;
+            }
+            // Set together, so the check never pairs one chat's members with another's roster.
+            this.chat.set(chat);
+            this.roster.set(roster);
             this.loading.set(false);
-            await this.checkMembers(chat);
+            await this.checkMembers(chat, current);
         } catch {
-            this.error.set("Could not load this conversation's encryption details.");
+            if (current()) {
+                this.error.set("Could not load this conversation's encryption details.");
+            }
         } finally {
-            this.loading.set(false);
+            if (current()) {
+                this.loading.set(false);
+            }
         }
     }
 
     /** Each member's number is derived locally (never taken from the server) and compared with what was verified before. */
-    private async checkMembers(chat: Chat): Promise<void> {
+    private async checkMembers(chat: Chat, current: () => boolean): Promise<void> {
         const me = this.session.user()?.id;
         if (!me) {
             return;
@@ -147,6 +184,9 @@ export class EncryptionPanelComponent {
                 status = this.trust.stateFor(me, participant.user_id, number).kind;
             } catch (error) {
                 status = classifySafetyError(error) === 'peer-no-keys' ? 'no-keys' : 'error';
+            }
+            if (!current()) {
+                return;
             }
             this.statuses.update((all) => ({ ...all, [participant.user_id]: status }));
         }

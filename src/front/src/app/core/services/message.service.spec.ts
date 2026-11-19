@@ -86,12 +86,13 @@ async function signedMessage(
     idx: number,
     signingPrivate: Uint8Array,
     sealKey: Uint8Array = crypto.getRandomValues(new Uint8Array(32)),
-    text = 'hello'
+    text = 'hello',
+    nonce: Uint8Array = crypto.getRandomValues(new Uint8Array(12))
 ): Promise<MessageResponse> {
     const raw = envelopeMessage(id, idx);
     raw.envelope = await sealMessage({
         messageKey: sealKey,
-        nonce: crypto.getRandomValues(new Uint8Array(12)),
+        nonce,
         signingPrivate,
         chatId: CHAT,
         epoch: 1,
@@ -408,7 +409,7 @@ describe('MessageService', () => {
         raw.envelope = envelope;
         raw.attachments = [{ url: 'files/a.png', name: 'a.png', size: 10, content_type: 'image/png' }];
 
-        const chain = { messageKeyFor: jasmine.createSpy('messageKeyFor').and.returnValue({ key: messageKey }) };
+        const chain = { messageKeyFor: jasmine.createSpy('messageKeyFor').and.returnValue({ key: messageKey, nonce }) };
         keyStore.getReceiverChain.and.returnValue(chain as never);
         keyStore.getChainSigningKey.and.returnValue(ed25519.getPublicKey(signingPrivate));
 
@@ -506,8 +507,8 @@ describe('MessageService', () => {
         });
 
         async function sealNext(id: string, text: string): Promise<MessageResponse> {
-            const { key, index } = sender.nextMessageKey();
-            return signedMessage(id, index, signingPrivate, key, text);
+            const { key, nonce, index } = sender.nextMessageKey();
+            return signedMessage(id, index, signingPrivate, key, text, nonce);
         }
 
         /** Same skid, a future index, garbage ciphertext and signature. */
@@ -565,6 +566,170 @@ describe('MessageService', () => {
             expect(opened.text).toBe('the real one');
         });
 
+        /**
+         * M3: `n` is not covered by the signature, so it is the one envelope field the server can
+         * rewrite on a genuine message. It used to be the GCM IV: the signature passed, the key was
+         * consumed, the tag failed, and the message was `failed` for good.
+         */
+        it('opens a genuine message whose nonce field was rewritten in transit', async () => {
+            const genuine = await sealNext('n-altered', 'still readable');
+            genuine.envelope = { ...genuine.envelope!, n: b64uEncode(new Uint8Array(12)) };
+
+            const opened = await service.decrypt(CHAT, genuine);
+
+            expect(opened.status).toBe('ok');
+            expect(opened.text).toBe('still readable');
+            expect(opened.senderVerified).toBeTrue();
+        });
+
+        /**
+         * M4: a `message_edited` event is unauthenticated. The edit is opened first and the cached
+         * plaintext is given up only if that works, because the ciphertext behind it is spent.
+         */
+        describe('decryptEdit', () => {
+            const ID = 'edited-message';
+
+            /** The next message on the chain, presented under the id being edited. */
+            async function version(text: string): Promise<MessageResponse> {
+                return sealNext(ID, text);
+            }
+
+            it('replaces an opened message with a genuine edit at a higher index', async () => {
+                await service.decrypt(CHAT, await version('v1'));
+                const edit = await version('v2');
+
+                const outcome = await service.decryptEdit(CHAT, edit);
+
+                expect(outcome.replaced).toBeTrue();
+                expect(outcome.message.text).toBe('v2');
+                expect((await service.decrypt(CHAT, edit)).text)
+                    .withContext('cached as the new version')
+                    .toBe('v2');
+            });
+
+            it('keeps the opened message when the "edit" does not authenticate', async () => {
+                const original = await version('v1');
+                const opened = await service.decrypt(CHAT, original);
+                const spy = spyOn(receiver, 'messageKeyFor').and.callThrough();
+
+                const outcome = await service.decryptEdit(CHAT, forged(ID, 7));
+
+                expect(outcome.replaced).toBeFalse();
+                expect(outcome.missingKey).toBeFalse();
+                expect(outcome.message).toBe(opened);
+                expect(spy).withContext('the ratchet was not touched').not.toHaveBeenCalled();
+                expect((await service.decrypt(CHAT, original)).text).toBe('v1');
+            });
+
+            it('keeps the opened message when the edit authenticates but will not open', async () => {
+                const original = await version('v1');
+                const opened = await service.decrypt(CHAT, original);
+                // Signed by the chain key, sealed under a key the chain never derives.
+                const unopenable = await signedMessage(ID, 3, signingPrivate);
+
+                const outcome = await service.decryptEdit(CHAT, unopenable);
+
+                expect(outcome.replaced).toBeFalse();
+                expect(outcome.missingKey).toBeFalse();
+                expect(outcome.message).toBe(opened);
+                expect(await service.decrypt(CHAT, original))
+                    .withContext('still cached')
+                    .toBe(opened);
+            });
+
+            it('refuses a same-chain "edit" at an index not above the opened one, without spending its key', async () => {
+                const earlier = await sealNext('some-other-message', 'earlier, never delivered');
+                const opened = await service.decrypt(CHAT, await version('v1'));
+                expect(receiver.skipped.has(earlier.envelope!.idx)).withContext('retained while skipping').toBeTrue();
+                const spy = spyOn(receiver, 'messageKeyFor').and.callThrough();
+
+                // A genuine envelope of the same sender, relabelled as an edit of the opened message.
+                const outcome = await service.decryptEdit(CHAT, { ...earlier, _id: ID });
+
+                expect(outcome.replaced).toBeFalse();
+                expect(outcome.message).toBe(opened);
+                expect(spy).not.toHaveBeenCalled();
+                expect(receiver.skipped.has(earlier.envelope!.idx)).toBeTrue();
+                // The message that envelope really is still opens under its own id.
+                expect((await service.decrypt(CHAT, earlier)).text).toBe('earlier, never delivered');
+            });
+
+            it('refuses an "edit" that names a different sender', async () => {
+                const opened = await service.decrypt(CHAT, await version('v1'));
+                const edit = { ...(await version('v2')), sender_id: 'f0000000-0000-4000-8000-00000000000f' };
+                const spy = spyOn(receiver, 'messageKeyFor').and.callThrough();
+
+                const outcome = await service.decryptEdit(CHAT, edit);
+
+                expect(outcome.replaced).toBeFalse();
+                expect(outcome.message).toBe(opened);
+                expect(spy).not.toHaveBeenCalled();
+            });
+
+            it('refuses an "edit" that would swap an opened message for unencrypted content', async () => {
+                const opened = await service.decrypt(CHAT, await version('v1'));
+                const downgrade = {
+                    ...envelopeMessage(ID, 9),
+                    envelope: null,
+                    content_format: 'legacy_plaintext',
+                    encrypted_content: 'the server wrote this',
+                } as unknown as MessageResponse;
+
+                const outcome = await service.decryptEdit(CHAT, downgrade);
+
+                expect(outcome.replaced).toBeFalse();
+                expect(outcome.message).toBe(opened);
+            });
+
+            it('keeps the old content and reports a missing key when the edit is on a chain we do not hold', async () => {
+                const opened = await service.decrypt(CHAT, await version('v1'));
+                const elsewhere = await version('v2');
+                const otherSkid = 'c0000000-0000-4000-8000-0000000000ee';
+                elsewhere.envelope = { ...elsewhere.envelope!, skid: otherSkid };
+                keyStore.getReceiverChain.and.callFake(((_chat: string, _epoch: number, skid: string) =>
+                    skid === otherSkid ? undefined : receiver) as never);
+
+                const outcome = await service.decryptEdit(CHAT, elsewhere);
+
+                expect(outcome.replaced).toBeFalse();
+                expect(outcome.missingKey).toBeTrue();
+                expect(outcome.message).toBe(opened);
+            });
+
+            it('refuses an "edit" from an earlier epoch', async () => {
+                const first = await version('v1');
+                first.envelope = { ...first.envelope!, epoch: 2 };
+                // Opened through the cache directly: only its recorded position matters here.
+                service.recordOutgoing(first, 'v1');
+                const spy = spyOn(receiver, 'messageKeyFor').and.callThrough();
+
+                const outcome = await service.decryptEdit(CHAT, await version('rolled back'));
+
+                expect(outcome.replaced).toBeFalse();
+                expect(outcome.message.text).toBe('v1');
+                expect(spy).not.toHaveBeenCalled();
+            });
+
+            it('lets an edit replace a placeholder, which protects nothing', async () => {
+                // Cached as `failed`: authenticated, but sealed under a key the chain does not derive.
+                const broken = await signedMessage(ID, sender.nextMessageKey().index, signingPrivate);
+                expect((await service.decrypt(CHAT, broken)).status).toBe('failed');
+
+                const outcome = await service.decryptEdit(CHAT, await version('readable now'));
+
+                expect(outcome.replaced).toBeTrue();
+                expect(outcome.message.status).toBe('ok');
+                expect(outcome.message.text).toBe('readable now');
+            });
+
+            it('opens an edit of a message this session never opened', async () => {
+                const outcome = await service.decryptEdit(CHAT, await version('first sight'));
+
+                expect(outcome.replaced).toBeTrue();
+                expect(outcome.message.text).toBe('first sight');
+            });
+        });
+
         for (const idx of [1.5, -1, 0x100000000, Number.NaN, Number.POSITIVE_INFINITY]) {
             it(`refuses chain index ${idx} without touching the chain`, async () => {
                 const spy = spyOn(receiver, 'messageKeyFor').and.callThrough();
@@ -619,7 +784,7 @@ describe('MessageService', () => {
         const raw = envelopeMessage('m-legacy', 0);
         raw.envelope = envelope;
 
-        const chain = { messageKeyFor: jasmine.createSpy('messageKeyFor').and.returnValue({ key: messageKey }) };
+        const chain = { messageKeyFor: jasmine.createSpy('messageKeyFor').and.returnValue({ key: messageKey, nonce }) };
         keyStore.getReceiverChain.and.returnValue(chain as never);
         keyStore.getChainSigningKey.and.returnValue(ed25519.getPublicKey(signingPrivate));
 
@@ -862,9 +1027,10 @@ describe('MessageService', () => {
 
             // The keys travelled inside the sealed plaintext, not on the wire attachment list.
             const chain = new SenderChain(chainKey);
-            const { key } = chain.nextMessageKey();
+            const { key, nonce } = chain.nextMessageKey();
             const plaintext = await openMessage({
                 messageKey: key,
+                nonce,
                 envelope,
                 chatId: CHAT,
                 senderId: SENDER,
@@ -963,9 +1129,10 @@ describe('MessageService', () => {
 
             // The sticker is excluded from attachmentKeys, same as buildPlaintext does for sends.
             const chain = new SenderChain(chainKey);
-            const { key } = chain.nextMessageKey();
+            const { key, nonce } = chain.nextMessageKey();
             const plaintext = await openMessage({
                 messageKey: key,
+                nonce,
                 envelope,
                 chatId: CHAT,
                 senderId: SENDER,

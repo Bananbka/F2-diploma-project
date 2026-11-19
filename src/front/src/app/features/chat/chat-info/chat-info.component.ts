@@ -58,7 +58,7 @@ import { SelectComponent, SelectOption } from '../../../shared/ui/select/select.
 import { avatarKindFor, DELETED_USER_LABEL, safetyNumberGroups } from '../../../shared/utils/display';
 import { EncryptionPanelComponent } from '../encryption-panel/encryption-panel.component';
 import { ExportDialogComponent } from '../export-dialog/export-dialog.component';
-import { rosterMatchesCommitment } from '../roster-commitment';
+import { rosterMatchesMembers } from '../roster-commitment';
 import { SafetyNumberComponent } from '../safety-number/safety-number.component';
 
 /** Mirrors the server's `ROLE_RANK`: removal needs a strictly higher rank than the target. */
@@ -217,13 +217,24 @@ export class ChatInfoComponent {
     private addTimer: ReturnType<typeof setTimeout> | null = null;
 
     /**
-     * The anti-ghost check, run here as well as before key distribution (`rosterMatchesCommitment`).
+     * The anti-ghost check, run here as well as before key distribution (`rosterMatchesMembers`).
      * This screen shows the roster, so it is where a failure has to be visible. Null until a roster
      * has been fetched: nothing was checked, so nothing may be claimed.
+     *
+     * The members listed below come from the chat's participants, not from the roster, so the roster
+     * must also name nobody outside that list: otherwise "matches" would be said of a list that
+     * leaves out someone the keys go to. Both were fetched by the same `load`.
      */
     readonly memberSetVerified = computed(() => {
         const roster = this.roster();
-        return roster ? rosterMatchesCommitment(roster) : null;
+        const chat = this.chat();
+        if (!roster || !chat) {
+            return null;
+        }
+        return rosterMatchesMembers(
+            roster,
+            chat.participants.map((p) => p.user_id)
+        );
     });
 
     /**

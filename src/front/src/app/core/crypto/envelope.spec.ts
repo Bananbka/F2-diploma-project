@@ -9,6 +9,7 @@ const SKID = 'c0000000-0000-4000-8000-000000000003';
 
 describe('envelope', () => {
     let messageKey: Uint8Array;
+    let nonce: Uint8Array;
     let signingPrivate: Uint8Array;
     let signingPublic: Uint8Array;
     let envelope: MessageEnvelope;
@@ -17,9 +18,10 @@ describe('envelope', () => {
         messageKey = crypto.getRandomValues(new Uint8Array(32));
         signingPrivate = crypto.getRandomValues(new Uint8Array(32));
         signingPublic = ed25519.getPublicKey(signingPrivate);
+        nonce = crypto.getRandomValues(new Uint8Array(12));
         envelope = await sealMessage({
             messageKey,
-            nonce: crypto.getRandomValues(new Uint8Array(12)),
+            nonce,
             signingPrivate,
             chatId: CHAT,
             epoch: 1,
@@ -31,8 +33,48 @@ describe('envelope', () => {
     });
 
     it('opens a correctly signed envelope', async () => {
-        const plaintext = await openMessage({ messageKey, envelope, chatId: CHAT, senderId: SENDER, signingPublic });
+        const plaintext = await openMessage({
+            messageKey,
+            nonce,
+            envelope,
+            chatId: CHAT,
+            senderId: SENDER,
+            signingPublic,
+        });
         expect(new TextDecoder().decode(plaintext)).toBe('hi');
+    });
+
+    /**
+     * `n` is outside the signature, so the server can rewrite it on a genuine envelope. The IV is
+     * the nonce the ratchet derived; the wire copy is never read.
+     */
+    it('opens with the derived nonce whatever the envelope claims its nonce is', async () => {
+        for (const n of [b64uEncode(new Uint8Array(12)), '', '!!not base64!!']) {
+            const altered = { ...envelope, n };
+            expect(verifyEnvelopeSignature(altered, signingPublic, CHAT, SENDER)).toBeTrue();
+            const plaintext = await openMessage({
+                messageKey,
+                nonce,
+                envelope: altered,
+                chatId: CHAT,
+                senderId: SENDER,
+                signingPublic,
+            });
+            expect(new TextDecoder().decode(plaintext)).toBe('hi');
+        }
+    });
+
+    it('does not open under a nonce other than the derived one', async () => {
+        await expectAsync(
+            openMessage({
+                messageKey,
+                nonce: new Uint8Array(12),
+                envelope,
+                chatId: CHAT,
+                senderId: SENDER,
+                signingPublic,
+            })
+        ).toBeRejected();
     });
 
     /** F-L8: there is no longer a way to open without verifying. */
@@ -40,6 +82,7 @@ describe('envelope', () => {
         await expectAsync(
             openMessage({
                 messageKey,
+                nonce,
                 envelope,
                 chatId: CHAT,
                 senderId: SENDER,
@@ -51,7 +94,7 @@ describe('envelope', () => {
     it('refuses to open under the wrong signing key', async () => {
         const other = ed25519.getPublicKey(crypto.getRandomValues(new Uint8Array(32)));
         await expectAsync(
-            openMessage({ messageKey, envelope, chatId: CHAT, senderId: SENDER, signingPublic: other })
+            openMessage({ messageKey, nonce, envelope, chatId: CHAT, senderId: SENDER, signingPublic: other })
         ).toBeRejectedWithError(/does not verify/);
     });
 

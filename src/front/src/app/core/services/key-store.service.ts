@@ -12,6 +12,7 @@ import {
     wrapChainKey,
 } from '../crypto/grants';
 import {
+    derivePublicKeys,
     generateIdentity,
     generateSignedPrekey,
     KdfParams,
@@ -30,6 +31,7 @@ import { unwrapSkippedKey, wrapSkippedKey } from '../crypto/skipped-wrap';
 import { ChatRoster, Distribution, GrantUpload, OwnIdentity, PublicKey, RosterEntry } from '../models/crypto.model';
 import { CryptoApiService } from './crypto-api.service';
 import {
+    IdentityMismatchError,
     isRetryablePublishError,
     KeyChangedError,
     KeyChangedPeer,
@@ -46,6 +48,10 @@ import { MAX_SKIPPED_AGE_MS, SkippedKeyStore } from './skipped-key-store.service
 import { TrustStoreService } from './trust-store.service';
 
 const DEVICE_ID_KEY = 'ns.device_id';
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+    return a.length === b.length && a.every((byte, index) => byte === b[index]);
+}
 
 function ownDevicesMissing(): MembershipMismatchError {
     return new MembershipMismatchError(
@@ -211,6 +217,12 @@ export class KeyStoreService {
      */
     private readonly chainOwners = new Map<string, string>();
 
+    /**
+     * (chatId, epoch, senderKeyId) -> owner, for chains vouched for by a device that is in no safety
+     * number: the retained device of an account presented as deleted. See `ingestDistributions`.
+     */
+    private readonly uncoveredChains = new Map<string, string>();
+
     /** chatId -> who may appear in its roster; see `MemberExpectation`. */
     private readonly memberExpectations = new Map<string, MemberExpectation>();
 
@@ -315,6 +327,10 @@ export class KeyStoreService {
      * `onStage` reports the real milestones so the UI can show honest progress. It is awaited
      * between stages because the derivation is synchronous and blocks the main thread: without
      * yielding, the stage that is about to run would never paint.
+     *
+     * Returns false for a wrong password. Throws `IdentityMismatchError` when the password opened
+     * the bundle but the keys inside are not the ones published for `userId` - nothing is unlocked
+     * in that case.
      */
     async unlock(userId: string, password: string, onStage?: UnlockStageReporter): Promise<boolean> {
         await onStage?.('fetching');
@@ -325,34 +341,79 @@ export class KeyStoreService {
             return false;
         }
 
+        let opened: Awaited<ReturnType<typeof unwrapPrivateBundle>>;
         try {
             await onStage?.('deriving');
-            const opened = await unwrapPrivateBundle(mine.encrypted_private_bundle, mine.kdf_params as never, password);
-            await onStage?.('opening');
-
-            this.identity = {
-                userId,
-                deviceId: mine.device_id,
-                signingPrivate: opened.signingPrivate,
-                signingPublic: b64uDecode(mine.signing_public_key),
-                identityPrivate: opened.identityPrivate,
-                prekeyPrivate: opened.prekeyPrivate,
-                prevPrekeyPrivate: opened.prevPrekeyPrivate,
-                kek: opened.kek,
-                kdfParams: mine.kdf_params as unknown as KdfParams,
-            };
-            this.ownDevicesAtUnlock = new Map(
-                identities
-                    .filter((i) => i.user_id === userId && i.is_active !== false)
-                    .map((i) => [i.device_id, b64uEncode(b64uDecode(i.signing_public_key))])
-            );
-            this.sessionToken = {};
-            this.isUnlocked.set(true);
-            void this.skippedStore.pruneOlderThan(Date.now() - MAX_SKIPPED_AGE_MS);
-
-            return true;
+            opened = await unwrapPrivateBundle(mine.encrypted_private_bundle, mine.kdf_params as never, password);
         } catch {
             // A GCM tag failure here means the wrong password, not a corrupt bundle.
+            return false;
+        }
+        await onStage?.('opening');
+
+        // The bundle opening proves the password and nothing else. `userId` came from `/auth/me`
+        // and the public halves from `/crypto/identity/me`, so both are the server's word until
+        // checked against the private keys we just opened. Every local trust record (confirmed
+        // safety numbers, pinned private chats, refusals, the encrypted-chat set) is keyed by our
+        // own id: a server that answered with a different id would otherwise make all of them read
+        // as absent, with no alarm at all. The binding signature was made by our signing key over
+        // our user id and device id (crypto-spec-v1.md section 2.1), so it verifies under the key
+        // derived from the opened private half only for the id the keys were registered under.
+        const { signingPublic, identityPublic } = derivePublicKeys(opened.signingPrivate, opened.identityPrivate);
+        if (!this.ownRowMatchesBundle(userId, mine, signingPublic, identityPublic)) {
+            throw new IdentityMismatchError();
+        }
+
+        this.identity = {
+            userId,
+            deviceId: mine.device_id,
+            signingPrivate: opened.signingPrivate,
+            // Derived, not the server's copy: what we sign with is what we call our public key.
+            signingPublic,
+            identityPrivate: opened.identityPrivate,
+            prekeyPrivate: opened.prekeyPrivate,
+            prevPrekeyPrivate: opened.prevPrekeyPrivate,
+            kek: opened.kek,
+            kdfParams: mine.kdf_params as unknown as KdfParams,
+        };
+        this.ownDevicesAtUnlock = new Map(
+            identities
+                .filter((i) => i.user_id === userId && i.is_active !== false)
+                .map((i) => [i.device_id, b64uEncode(b64uDecode(i.signing_public_key))])
+        );
+        this.sessionToken = {};
+        this.isUnlocked.set(true);
+        void this.skippedStore.pruneOlderThan(Date.now() - MAX_SKIPPED_AGE_MS);
+
+        return true;
+    }
+
+    /**
+     * True when the published row the bundle came with is ours under `userId`: same user id, public
+     * keys equal to the ones the opened private halves derive, and a binding signature over exactly
+     * (`userId`, device id, identity key) that verifies under the derived signing key. Any malformed
+     * field reads as a mismatch.
+     */
+    private ownRowMatchesBundle(
+        userId: string,
+        mine: OwnIdentity,
+        signingPublic: Uint8Array,
+        identityPublic: Uint8Array
+    ): boolean {
+        try {
+            return (
+                mine.user_id === userId &&
+                bytesEqual(b64uDecode(mine.signing_public_key), signingPublic) &&
+                bytesEqual(b64uDecode(mine.identity_public_key), identityPublic) &&
+                verifyIdentityBinding(
+                    userId,
+                    mine.device_id,
+                    identityPublic,
+                    signingPublic,
+                    b64uDecode(mine.identity_key_signature)
+                )
+            );
+        } catch {
             return false;
         }
     }
@@ -592,16 +653,19 @@ export class KeyStoreService {
      * could substitute freely; fingerprinting one would make "the key changed" its say-so again.
      */
     private bindingVerifiedActive<T extends KeyRow>(keys: readonly T[]): T[] {
-        return keys.filter(
-            (key) =>
-                key.is_active !== false &&
-                verifyIdentityBinding(
-                    key.user_id,
-                    key.device_id,
-                    b64uDecode(key.identity_public_key),
-                    b64uDecode(key.signing_public_key),
-                    b64uDecode(key.identity_key_signature)
-                )
+        return this.bindingVerified(keys.filter((key) => key.is_active !== false));
+    }
+
+    /** Keys whose identity key their own signing key vouches for, active or not. */
+    private bindingVerified<T extends KeyRow>(keys: readonly T[]): T[] {
+        return keys.filter((key) =>
+            verifyIdentityBinding(
+                key.user_id,
+                key.device_id,
+                b64uDecode(key.identity_public_key),
+                b64uDecode(key.signing_public_key),
+                b64uDecode(key.identity_key_signature)
+            )
         );
     }
 
@@ -738,6 +802,7 @@ export class KeyStoreService {
         this.peerChains.clear();
         this.chainSigningKeys.clear();
         this.chainOwners.clear();
+        this.uncoveredChains.clear();
         this.memberExpectations.clear();
         this.ownDevicesAtUnlock = new Map();
         this.ownDevicesAddedState.set(false);
@@ -1152,9 +1217,32 @@ export class KeyStoreService {
             const batchIds =
                 dist.sender_user_id === identity.userId ? [identity.userId] : [identity.userId, dist.sender_user_id];
             const batchKeys = await firstValueFrom(this.cryptoApi.getKeysBatch(batchIds));
-            const senderKey = batchKeys.find(
-                (k) => k.user_id === dist.sender_user_id && k.device_id === dist.sender_device_id
-            );
+            const fromSelf = dist.sender_user_id === identity.userId;
+            const isSender = (k: KeyRow) => k.user_id === dist.sender_user_id && k.device_id === dist.sender_device_id;
+
+            // The sender's device is resolved through `bindingVerifiedActive` - the very filter the
+            // safety number is built from - so a device that vouches for a chain is, by
+            // construction, one the number covers. Looking it up in the raw batch let a server
+            // attach a self-bound device marked inactive: it passed the binding check, signed a
+            // distribution, and stayed out of every fingerprint, so a verified peer's number never
+            // moved while the server's chain was accepted as theirs.
+            let senderKey: KeyRow | undefined = this.bindingVerifiedActive(batchKeys).find(isSender);
+            const covered = senderKey !== undefined;
+
+            // The one exception: an account presented as deleted. The server keeps a deleted
+            // account's keys, flagged inactive, precisely so its old messages stay verifiable, and
+            // refusing them would turn every departed member's history into `no_key` on each reload.
+            // It is allowed only where it cannot weaken a promise: the sender is someone else, has
+            // no active device in this answer at all (so one inactive device cannot ride beside the
+            // real ones), and the user holds no confirmed number for them. Such a chain is recorded
+            // as uncovered, and `getReceiverChain` stops handing it out the moment a confirmation
+            // for that peer exists.
+            if (!senderKey && !fromSelf && !this.hasTrustRecord(identity, dist.sender_user_id)) {
+                const theirs = batchKeys.filter((k) => k.user_id === dist.sender_user_id);
+                if (theirs.every((k) => k.is_active === false)) {
+                    senderKey = this.bindingVerified(theirs).find(isSender);
+                }
+            }
 
             // Fail closed on a missing key, not open. This used to read `senderKey && !verify(...)`,
             // so a server that simply omitted the sender's device from the batch response skipped
@@ -1162,13 +1250,6 @@ export class KeyStoreService {
             // must mean "we do not trust it".
             if (
                 !senderKey ||
-                !verifyIdentityBinding(
-                    senderKey.user_id,
-                    senderKey.device_id,
-                    b64uDecode(senderKey.identity_public_key),
-                    b64uDecode(senderKey.signing_public_key),
-                    b64uDecode(senderKey.identity_key_signature)
-                ) ||
                 !verifyDistribution({
                     identitySigningPublic: b64uDecode(senderKey.signing_public_key),
                     signature: dist.signature,
@@ -1191,10 +1272,23 @@ export class KeyStoreService {
             // until the new number is confirmed. Only binding-verified, active keys are fingerprinted —
             // the batch may carry one the server could not vouch for, or a deleted account's
             // retained device, which `computeSafetyNumber` leaves out too. A `lookup` observation:
-            // it comes from the batch endpoint, so it cannot clear a change the roster showed. When
-            // the batch carries no key of ours nothing comparable can be derived, so nothing is noted.
-            if (dist.sender_user_id !== identity.userId) {
-                this.recordNumbersAndFindChanges(identity, batchKeys, 'lookup');
+            // it comes from the batch endpoint, so it cannot clear a change the roster showed.
+            //
+            // When the batch carries no key of ours no number can be derived at all (null). For a
+            // peer with a confirmed number that is not "nothing to note" - it is the comparison
+            // being withheld, and a server could withhold it on purpose by leaving our keys out of
+            // the answer. The distribution is then skipped (the messages stay `no_key` and are
+            // retried), never accepted unchecked. Without a confirmation there is nothing to
+            // compare against, so the outcome is the same either way.
+            if (!fromSelf && covered) {
+                const changes = this.recordNumbersAndFindChanges(identity, batchKeys, 'lookup');
+                if (changes === null && this.hasTrustRecord(identity, dist.sender_user_id)) {
+                    continue;
+                }
+            }
+            // A confirmation may have been made in another tab while the batch was in flight.
+            if (!covered && this.hasTrustRecord(identity, dist.sender_user_id)) {
+                continue;
             }
 
             try {
@@ -1212,6 +1306,9 @@ export class KeyStoreService {
                 }
 
                 this.peerChains.set(cacheKey, chain);
+                if (!covered) {
+                    this.uncoveredChains.set(cacheKey, dist.sender_user_id);
+                }
                 // `senderKey` was fetched for exactly `dist.sender_user_id` and passed the identity
                 // binding check above, so this owner is the one the sender's own key vouches for.
                 this.registerChain(
@@ -1362,7 +1459,19 @@ export class KeyStoreService {
     }
 
     getReceiverChain(chatId: string, epoch: number, senderKeyId: string): ReceiverChain | undefined {
-        return this.peerChains.get(`${chatId}:${epoch}:${senderKeyId}`);
+        const slot = `${chatId}:${epoch}:${senderKeyId}`;
+        // A chain vouched for by a device no safety number covers is not used for a peer the user
+        // has since confirmed a number for: that confirmation never covered this chain.
+        const uncoveredOwner = this.uncoveredChains.get(slot);
+        if (uncoveredOwner !== undefined && this.identity && this.hasTrustRecord(this.identity, uncoveredOwner)) {
+            return undefined;
+        }
+        return this.peerChains.get(slot);
+    }
+
+    /** True when the user holds a confirmed safety number for `peerId` (matching or changed). */
+    private hasTrustRecord(identity: UnlockedIdentity, peerId: string): boolean {
+        return this.trust.recordStamp(identity.userId, peerId) !== null;
     }
 
     getChainSigningKey(chatId: string, epoch: number, senderKeyId: string): Uint8Array | undefined {

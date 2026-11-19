@@ -165,7 +165,7 @@
                                                 <img
                                                     class="media-image"
                                                     [src]="mediaObjectUrl(file.url)"
-                                                    [alt]="file.name"
+                                                    [alt]="fileName(file)"
                                                     (load)="onImageLoad(file, $event)"
                                                 />
                                             }
@@ -201,7 +201,7 @@
                                                 <img
                                                     class="media-image"
                                                     [src]="mediaObjectUrl(file.url)"
-                                                    [alt]="file.name"
+                                                    [alt]="fileName(file)"
                                                     (load)="onImageLoad(file, $event)"
                                                 />
                                                 <span class="tile-badge">GIF</span>
@@ -298,7 +298,7 @@
                                                 role="button"
                                                 tabindex="0"
                                                 [src]="file.url"
-                                                [alt]="file.name"
+                                                [alt]="fileName(file)"
                                                 [attr.data-sticker-url]="file.url"
                                                 aria-label="Open sticker pack"
                                                 (click)="openStickerPack($event, file)"
@@ -309,7 +309,7 @@
                                             <img
                                                 class="sticker-image"
                                                 [src]="file.url"
-                                                [alt]="file.name"
+                                                [alt]="fileName(file)"
                                             />
                                         }
                                     </li>
@@ -321,7 +321,7 @@
                                             data-testid="attachment-unavailable"
                                         >
                                             <lucide-icon [img]="lockIcon" />
-                                            <span class="attachment-name">{{ file.name }}</span>
+                                            <span class="attachment-name">{{ fileName(file) }}</span>
                                             <span class="attachment-size">{{ readableSize(file.size) }}</span>
                                         </div>
                                         <p class="attachment-note">{{ unavailableNote() }}</p>
@@ -335,11 +335,11 @@
                                                 class="attachment is-download"
                                                 [disabled]="downloadStatus(file.url) === 'decrypting'"
                                                 [attr.aria-busy]="downloadStatus(file.url) === 'decrypting'"
-                                                [attr.aria-label]="'Decrypt and download ' + file.name"
+                                                [attr.aria-label]="'Decrypt and download ' + fileName(file)"
                                                 (click)="downloadFile(file, $event)"
                                             >
                                                 <lucide-icon [img]="downloadIcon" />
-                                                <span class="attachment-name">{{ file.name }}</span>
+                                                <span class="attachment-name">{{ fileName(file) }}</span>
                                                 <span class="attachment-size">
                                                     @if (downloadStatus(file.url) === 'decrypting') {
                                                         Decrypting…
@@ -363,7 +363,7 @@
                                                 data-testid="attachment-unavailable"
                                             >
                                                 <lucide-icon [img]="lockIcon" />
-                                                <span class="attachment-name">{{ file.name }}</span>
+                                                <span class="attachment-name">{{ fileName(file) }}</span>
                                                 <span class="attachment-size">{{ readableSize(file.size) }}</span>
                                             </div>
                                             <p class="attachment-note">{{ noKeyNote }}</p>

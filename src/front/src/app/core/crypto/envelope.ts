@@ -129,6 +129,12 @@ export function verifyEnvelopeSignature(
 
 export interface OpenParams {
     messageKey: Uint8Array;
+    /**
+     * The nonce the ratchet derived alongside `messageKey` (`N_i`, crypto-spec-v1.md section 3).
+     * This is the IV, not `envelope.n`: the signature covers the AAD and the ciphertext but not
+     * `n`, so the wire copy is whatever the server chose to relay.
+     */
+    nonce: Uint8Array;
     envelope: MessageEnvelope;
     chatId: string;
     senderId: string;
@@ -140,6 +146,12 @@ export interface OpenParams {
  * Verify and decrypt. Signature verification always happens BEFORE decryption: a client must
  * never act on a message whose sender it has not authenticated. The key is mandatory so a caller
  * that lost track of it fails loudly instead of silently skipping the check.
+ *
+ * `envelope.n` is ignored. The nonce is derived, never random (section 3), so an honest envelope
+ * carries exactly `params.nonce` and nothing is lost by not reading it. Reading it gave the server
+ * a way to destroy a genuine message: alter `n`, the signature still passes, the single-use message
+ * key is consumed, GCM fails, and the message can never be opened again. The Python reference still
+ * reads `n`; for every envelope a conforming sender produces the two agree.
  */
 export async function openMessage(params: OpenParams): Promise<Uint8Array> {
     const { envelope, chatId, senderId, signingPublic } = params;
@@ -156,7 +168,7 @@ export async function openMessage(params: OpenParams): Promise<Uint8Array> {
 
     // A mismatch in any bound field surfaces here as a GCM tag failure.
     const plaintext = await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv: b64uDecode(envelope.n) as BufferSource, additionalData: aad as BufferSource },
+        { name: 'AES-GCM', iv: params.nonce as BufferSource, additionalData: aad as BufferSource },
         key,
         b64uDecode(envelope.ct) as BufferSource
     );

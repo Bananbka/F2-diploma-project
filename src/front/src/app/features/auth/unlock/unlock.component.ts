@@ -4,6 +4,7 @@ import { Router } from '@angular/router';
 import { Eye, EyeOff, Key, LucideAngularModule } from 'lucide-angular';
 
 import { ARGON2_MEMORY_KIB } from '../../../core/crypto/identity';
+import { IdentityMismatchError } from '../../../core/services/crypto-errors';
 import { UnlockStage } from '../../../core/services/key-store.service';
 import { SessionService } from '../../../core/services/session.service';
 
@@ -88,9 +89,14 @@ export class UnlockComponent {
             this.phase.set('done');
             await this.nextFrame();
             await this.router.navigate(['/chats']);
-        } catch {
+        } catch (error) {
             this.phase.set('input');
-            this.error.set('Could not reach your keys. Check your connection and try again.');
+            // Not a connection problem and not a wrong password: say what it is.
+            this.error.set(
+                error instanceof IdentityMismatchError
+                    ? error.message
+                    : 'Could not reach your keys. Check your connection and try again.'
+            );
         }
     }
 
