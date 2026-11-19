@@ -56,7 +56,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     errors = sanitize_validation_errors(exc.errors())
     logger.warning(f"Validation error: {errors}")
     return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         content=ErrorResponse(
             error_code="VALIDATION_ERROR",
             message="Data validation error.",
