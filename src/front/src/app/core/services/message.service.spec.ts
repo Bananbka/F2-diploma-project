@@ -12,7 +12,7 @@ import { ChatApiService } from './chat-api.service';
 import { CryptoApiService } from './crypto-api.service';
 import { RetryLimitExceededError } from './crypto-errors';
 import { KeyStoreService } from './key-store.service';
-import { MessageService } from './message.service';
+import { DecryptedMessage, MessageService } from './message.service';
 
 const CHAT = 'a0000000-0000-4000-8000-000000000001';
 const SENDER = 'b0000000-0000-4000-8000-000000000002';
@@ -75,6 +75,8 @@ function channelMessage(id: string, senderId: string, postId: string, content: s
 }
 
 const SKID = 'c0000000-0000-4000-8000-000000000003';
+/** What a caller of `recordOutgoing` knows for itself; the fixtures' sender doubles as "us" here. */
+const MINE = { chatId: CHAT, senderId: SENDER };
 
 /**
  * A message whose envelope carries a VALID signature over a ciphertext sealed under `sealKey`.
@@ -321,7 +323,7 @@ describe('MessageService', () => {
     it('records an outgoing message from known plaintext', async () => {
         const sent = envelopeMessage('mine', 0);
 
-        const recorded = service.recordOutgoing(sent, 'hello there');
+        const recorded = service.recordOutgoing(MINE, sent, 'hello there');
 
         expect(recorded.text).toBe('hello there');
         expect(recorded.status).toBe('ok');
@@ -332,12 +334,74 @@ describe('MessageService', () => {
         expect(keyStore.getReceiverChain).not.toHaveBeenCalled();
     });
 
+    /**
+     * The response to our own send is the server's word. A send in one chat answered with the id,
+     * chat and sender of a message in another must not put our text there under that sender's name.
+     */
+    describe('recordOutgoing against a forged send response', () => {
+        const OTHER_CHAT = 'a0000000-0000-4000-8000-0000000000bb';
+        const ME = 'd0000000-0000-4000-8000-0000000000dd';
+        const ID = 'peer-message-in-the-first-chat';
+        let theirs: MessageResponse;
+        let opened: DecryptedMessage;
+
+        beforeEach(async () => {
+            const chainKey = crypto.getRandomValues(new Uint8Array(32));
+            const signingPrivate = crypto.getRandomValues(new Uint8Array(32));
+            keyStore.getReceiverChain.and.returnValue(new ReceiverChain(chainKey.slice()) as never);
+            keyStore.getChainSigningKey.and.returnValue(ed25519.getPublicKey(signingPrivate));
+            const { key, nonce, index } = new SenderChain(chainKey.slice()).nextMessageKey();
+            theirs = await signedMessage(ID, index, signingPrivate, key, 'what the peer said', nonce);
+            opened = await service.decrypt(CHAT, theirs);
+            expect(opened.status).toBe('ok');
+        });
+
+        it('takes chat and sender from the caller, not from the response', () => {
+            const response = { ...envelopeMessage('fresh-id', 0), chat_id: CHAT, sender_id: SENDER };
+
+            const recorded = service.recordOutgoing({ chatId: OTHER_CHAT, senderId: ME }, response, 'my text');
+
+            expect(recorded.chatId).toBe(OTHER_CHAT);
+            expect(recorded.senderId).toBe(ME);
+        });
+
+        it('does not overwrite a message of another chat when the response names its id', async () => {
+            // Sent in OTHER_CHAT; the response claims the first chat's id, chat and sender.
+            const response = { ...envelopeMessage(ID, 5), chat_id: CHAT, sender_id: SENDER };
+
+            const recorded = service.recordOutgoing({ chatId: OTHER_CHAT, senderId: ME }, response, 'my text');
+
+            expect(recorded.senderId).withContext('never the sender the server named').toBe(ME);
+            const reopened = await service.decrypt(CHAT, theirs);
+            expect(reopened).toBe(opened);
+            expect(reopened.text).toBe('what the peer said');
+            expect(reopened.senderId).toBe(SENDER);
+        });
+
+        it("does not overwrite someone else's message in the same chat either", async () => {
+            const response = { ...envelopeMessage(ID, 5), sender_id: SENDER };
+
+            service.recordOutgoing({ chatId: CHAT, senderId: ME }, response, 'my text');
+
+            expect(await service.decrypt(CHAT, theirs)).toBe(opened);
+        });
+
+        it('still replaces our own entry in the same chat (an edit, or the socket echo)', async () => {
+            const mine = envelopeMessage('mine', 0);
+            service.recordOutgoing({ chatId: CHAT, senderId: ME }, mine, 'before');
+
+            const after = service.recordOutgoing({ chatId: CHAT, senderId: ME }, mine, 'after');
+
+            expect(await service.decrypt(CHAT, mine)).toBe(after);
+        });
+    });
+
     it('forgets one message so an edit is not served from the old plaintext', async () => {
         const sent = envelopeMessage('edited', 0);
-        service.recordOutgoing(sent, 'before');
+        service.recordOutgoing(MINE, sent, 'before');
 
         service.forgetOne('edited');
-        service.recordOutgoing(sent, 'after');
+        service.recordOutgoing(MINE, sent, 'after');
 
         expect((await service.decrypt(CHAT, sent)).text).toBe('after');
     });
@@ -700,7 +764,7 @@ describe('MessageService', () => {
                 const first = await version('v1');
                 first.envelope = { ...first.envelope!, epoch: 2 };
                 // Opened through the cache directly: only its recorded position matters here.
-                service.recordOutgoing(first, 'v1');
+                service.recordOutgoing(MINE, first, 'v1');
                 const spy = spyOn(receiver, 'messageKeyFor').and.callThrough();
 
                 const outcome = await service.decryptEdit(CHAT, await version('rolled back'));
@@ -1156,6 +1220,30 @@ describe('MessageService', () => {
             expect(result.text).toBe('updated text');
             expect(result.attachments.find((f) => f.url === kept.url)?.decryptionKey).toEqual(keptKey);
             expect(result.attachments.find((f) => f.url === added.url)?.decryptionKey).toEqual(newKey);
+        });
+
+        /** The edit response is the server's word too: the result is filed under the id we edited. */
+        it('files the edit under the id it asked to edit, as our own, whatever the response names', async () => {
+            keyStore.ensureSenderChain.and.resolveTo({
+                senderKeyId: SKID,
+                chain: new SenderChain(crypto.getRandomValues(new Uint8Array(32))),
+                chainSigningPrivate: crypto.getRandomValues(new Uint8Array(32)),
+            } as never);
+            Object.defineProperty(keyStore, 'currentIdentity', {
+                value: { userId: SENDER, deviceId: 'device-1' },
+            });
+            const elsewhere = {
+                ...envelopeMessage('some-other-message', 1),
+                chat_id: 'a0000000-0000-4000-8000-0000000000bb',
+                sender_id: 'f0000000-0000-4000-8000-00000000000f',
+            };
+            chatApi.editMessage.and.returnValue(of(elsewhere));
+
+            const result = await service.editText(CHAT, 'm-edit', 'updated text');
+
+            expect(result.id).toBe('m-edit');
+            expect(result.chatId).toBe(CHAT);
+            expect(result.senderId).toBe(SENDER);
         });
 
         /**

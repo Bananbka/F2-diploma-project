@@ -1101,7 +1101,11 @@ export class ChatStoreService {
             // Bump before recording: bumping clears the preview override, and our own message is one
             // we can always read, so it should end up as the override rather than be wiped by it.
             this.bumpChatPreview(chatId, sent);
-            this.appendDecrypted(this.messages_.recordOutgoing(sent, text, attachments, content));
+            // Which chat and whose message this is comes from here, never from the response: see
+            // `MessageService.recordOutgoing`. The key store's id is the one proven at unlock; a send
+            // cannot have succeeded without it, so the fallbacks only matter to a stubbed key store.
+            const senderId = this.keyStore.currentIdentity?.userId ?? this.session.user()?.id ?? '';
+            this.appendDecrypted(this.messages_.recordOutgoing({ chatId, senderId }, sent, text, attachments, content));
         } catch (error) {
             if (this.isPeerDeleted(error)) {
                 // Not a failed send to retry: the conversation has become read-only. The draft is

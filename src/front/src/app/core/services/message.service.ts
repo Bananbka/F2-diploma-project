@@ -326,9 +326,19 @@ export class MessageService {
         if (!isControlContent(content)) {
             throw new Error('not a control payload');
         }
+        const identity = this.keyStore.currentIdentity;
+        if (!identity) {
+            throw new Error('key store is locked');
+        }
         const sent = await this.sendText(chatId, '', undefined, undefined, undefined, uuidv4(), content);
         // Remember our own plaintext so the echo (socket or endpoint) is never run through the ratchet.
-        const message = this.recordOutgoing({ ...sent, is_control: true }, '', undefined, content);
+        const message = this.recordOutgoing(
+            { chatId, senderId: identity.userId },
+            { ...sent, is_control: true },
+            '',
+            undefined,
+            content
+        );
         return { sent, message };
     }
 
@@ -444,9 +454,15 @@ export class MessageService {
         const wireAttachments = attachments ? stripDecryptionKeys(attachments) : undefined;
         const updated = await firstValueFrom(this.chatApi.editMessage(messageId, envelope, wireAttachments));
 
-        // The stored plaintext is now the previous version; replace rather than leave it stale.
-        this.opened.delete(messageId);
-        return this.recordOutgoing(updated, text, attachments);
+        // The stored plaintext is now the previous version; `recordOutgoing` replaces it. Filed under
+        // the id we asked to edit, not the one the response carries: a response naming another id
+        // would otherwise put this text under a message we never touched.
+        return this.recordOutgoing(
+            { chatId, senderId: identity.userId },
+            { ...updated, _id: messageId },
+            text,
+            attachments
+        );
     }
 
     /** Post to a channel: signed with the identity key, not encrypted. */
@@ -853,8 +869,19 @@ export class MessageService {
      * keys never travel over HTTP, so `sent.attachments` (the server's echo) never has them. Matched
      * back onto the server's copy by URL so the rendered attachments carry the fields the server
      * knows (size, kind, etc.) *and* the key only this process ever held.
+     *
+     * `origin` is what the caller knows for itself: the chat it sealed for and our own user id.
+     * Neither is read from `sent`, which is the server's answer. The response to a send in one chat
+     * could otherwise carry `chat_id`, `sender_id` and `_id` of a message in another, and our own
+     * text would be filed there under whatever sender the server named - then shown as that
+     * person's message, "sender verified", the next time that chat is opened. For the same reason
+     * an entry already held under this id is replaced only when it is ours and from this chat (the
+     * socket echo of this very message, or the version being edited). Anything else - another
+     * chat's message, or someone else's in this chat - is left exactly as it was; the message is
+     * still returned for the caller to show, just not remembered under an id that is not its own.
      */
     recordOutgoing(
+        origin: { chatId: string; senderId: string },
         sent: MessageResponse,
         plaintext: string,
         sentAttachments?: MessageAttachment[],
@@ -872,8 +899,8 @@ export class MessageService {
 
         const message: DecryptedMessage = {
             id: sent._id,
-            chatId: sent.chat_id,
-            senderId: sent.sender_id,
+            chatId: origin.chatId,
+            senderId: origin.senderId,
             createdAt: sent.created_at,
             isEdited: sent.is_edited,
             replyToId: sent.reply_to_message_id,
@@ -889,6 +916,11 @@ export class MessageService {
             reactions: sent.reactions ?? [],
             isPinned: sent.is_pinned,
         };
+
+        const existing = this.opened.get(sent._id);
+        if (existing && (existing.chatId !== origin.chatId || existing.senderId !== origin.senderId)) {
+            return message;
+        }
 
         this.opened.set(sent._id, message);
         // Our own envelope's position, so a later `message_edited` for this id is ordered against it.
