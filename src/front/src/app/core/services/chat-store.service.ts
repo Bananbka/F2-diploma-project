@@ -36,6 +36,7 @@ import { contentOf, DecryptedMessage, MessageService } from './message.service';
 import { PollStoreService } from './poll-store.service';
 import { SessionService } from './session.service';
 import { ToastService } from './toast.service';
+import { TrustStoreService } from './trust-store.service';
 import { WebSocketService } from './websocket.service';
 
 /** Bookkeeping for optimistic per-chat mutations that may overlap; see `ChatStoreService.enter`. */
@@ -202,6 +203,7 @@ export class ChatStoreService {
     private readonly polls = inject(PollStoreService);
     private readonly toast = inject(ToastService);
     private readonly keyChange = inject(KeyChangeStateService);
+    private readonly trust = inject(TrustStoreService);
     private readonly keyStore = inject(KeyStoreService);
     private readonly membership = inject(MembershipGuardService);
 
@@ -295,7 +297,7 @@ export class ChatStoreService {
      *
      * Derived, not set: `KeyStoreService` notes every safety number it derives — before wrapping a
      * chain key to the roster, when ingesting a peer's distribution, and on the safety-number
-     * screen — in `TrustStoreService`, and this compares those observations with the confirmed
+     * screen — in `KeyChangeStateService`, and this compares those observations with the confirmed
      * records. Being derived is what lets sending resume the moment the user accepts the new
      * number in the safety-number screen, with no reload and nothing for this service to clear.
      *
@@ -478,6 +480,22 @@ export class ChatStoreService {
                     void this.openChat(chatId);
                 } else {
                     this.resetConversation();
+                }
+            });
+        });
+
+        // What the user has confirmed changed, here or in another tab. A distribution vouched for by
+        // a device that moved a verified peer's safety number is refused at ingest and its messages
+        // stay `no_key` (`KeyStoreService.ingestDistributions`); once the user confirms the new
+        // number that refusal no longer applies, and nothing else would fetch the grants again - the
+        // earlier retries have run out by the time anyone has compared sixty digits. Restart them.
+        // A no-op unless the open chat is showing something it could not open.
+        effect(() => {
+            this.trust.revision();
+            untracked(() => {
+                const chatId = this.activeChatId();
+                if (chatId) {
+                    this.scheduleGrantRetry(chatId);
                 }
             });
         });

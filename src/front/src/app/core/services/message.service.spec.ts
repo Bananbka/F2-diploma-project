@@ -730,6 +730,114 @@ describe('MessageService', () => {
             });
         });
 
+        /**
+         * F2: the plaintext cache is keyed by message id, and the id is the server's word. The
+         * envelope binds the chat (AAD) but not the id, so a genuine, unopened envelope of the same
+         * sender from the *open* chat, presented as an edit of an id opened in *another* chat, used
+         * to authenticate and replace that other chat's message.
+         */
+        describe('a message id presented in another chat', () => {
+            const OTHER_CHAT = 'a0000000-0000-4000-8000-0000000000bb';
+            const ID = 'opened-in-the-first-chat';
+            let otherSender: SenderChain;
+            let otherReceiver: ReceiverChain;
+
+            beforeEach(() => {
+                const chainKey = crypto.getRandomValues(new Uint8Array(32));
+                otherSender = new SenderChain(chainKey.slice());
+                otherReceiver = new ReceiverChain(chainKey.slice());
+                keyStore.getReceiverChain.and.callFake(((chatId: string) =>
+                    chatId === OTHER_CHAT ? otherReceiver : receiver) as never);
+            });
+
+            /** A genuine message of the same sender in the other chat, on that chat's own chain. */
+            async function sealInOtherChat(
+                id: string,
+                text: string,
+                claimedChat = OTHER_CHAT
+            ): Promise<MessageResponse> {
+                const { key, nonce, index } = otherSender.nextMessageKey();
+                const raw = envelopeMessage(id, index);
+                raw.chat_id = claimedChat;
+                raw.envelope = await sealMessage({
+                    messageKey: key,
+                    nonce,
+                    signingPrivate,
+                    chatId: OTHER_CHAT,
+                    epoch: 1,
+                    senderId: SENDER,
+                    senderKeyId: SKID,
+                    chainIndex: index,
+                    plaintext: utf8(text),
+                });
+                return raw;
+            }
+
+            for (const claimedChat of [OTHER_CHAT, CHAT]) {
+                const label = claimedChat === CHAT ? 'the first chat' : 'the open chat';
+
+                it(`does not let an "edit" in the open chat replace it (chat_id says ${label})`, async () => {
+                    const original = await sealNext(ID, 'said in the first chat');
+                    const opened = await service.decrypt(CHAT, original);
+                    const spy = spyOn(otherReceiver, 'messageKeyFor').and.callThrough();
+
+                    const edit = await sealInOtherChat(ID, 'said in the other chat', claimedChat);
+                    const outcome = await service.decryptEdit(OTHER_CHAT, edit);
+
+                    expect(outcome.replaced).toBeFalse();
+                    expect(outcome.missingKey).toBeFalse();
+                    expect(outcome.message).toBe(opened);
+                    expect(spy).withContext('no key of the open chat was spent').not.toHaveBeenCalled();
+                    // Reopening the first chat still shows what was said there.
+                    const reopened = await service.decrypt(CHAT, original);
+                    expect(reopened).toBe(opened);
+                    expect(reopened.text).toBe('said in the first chat');
+                    // And the envelope still opens as the message it really is, under its own id.
+                    const real = await service.decrypt(OTHER_CHAT, { ...edit, _id: 'its-own-id' });
+                    expect(real.text).toBe('said in the other chat');
+                });
+            }
+
+            it('does not let it replace a placeholder of the other chat either', async () => {
+                // Cached as `failed` in the first chat: authenticated, but it will not open.
+                const broken = await signedMessage(ID, sender.nextMessageKey().index, signingPrivate);
+                const placeholder = await service.decrypt(CHAT, broken);
+                expect(placeholder.status).toBe('failed');
+
+                const outcome = await service.decryptEdit(OTHER_CHAT, await sealInOtherChat(ID, 'from elsewhere'));
+
+                expect(outcome.replaced).toBeFalse();
+                expect(await service.decrypt(CHAT, broken)).toBe(placeholder);
+            });
+
+            it('treats an entry cached for another chat as a miss, and does not overwrite it', async () => {
+                const original = await sealNext(ID, 'said in the first chat');
+                const opened = await service.decrypt(CHAT, original);
+
+                const elsewhere = await service.decrypt(
+                    OTHER_CHAT,
+                    await sealInOtherChat(ID, 'said in the other chat')
+                );
+
+                // Not answered from the first chat's entry...
+                expect(elsewhere).not.toBe(opened);
+                expect(elsewhere.chatId).toBe(OTHER_CHAT);
+                expect(elsewhere.text).toBe('said in the other chat');
+                // ...and the first chat's entry is still the one cached under that id.
+                expect(await service.decrypt(CHAT, original)).toBe(opened);
+            });
+
+            it('files a cached entry under the chat it was opened for, whatever chat_id the server put on it', async () => {
+                const relabelled = { ...(await sealNext(ID, 'said in the first chat')), chat_id: OTHER_CHAT };
+
+                const opened = await service.decrypt(CHAT, relabelled);
+
+                expect(opened.status).toBe('ok');
+                expect(opened.chatId).toBe(CHAT);
+                expect(await service.decrypt(CHAT, relabelled)).toBe(opened);
+            });
+        });
+
         for (const idx of [1.5, -1, 0x100000000, Number.NaN, Number.POSITIVE_INFINITY]) {
             it(`refuses chain index ${idx} without touching the chain`, async () => {
                 const spy = spyOn(receiver, 'messageKeyFor').and.callThrough();

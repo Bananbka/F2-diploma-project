@@ -1265,14 +1265,23 @@ export class KeyStoreService {
                 continue;
             }
 
-            // The receive-side half of the check `publishSenderChain` makes before wrapping. A
-            // changed key is *noted* here, never acted on: the distribution is still ingested, so
-            // the user can read what the (possibly substituted) sender wrote and judge it against
-            // the alarm, while the trust store's observation blocks sending through `ChatStoreService`
-            // until the new number is confirmed. Only binding-verified, active keys are fingerprinted —
-            // the batch may carry one the server could not vouch for, or a deleted account's
-            // retained device, which `computeSafetyNumber` leaves out too. A `lookup` observation:
-            // it comes from the batch endpoint, so it cannot clear a change the roster showed.
+            // The receive-side half of the check `publishSenderChain` makes before wrapping. Only
+            // binding-verified, active keys are fingerprinted — the batch may carry one the server
+            // could not vouch for, or a deleted account's retained device, which
+            // `computeSafetyNumber` leaves out too. A `lookup` observation: it comes from the batch
+            // endpoint, so it cannot clear a change already on record.
+            //
+            // A changed number for the *sender* refuses the distribution. It used to be noted and
+            // the chain registered anyway, "so the user can read what the sender wrote and judge it
+            // against the alarm" - but a server can mint a device under a verified peer's id with a
+            // valid self-binding, mark it active and serve a distribution signed by it. That device
+            // is "covered" only in the sense that it moved the number; the number it is covered by
+            // is not the one the user confirmed. Registering its chain made server-authored
+            // messages render as opened and sender-verified under the verified peer's name. So the
+            // chain is not registered: its messages stay `no_key`, a refusal is recorded for this
+            // chat (the standing alarm, persisted, and the number the safety-number screen then
+            // shows), and the distribution is ingested on a later pass once the user has confirmed
+            // the number these keys derive to. Peers never verified are unaffected.
             //
             // When the batch carries no key of ours no number can be derived at all (null). For a
             // peer with a confirmed number that is not "nothing to note" - it is the comparison
@@ -1283,6 +1292,19 @@ export class KeyStoreService {
             if (!fromSelf && covered) {
                 const changes = this.recordNumbersAndFindChanges(identity, batchKeys, 'lookup');
                 if (changes === null && this.hasTrustRecord(identity, dist.sender_user_id)) {
+                    continue;
+                }
+                const senderChange = changes?.find((peer) => peer.userId === dist.sender_user_id);
+                if (senderChange) {
+                    this.keyChange.recordRefusal(
+                        chatId,
+                        identity.userId,
+                        senderChange.userId,
+                        senderChange.current,
+                        senderChange.previous,
+                        // A device under our own id moves the number with every verified peer.
+                        this.extraOwnKeys(identity, batchKeys).length > 0
+                    );
                     continue;
                 }
             }

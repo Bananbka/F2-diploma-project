@@ -109,7 +109,52 @@ describe('KeyChangeStateService', () => {
             service.observe(ME, PEER, NUMBER_B, 'lookup');
 
             expect(service.observedState(ME, PEER)?.kind).toBe('changed');
-            // Not a roster number: nothing to block on, the dialog shows its own lookup.
+            // It blocks sending like any other change, so it is the number the dialog must show.
+            expect(service.blockingNumber(ME, PEER)).toBe(NUMBER_B);
+        });
+
+        /**
+         * The batch endpoint is answered per request: a planted device in one answer, the honest
+         * keys in the next. The second answer must not take the alarm down again.
+         */
+        it('does not let a later lookup of the confirmed number clear a changed lookup', () => {
+            service.observe(ME, PEER, NUMBER_B, 'lookup');
+            service.observe(ME, PEER, NUMBER_A, 'lookup');
+
+            expect(service.observedState(ME, PEER)?.kind).toBe('changed');
+            expect(service.changedAmong(ME, [PEER])).toEqual([PEER]);
+            expect(service.blockingNumber(ME, PEER)).toBe(NUMBER_B);
+        });
+
+        it('moves a changed lookup on to another changed number', () => {
+            service.observe(ME, PEER, NUMBER_B, 'lookup');
+            service.observe(ME, PEER, NUMBER_C, 'lookup');
+
+            expect(service.blockingNumber(ME, PEER)).toBe(NUMBER_C);
+        });
+
+        it('lets a roster check clear a changed lookup when no chat holds a refusal', () => {
+            service.observe(ME, PEER, NUMBER_B, 'lookup');
+            service.observe(ME, PEER, NUMBER_A, 'roster');
+
+            expect(service.observedState(ME, PEER)?.kind).toBe('verified');
+        });
+
+        it('keeps a changed lookup against a roster check while a chat still holds a refusal', () => {
+            service.observe(ME, PEER, NUMBER_B, 'lookup');
+            service.recordRefusal('c0000000-0000-4000-8000-0000000000aa', ME, PEER, NUMBER_B, NUMBER_A);
+            service.observe(ME, PEER, NUMBER_A, 'roster');
+
+            expect(service.observedState(ME, PEER)?.kind).toBe('changed');
+        });
+
+        it('lifts a changed lookup once the user confirms that number', () => {
+            service.observe(ME, PEER, NUMBER_B, 'lookup');
+            service.observe(ME, PEER, NUMBER_A, 'lookup');
+
+            trust.markVerified(ME, PEER, NUMBER_B);
+
+            expect(service.observedState(ME, PEER)?.kind).toBe('verified');
             expect(service.blockingNumber(ME, PEER)).toBeNull();
         });
 

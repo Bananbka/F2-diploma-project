@@ -75,10 +75,13 @@ async function buildDistribution(params: {
     recipientDeviceId: string;
     /** Reuse a sender key id, to model the same id turning up in another slot. */
     senderKeyId?: string;
+    /** The sending device, when it is not `SENDER_DEVICE` (a second device of the same user). */
+    senderDeviceId?: string;
     /** Receives the chain secrets, for tests that must seal messages on this chain. */
     capture?: { chainKey?: Uint8Array; chainSigningPrivate?: Uint8Array };
 }): Promise<Distribution> {
     const senderKeyId = params.senderKeyId ?? uuidv4();
+    const senderDeviceId = params.senderDeviceId ?? SENDER_DEVICE;
     // Throwaway chain-signing keypair, exactly as `ensureSenderChain` mints one per chain.
     const chainIdentity = generateIdentity(SENDER_USER, SENDER_DEVICE, false);
     const chainKey = generateChainKey();
@@ -94,7 +97,7 @@ async function buildDistribution(params: {
         chatId: CHAT,
         epoch: params.epoch,
         senderKeyId,
-        senderDeviceId: SENDER_DEVICE,
+        senderDeviceId,
         recipientDeviceId: params.recipientDeviceId,
     });
 
@@ -102,7 +105,7 @@ async function buildDistribution(params: {
         distribution_id: uuidv4(),
         epoch: params.epoch,
         sender_user_id: SENDER_USER,
-        sender_device_id: SENDER_DEVICE,
+        sender_device_id: senderDeviceId,
         sender_key_id: senderKeyId,
         algorithm: 'hkdf_sha256_aes256gcm_v1',
         signing_public_key: b64uEncode(chainIdentity.signingPublic),
@@ -960,10 +963,10 @@ describe('KeyStoreService', () => {
         });
 
         /**
-         * On receive the distribution is still ingested — the user should be able to read what the
-         * possibly-substituted sender wrote — but the change is recorded so sending blocks.
+         * On receive the change is recorded so sending blocks - and the distribution is refused: the
+         * device vouching for it is covered only by a number the user never confirmed.
          */
-        it('records a changed key when ingesting a distribution, without dropping the grant', async () => {
+        it('records a changed key when ingesting a distribution, and refuses the chain', async () => {
             const mine = await unlockWithBundle(true);
             const original = generateIdentity(SENDER_USER, SENDER_DEVICE);
             trust.markVerified(USER, SENDER_USER, numberFor(mine, original));
@@ -982,7 +985,8 @@ describe('KeyStoreService', () => {
             await service.ingestDistributions(CHAT, [dist]);
 
             expect(cryptoApi.getKeysBatch).toHaveBeenCalledWith([USER, SENDER_USER]);
-            expect(service.getReceiverChain(CHAT, 1, dist.sender_key_id)).toBeDefined();
+            expect(service.getReceiverChain(CHAT, 1, dist.sender_key_id)).toBeUndefined();
+            expect(service.getChainOwner(CHAT, 1, dist.sender_key_id)).toBeUndefined();
             const state = TestBed.inject(KeyChangeStateService).observedState(USER, SENDER_USER);
             expect(state?.kind).toBe('changed');
             expect(state?.kind === 'changed' && state.previous).toBe(numberFor(mine, original));
@@ -1919,7 +1923,7 @@ describe('KeyStoreService', () => {
                     expect(service.getReceiverChain(CHAT, 1, dist.sender_key_id)).toBeUndefined();
                 });
 
-                it('still ingests, and notes the change, when the number is derivable but differs', async () => {
+                it('refuses it, and notes the change, when the number is derivable but differs', async () => {
                     const mine = await unlockWithBundle(true);
                     const peer = generateIdentity(SENDER_USER, SENDER_DEVICE);
                     const before = generateIdentity(SENDER_USER, SENDER_DEVICE);
@@ -1936,11 +1940,227 @@ describe('KeyStoreService', () => {
 
                     await service.ingestDistributions(CHAT, [dist]);
 
-                    // Readable, with the alarm raised: the user judges the content against it.
-                    expect(service.getReceiverChain(CHAT, 1, dist.sender_key_id)).toBeDefined();
+                    // Not readable until the user confirms the number these keys derive to.
+                    expect(service.getReceiverChain(CHAT, 1, dist.sender_key_id)).toBeUndefined();
                     expect(TestBed.inject(KeyChangeStateService).observedState(USER, SENDER_USER)?.kind).toBe(
                         'changed'
                     );
+                });
+            });
+
+            /**
+             * F1: the *active* counterpart of H2(a). The server adds a self-bound device of its own
+             * under a verified peer's id, leaves it active, and serves a distribution signed by it.
+             * The device is in the number - it is what moved it - so "covered" alone let the chain
+             * through as the peer's, and the next honest batch answer took the alarm down again.
+             */
+            describe('a distribution vouched for by an active device that changes a verified number', () => {
+                async function setup() {
+                    const mine = await unlockWithBundle(true);
+                    const peer = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                    const planted = generateIdentity(SENDER_USER, SECOND_DEVICE);
+                    const keyChange = TestBed.inject(KeyChangeStateService);
+                    const confirmed = numberFor([mine], [peer]);
+                    const withPlanted = numberFor([mine], [peer, planted]);
+                    trust.markVerified(USER, SENDER_USER, confirmed);
+
+                    const honestBatch = [
+                        publicKeyFor(USER, DEVICE, mine),
+                        publicKeyFor(SENDER_USER, SENDER_DEVICE, peer),
+                    ];
+                    const forgedBatch = [...honestBatch, publicKeyFor(SENDER_USER, SECOND_DEVICE, planted)];
+
+                    const capture: { chainKey?: Uint8Array; chainSigningPrivate?: Uint8Array } = {};
+                    const forged = await buildDistribution({
+                        epoch: 1,
+                        senderIdentity: planted,
+                        senderDeviceId: SECOND_DEVICE,
+                        recipientPublic: mine.prekeyPublic!,
+                        recipientDeviceId: DEVICE,
+                        capture,
+                    });
+                    const honest = await buildDistribution({
+                        epoch: 1,
+                        senderIdentity: peer,
+                        recipientPublic: mine.prekeyPublic!,
+                        recipientDeviceId: DEVICE,
+                    });
+
+                    /** A message sealed on the forged chain, as the server would author it. */
+                    const sealForged = async (text: string) => {
+                        const { key, nonce, index } = new SenderChain(capture.chainKey!).nextMessageKey();
+                        const envelope = await sealMessage({
+                            messageKey: key,
+                            nonce,
+                            signingPrivate: capture.chainSigningPrivate!,
+                            chatId: CHAT,
+                            epoch: 1,
+                            senderId: SENDER_USER,
+                            senderKeyId: forged.sender_key_id,
+                            chainIndex: index,
+                            plaintext: utf8(JSON.stringify({ text, attachmentKeys: [] })),
+                        });
+                        return {
+                            _id: uuidv4().replace(/-/g, '').slice(0, 24),
+                            chat_id: CHAT,
+                            sender_id: SENDER_USER,
+                            encrypted_content: null,
+                            envelope,
+                            channel_post: null,
+                            content_format: 'sender_keys_v1',
+                            reply_to_message_id: null,
+                            forwarded_from: null,
+                            created_at: '2026-01-01T00:00:00Z',
+                            attachments: null,
+                            reactions: [],
+                            is_pinned: false,
+                            pinned_at: null,
+                            pinned_by: null,
+                            is_edited: false,
+                            is_encrypted: true,
+                        } as import('../models/crypto.model').MessageResponse;
+                    };
+
+                    return {
+                        mine,
+                        peer,
+                        keyChange,
+                        confirmed,
+                        withPlanted,
+                        honestBatch,
+                        forgedBatch,
+                        forged,
+                        honest,
+                        sealForged,
+                    };
+                }
+
+                it('does not register the chain, and its messages stay no_key', async () => {
+                    const { forgedBatch, forged, sealForged } = await setup();
+                    cryptoApi.getKeysBatch.and.returnValue(of(forgedBatch));
+
+                    await service.ingestDistributions(CHAT, [forged]);
+
+                    expect(service.getReceiverChain(CHAT, 1, forged.sender_key_id)).toBeUndefined();
+                    expect(service.getChainSigningKey(CHAT, 1, forged.sender_key_id)).toBeUndefined();
+                    expect(service.getChainOwner(CHAT, 1, forged.sender_key_id)).toBeUndefined();
+
+                    const shown = await TestBed.inject(MessageService).decrypt(CHAT, await sealForged('send money'));
+                    expect(shown.status).toBe('no_key');
+                    expect(shown.text).toBeNull();
+                    expect(shown.senderVerified).toBeFalse();
+                });
+
+                it('records a refusal for the chat, on the number the forged keys derive to', async () => {
+                    const { keyChange, confirmed, withPlanted, forgedBatch, forged } = await setup();
+                    cryptoApi.getKeysBatch.and.returnValue(of(forgedBatch));
+
+                    await service.ingestDistributions(CHAT, [forged]);
+
+                    const refusal = keyChange.refusalFor(CHAT, USER, SENDER_USER);
+                    expect(refusal?.current).toBe(withPlanted);
+                    expect(refusal?.previous).toBe(confirmed);
+                    expect(refusal?.ownDevicesChanged).toBeFalse();
+                    expect(keyChange.refusedPeers(CHAT, USER)).toEqual([SENDER_USER]);
+                    expect(keyChange.blockingNumber(USER, SENDER_USER, CHAT)).toBe(withPlanted);
+                });
+
+                it('keeps the alarm standing after an honest batch answer in the same pass', async () => {
+                    const { keyChange, withPlanted, honestBatch, forgedBatch, forged, honest } = await setup();
+                    // One batch lookup per distribution: forged keys for the first, honest for the next.
+                    cryptoApi.getKeysBatch.and.returnValues(of(forgedBatch), of(honestBatch));
+
+                    await service.ingestDistributions(CHAT, [forged, honest]);
+
+                    // The genuine device's chain is still taken: the confirmed number vouches for it.
+                    expect(service.getReceiverChain(CHAT, 1, honest.sender_key_id)).toBeDefined();
+                    expect(service.getReceiverChain(CHAT, 1, forged.sender_key_id)).toBeUndefined();
+                    expect(keyChange.observedState(USER, SENDER_USER)?.kind).toBe('changed');
+                    expect(keyChange.changedAmong(USER, [SENDER_USER])).toEqual([SENDER_USER]);
+                    expect(keyChange.refusedPeers(CHAT, USER)).toEqual([SENDER_USER]);
+                    expect(keyChange.blockingNumber(USER, SENDER_USER)).toBe(withPlanted);
+                });
+
+                it('keeps it standing after later honest lookups, including the safety-number screen', async () => {
+                    const { keyChange, confirmed, withPlanted, honestBatch, forgedBatch, forged, honest } =
+                        await setup();
+                    cryptoApi.getKeysBatch.and.returnValue(of(forgedBatch));
+                    await service.ingestDistributions(CHAT, [forged]);
+
+                    cryptoApi.getKeysBatch.and.returnValue(of(honestBatch));
+                    await service.ingestDistributions(CHAT, [forged, honest]);
+                    expect((await service.computeSafetyNumber(SENDER_USER)).number).toBe(confirmed);
+
+                    // The forged distribution is never taken on the strength of an honest answer: the
+                    // device that signed it is not in that answer at all.
+                    expect(service.getReceiverChain(CHAT, 1, forged.sender_key_id)).toBeUndefined();
+                    expect(keyChange.observedState(USER, SENDER_USER)?.kind).toBe('changed');
+                    expect(keyChange.refusalFor(CHAT, USER, SENDER_USER)?.current).toBe(withPlanted);
+                    expect(keyChange.blockingNumber(USER, SENDER_USER, CHAT)).toBe(withPlanted);
+                });
+
+                it('survives a reload: the refusal is persisted', async () => {
+                    const { withPlanted, forgedBatch, forged } = await setup();
+                    cryptoApi.getKeysBatch.and.returnValue(of(forgedBatch));
+                    await service.ingestDistributions(CHAT, [forged]);
+
+                    const reloaded = Injector.create({
+                        parent: TestBed.inject(Injector),
+                        providers: [KeyChangeStateService, TrustStoreService],
+                    });
+                    try {
+                        const fresh = reloaded.get(KeyChangeStateService);
+                        expect(fresh.refusalFor(CHAT, USER, SENDER_USER)?.current).toBe(withPlanted);
+                    } finally {
+                        (reloaded as unknown as { destroy(): void }).destroy();
+                    }
+                });
+
+                it('takes the distribution, and opens its messages, once the user confirms the new number', async () => {
+                    const { keyChange, withPlanted, forgedBatch, forged, sealForged } = await setup();
+                    const messages = TestBed.inject(MessageService);
+                    cryptoApi.getKeysBatch.and.returnValue(of(forgedBatch));
+                    await service.ingestDistributions(CHAT, [forged]);
+                    const raw = await sealForged('from my new laptop');
+                    expect((await messages.decrypt(CHAT, raw)).status).toBe('no_key');
+
+                    // The peer really did add a device, and the user compared the new number with them.
+                    trust.markVerified(USER, SENDER_USER, withPlanted);
+                    await service.ingestDistributions(CHAT, [forged]);
+
+                    expect(keyChange.refusalFor(CHAT, USER, SENDER_USER)).toBeNull();
+                    expect(keyChange.observedState(USER, SENDER_USER)?.kind).toBe('verified');
+                    expect(service.getChainOwner(CHAT, 1, forged.sender_key_id)).toBe(SENDER_USER);
+                    const opened = await messages.decrypt(CHAT, raw);
+                    expect(opened.status).toBe('ok');
+                    expect(opened.text).toBe('from my new laptop');
+                    expect(opened.senderVerified).toBeTrue();
+                });
+
+                it('leaves a peer who was never verified on trust on first use', async () => {
+                    const { keyChange, forgedBatch, forged } = await setup();
+                    trust.forget(USER, SENDER_USER);
+                    cryptoApi.getKeysBatch.and.returnValue(of(forgedBatch));
+
+                    await service.ingestDistributions(CHAT, [forged]);
+
+                    expect(service.getReceiverChain(CHAT, 1, forged.sender_key_id)).toBeDefined();
+                    expect(keyChange.refusedPeers(CHAT, USER)).toEqual([]);
+                });
+
+                it('lifts the alarm when the user asks for a re-check and the roster derives the confirmed number', async () => {
+                    const { mine, peer, keyChange, forgedBatch, forged } = await setup();
+                    cryptoApi.getKeysBatch.and.returnValue(of(forgedBatch));
+                    await service.ingestDistributions(CHAT, [forged]);
+                    service.expectMembers(CHAT, { kind: 'private', selfId: USER, peerId: SENDER_USER });
+                    cryptoApi.getRoster.and.returnValue(
+                        of(roster(entryFor(USER, DEVICE, mine), entryFor(SENDER_USER, SENDER_DEVICE, peer)))
+                    );
+
+                    await service.recheckRoster(CHAT, 1);
+
+                    expect(keyChange.refusedPeers(CHAT, USER)).toEqual([]);
+                    expect(keyChange.observedState(USER, SENDER_USER)?.kind).toBe('verified');
                 });
             });
 

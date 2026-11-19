@@ -1,6 +1,6 @@
 import { HttpErrorResponse } from '@angular/common/http';
 import { Injector, signal } from '@angular/core';
-import { TestBed } from '@angular/core/testing';
+import { fakeAsync, TestBed, tick } from '@angular/core/testing';
 import { of, Subject, throwError } from 'rxjs';
 
 import { computeMemberSetHash } from '../crypto/grants';
@@ -387,6 +387,40 @@ describe('ChatStoreService', () => {
             await store.send('resumed');
             expect(messages.sendText).toHaveBeenCalledTimes(2);
         });
+
+        /**
+         * F1: a distribution vouched for by a device that changed a verified peer's number is refused
+         * at ingest, so its messages are `no_key`. Confirming the new number must bring them back
+         * without a reload - long after the ordinary grant retries have run out.
+         */
+        it('fetches grants again and opens what it could not read once a number is confirmed', fakeAsync(() => {
+            // Setting the active chat would otherwise load it for real once effects run.
+            spyOn(store as unknown as { openChat: () => Promise<void> }, 'openChat').and.resolveTo();
+            const raw = messageResponse({ _id: 'a', sender_id: PEER });
+            (store as unknown as { rawMessages: Map<string, MessageResponse> }).rawMessages.set('a', raw);
+            store.messages.set([decrypted('a', 'no_key')]);
+            messages.refreshGrants.and.resolveTo();
+            messages.decrypt.and.resolveTo(decrypted('a', 'no_key'));
+
+            // The ordinary retries: bounded, and exhausted while the user is still comparing digits.
+            TestBed.flushEffects();
+            tick(60_000);
+            const before = messages.refreshGrants.calls.count();
+            tick(60_000);
+            expect(messages.refreshGrants.calls.count()).withContext('retries had stopped').toBe(before);
+            expect(store.messages()[0].status).toBe('no_key');
+
+            // The key store now accepts the distribution, so the message opens.
+            messages.decrypt.and.resolveTo(decrypted('a', 'ok'));
+            trust.markVerified(ME, PEER, NUMBER_B);
+            TestBed.flushEffects();
+            tick(60_000);
+
+            expect(messages.refreshGrants.calls.count()).toBeGreaterThan(before);
+            expect(messages.refreshGrants).toHaveBeenCalledWith(CHAT);
+            expect(messages.decrypt).toHaveBeenCalledWith(CHAT, raw);
+            expect(store.messages()[0].status).toBe('ok');
+        }));
 
         /** The receive path records the change in the trust store; the block follows without a send. */
         it('blocks as soon as the trust store observes a changed number for a member', () => {

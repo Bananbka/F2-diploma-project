@@ -595,8 +595,11 @@ export class MessageService {
         message: MessageResponse,
         senderKeys?: Map<string, PublicKey>
     ): Promise<DecryptedMessage> {
+        // The cache is keyed by message id, and a message id is whatever the server says it is. An
+        // entry opened in another chat is therefore not an answer for this one: treated as a miss
+        // (and never overwritten - see `decryptAndCache`).
         const cached = this.opened.get(message._id);
-        if (cached) {
+        if (cached && cached.chatId === chatId) {
             return cached;
         }
 
@@ -604,7 +607,7 @@ export class MessageService {
         // second parallel attempt would find the index consumed by the first and could report a
         // spurious `failed` for a message that opened fine. Keyed by envelope position as well as
         // id, so an edit (a new index under the same id) is never answered with the old content.
-        const flightKey = `${message._id}:${message.envelope?.skid ?? ''}:${message.envelope?.idx ?? ''}`;
+        const flightKey = `${chatId}:${message._id}:${message.envelope?.skid ?? ''}:${message.envelope?.idx ?? ''}`;
         const running = this.inflight.get(flightKey);
         if (running) {
             return running;
@@ -632,6 +635,13 @@ export class MessageService {
         // weaker result replace it: a lower envelope index is an older version of the message, and
         // a `failed` beside an opened plaintext is only the ratchet refusing a second read.
         const current = this.opened.get(message._id);
+        if (current && current.chatId !== chatId) {
+            // The id is already held by a message opened in another chat. Ids do not repeat across
+            // chats, so this is a server presenting one chat's id on another chat's message. The
+            // result is handed back for this call but never stored: storing it would put this chat's
+            // content under the other chat's message the next time that chat is opened.
+            return withMeta;
+        }
         if (current) {
             const currentIdx = this.openedIdx.get(message._id) ?? -1;
             if (
@@ -729,11 +739,19 @@ export class MessageService {
      * and try again, and the old content stays up meanwhile.
      *
      * Residual: the envelope does not bind the message id, so a server can still present some
-     * *other* genuine, not-yet-opened message of the same sender as the edit. See
-     * `docs/tech-debt.md` section 14.
+     * *other* genuine, not-yet-opened message of the same sender *in the same chat* as the edit. See
+     * `docs/tech-debt.md` section 14. Across chats it cannot: the envelope does bind the chat (AAD),
+     * and an edit is refused outright when the id belongs to a message opened in another chat -
+     * otherwise a `message_edited` for the open chat, naming an id from another chat and carrying a
+     * genuine unopened envelope of the same sender from the open one, authenticated and replaced the
+     * other chat's message with it.
      */
     async decryptEdit(chatId: string, message: MessageResponse): Promise<EditOutcome> {
         const current = this.opened.get(message._id);
+        if (current && current.chatId !== chatId) {
+            // Before anything else: neither forgotten (below) nor replaced, and no key is spent.
+            return { message: current, replaced: false, missingKey: false };
+        }
         if (!current || !isAuthenticated(current)) {
             // Nothing readable to protect: a placeholder gives way to whatever the edit yields.
             this.forgetOne(message._id);
@@ -752,7 +770,7 @@ export class MessageService {
 
         // Re-read: the entry may have been patched (a reaction) or dropped (a lock) meanwhile.
         const latest = this.opened.get(message._id);
-        if (!latest || !this.maySupersede(latest, message, result)) {
+        if (!latest || latest.chatId !== chatId || !this.maySupersede(latest, message, result)) {
             return { message: latest ?? current, replaced: false, missingKey: result.status === 'no_key' };
         }
 
@@ -888,7 +906,10 @@ export class MessageService {
         // call has actually resolved, so a `patchMeta` racing this decrypt is not lost.
         const base = {
             id: message._id,
-            chatId: message.chat_id,
+            // The chat the caller is reading and every check below is made against (the AAD, the
+            // signature, the chain lookup) - not `message.chat_id`, which is only the server's word
+            // and is what the plaintext cache compares to keep one chat's entries out of another.
+            chatId,
             senderId: message.sender_id,
             createdAt: message.created_at,
             isEdited: message.is_edited,

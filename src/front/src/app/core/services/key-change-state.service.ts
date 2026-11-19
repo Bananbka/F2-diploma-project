@@ -13,7 +13,8 @@ import { TrustState, TrustStoreService } from './trust-store.service';
  *
  * `lookup` — derived from `POST /crypto/keys/batch` (the safety-number screen, the encryption panel,
  * distribution ingest). A server that equivocates can answer a lookup with the old keys while the
- * roster carries new ones, so a lookup may raise an alarm but never clear one a roster raised.
+ * roster carries new ones - or answer one lookup with a planted device and the next without it - so
+ * a lookup may raise an alarm but never clear one, whichever source raised it.
  */
 export type ObservationSource = 'roster' | 'lookup';
 
@@ -63,7 +64,9 @@ export class KeyChangeStateService {
     private readonly observed = signal<Record<string, Observation>>({});
 
     /**
-     * Per chat and pair, the number a send in *that chat* was refused on (`KeyChangedError`).
+     * Per chat and pair, the number a send in *that chat* was refused on (`KeyChangedError`) - or
+     * the number a distribution in that chat was refused on, when the device vouching for it changed
+     * a verified peer's number (`KeyStoreService.ingestDistributions`).
      *
      * Observations are per pair, so a second chat's honest roster for the same peer used to replace
      * the first chat's changed one — the first chat's block then had no number to show, and the
@@ -103,6 +106,15 @@ export class KeyChangeStateService {
      * the equivocation case: the roster the send path checked carried a new key, while a batch
      * lookup (the safety-number screen) was answered with the old one. Letting the lookup win would
      * clear the banner and show "verified, unchanged" while the next send blocks again.
+     *
+     * Nor does a `lookup` that matches the confirmed number replace a changed `lookup` one. The
+     * batch endpoint is answered per request, so a server can show a planted device in one answer
+     * (to get its distribution accepted as a verified peer's) and the honest keys in the next. If
+     * the second answer won, the alarm would be gone before the user could see it. A changed
+     * observation therefore stands until the user acts: they confirm a number (the comparison is
+     * then against the new record), or ask for a re-check and the chat's roster - the keys a send
+     * would actually wrap to - derives the confirmed number. A lookup that derives *another*
+     * changed number does replace it: the alarm stands either way, on the latest keys.
      */
     observe(selfId: string, peerId: string, currentSafetyNumber: string, source: ObservationSource = 'roster'): void {
         const key = pairKey(selfId, peerId);
@@ -114,17 +126,14 @@ export class KeyChangeStateService {
             return;
         }
         const existingChanged =
-            existing?.source === 'roster' && this.trust.stateFor(selfId, peerId, existing.number).kind === 'changed';
-        if (source === 'lookup' && existingChanged) {
+            existing !== undefined && this.trust.stateFor(selfId, peerId, existing.number).kind === 'changed';
+        const incomingChanged = this.trust.stateFor(selfId, peerId, currentSafetyNumber).kind === 'changed';
+        if (source === 'lookup' && existingChanged && (existing.source === 'roster' || !incomingChanged)) {
             return;
         }
         // Nor does another chat's unchanged roster replace a changed one while any chat still holds
         // a refusal for this pair: the pair is not "fine" just because one chat's roster is.
-        if (
-            existingChanged &&
-            this.trust.stateFor(selfId, peerId, currentSafetyNumber).kind !== 'changed' &&
-            this.hasPendingRefusal(selfId, peerId)
-        ) {
+        if (existingChanged && !incomingChanged && this.hasPendingRefusal(selfId, peerId)) {
             return;
         }
         this.observed.update((all) => ({ ...all, [key]: { number: currentSafetyNumber, source } }));
@@ -143,9 +152,14 @@ export class KeyChangeStateService {
 
     /**
      * The number the send path is currently blocked on for this pair: the refused chat's own number
-     * when `chatId` holds a refusal, else a roster-derived observation that differs from the
-     * confirmed record, or null. The safety-number screen shows this instead of its own lookup when
-     * present, so the number the user compares is the one whose acceptance unblocks sending. Reactive.
+     * when `chatId` holds a refusal, else an observation that differs from the confirmed record, or
+     * null. The safety-number screen shows this instead of its own lookup when present, so the
+     * number the user compares is the one whose acceptance unblocks sending. Reactive.
+     *
+     * Either source counts. A changed `lookup` observation blocks sending just as a roster one does
+     * (`changedAmong`) and is no longer cleared by a later lookup, so the screen must show the number
+     * the alarm stands on - not "verified, unchanged" from a fresh lookup the server answered
+     * honestly, beside a banner that says the key changed.
      */
     blockingNumber(selfId: string, peerId: string, chatId?: string): string | null {
         const refusal = chatId ? this.refusalFor(chatId, selfId, peerId) : null;
@@ -154,7 +168,7 @@ export class KeyChangeStateService {
         }
         const key = pairKey(selfId, peerId);
         const current = key ? this.observed()[key] : undefined;
-        if (!current || current.source !== 'roster') {
+        if (!current) {
             return null;
         }
         return this.trust.stateFor(selfId, peerId, current.number).kind === 'changed' ? current.number : null;
