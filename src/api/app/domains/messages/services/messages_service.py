@@ -35,6 +35,16 @@ from app.infrastructure.minio import minio_manager
 # small cap keeps the pinned list actually skimmable and bounds the size of the listing query.
 MAX_PINNED_MESSAGES_PER_CHAT = 5
 
+# Reactions live inline on the message document, so their number has to be bounded or the document
+# itself is the thing that grows: without a cap, one member could add reactions until the document
+# reached MongoDB's 16 MB limit, after which every `update_one` on it — edits, pins, read state,
+# anyone else's reaction — fails for the whole chat. Two caps, because either alone leaves a hole:
+# per user (so the array is at most members x MAX_REACTIONS_PER_USER entries) and distinct emoji
+# per message (so the rendered row of chips, and the set a client has to draw, stays small no
+# matter how many members coordinate).
+MAX_REACTIONS_PER_USER = 3
+MAX_DISTINCT_REACTIONS_PER_MESSAGE = 20
+
 # Poll control messages. A real vote is well under 1 KB sealed; the cap only has to stop the
 # envelope's 256 KB ceiling being used as free storage through a flag the server cannot look behind.
 CONTROL_MAX_CT_CHARS = 4096
@@ -972,12 +982,16 @@ async def toggle_reaction(
 
     Atomic by construction rather than read-then-decide-then-write: a `$pull` is attempted first,
     and only if it removed nothing (`modified_count == 0`, meaning the caller had not reacted with
-    this emoji) does a `$push` follow — and that `$push`'s own filter re-checks non-existence of the
-    same `(user_id, emoji)` pair in the same round trip, so it cannot land twice even if two
-    identical requests both fall through to it concurrently. This closes the double-tap race where
-    two near-simultaneous toggles could otherwise both read "not reacted yet" and both append,
-    leaving a duplicate entry that only a later toggle's `$pull` (which removes every match) would
-    clean up.
+    this emoji) does a `$push` follow — and that `$push`'s own filter re-checks, in the same round
+    trip, everything the add depends on: that the same `(user_id, emoji)` pair is still absent, and
+    that both caps (`MAX_REACTIONS_PER_USER`, `MAX_DISTINCT_REACTIONS_PER_MESSAGE`) still have
+    room. MongoDB evaluates an `update_one` filter and applies its update atomically per document,
+    so no interleaving of concurrent toggles can land a duplicate or push the array past a cap —
+    a count-then-push in Python could, since every concurrent request would read the same
+    under-the-cap count.
+
+    Removal is the unconditional `$pull` and never consults a cap, so a user at the limit (or on a
+    message at the distinct-emoji limit) can always take a reaction back.
     """
     collection = mongo_db["messages"]
     msg, chat = await get_message_for_participant(db, collection, msg_id, user_id)
@@ -991,11 +1005,8 @@ async def toggle_reaction(
     if pull_result.modified_count > 0:
         added = False
     else:
-        await collection.update_one(
-            {
-                "_id": msg["_id"],
-                "reactions": {"$not": {"$elemMatch": {"user_id": user_id, "emoji": emoji}}},
-            },
+        push_result = await collection.update_one(
+            {"_id": msg["_id"], "$expr": _reaction_add_allowed(user_id, emoji)},
             {
                 "$push": {
                     "reactions": {
@@ -1006,10 +1017,34 @@ async def toggle_reaction(
                 }
             },
         )
-        # If the filter matched nothing, a concurrent request already added this exact
-        # (user_id, emoji) pair between our `$pull` and this `$push` — the reaction is present
-        # either way, so this call still reports it as added rather than erroring or no-op'ing
-        # into a stale "removed" state.
+        if push_result.modified_count == 0:
+            # The conditional push matched nothing. Re-read only to say *why* — the decision was
+            # already made atomically above, this just picks the right answer for the caller.
+            current = await collection.find_one({"_id": msg["_id"]}, {"reactions": 1})
+            if current is None:
+                raise AppException(404, "MESSAGE_NOT_FOUND", "Message not found.")
+
+            reactions = current.get("reactions") or []
+            mine = [r for r in reactions if r.get("user_id") == user_id]
+
+            if not any(r.get("emoji") == emoji for r in mine):
+                if len(mine) >= MAX_REACTIONS_PER_USER:
+                    raise AppException(
+                        409,
+                        "REACTION_LIMIT_REACHED",
+                        f"You can add at most {MAX_REACTIONS_PER_USER} reactions to a message; "
+                        f"remove one before adding another.",
+                    )
+                raise AppException(
+                    409,
+                    "REACTION_EMOJI_LIMIT_REACHED",
+                    f"This message already has {MAX_DISTINCT_REACTIONS_PER_MESSAGE} different "
+                    f"reactions; pick one of the existing ones.",
+                )
+            # Otherwise a concurrent request already added this exact (user_id, emoji) pair
+            # between our `$pull` and this `$push` — the reaction is present either way, so this
+            # call still reports it as added rather than erroring or no-op'ing into a stale
+            # "removed" state.
         added = True
 
     updated = await collection.find_one({"_id": msg["_id"]})
@@ -1017,6 +1052,51 @@ async def toggle_reaction(
     updated["content_format"] = resolve_content_format(updated, chat)
 
     return MessageResponse(**updated), added
+
+
+def _reaction_add_allowed(user_id: uuid.UUID, emoji: str) -> dict:
+    """The `$expr` under which `(user_id, emoji)` may be appended to a message's reactions.
+
+    True only when all three hold for the document as it is at the moment of the update: the
+    caller has not already placed this emoji, the caller holds fewer than
+    `MAX_REACTIONS_PER_USER` reactions here, and the emoji is either already on the message (a
+    "+1" on an existing chip never widens the set) or the message has fewer than
+    `MAX_DISTINCT_REACTIONS_PER_MESSAGE` distinct emoji.
+
+    `$literal` around the emoji keeps a client-supplied string from ever being read as a field
+    path or operator inside the expression.
+    """
+    reactions = {"$ifNull": ["$reactions", []]}
+    literal_emoji = {"$literal": emoji}
+    my_emoji = {
+        "$map": {
+            "input": {
+                "$filter": {
+                    "input": reactions,
+                    "as": "r",
+                    "cond": {"$eq": ["$$r.user_id", user_id]},
+                }
+            },
+            "as": "r",
+            "in": "$$r.emoji",
+        }
+    }
+    distinct_emoji = {
+        "$setUnion": [{"$map": {"input": reactions, "as": "r", "in": "$$r.emoji"}}, []]
+    }
+
+    return {
+        "$and": [
+            {"$not": [{"$in": [literal_emoji, my_emoji]}]},
+            {"$lt": [{"$size": my_emoji}, MAX_REACTIONS_PER_USER]},
+            {
+                "$or": [
+                    {"$in": [literal_emoji, distinct_emoji]},
+                    {"$lt": [{"$size": distinct_emoji}, MAX_DISTINCT_REACTIONS_PER_MESSAGE]},
+                ]
+            },
+        ]
+    }
 
 
 async def remove_reaction(

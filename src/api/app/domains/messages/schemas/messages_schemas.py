@@ -142,26 +142,65 @@ class Reaction(BaseModel):
     created_at: datetime.datetime
 
 
-def validate_emoji(v: str) -> str:
-    """Basic emoji sanity check, not a full grapheme-cluster validator.
+# Longest sequence the validator accepts, in code points. The longest RGI emoji (a two-person ZWJ
+# sequence with a skin tone on each side, e.g. "kiss: woman, man, medium skin tone") is 10; the
+# previous cap of 8 rejected those outright.
+MAX_EMOJI_CODEPOINTS = 10
 
-    Rejects the empty string and anything ASCII-only (plain text such as "lol" or ":)"), which
-    catches the obvious misuse without trying to enumerate every valid emoji code point — Unicode
-    keycap sequences, skin-tone modifiers and ZWJ sequences all contain at least one non-ASCII
-    code point, so the heuristic does not reject them.
+# Approximates Unicode's `Extended_Pictographic` property, which the stdlib `unicodedata` module
+# does not expose. Regional indicators (U+1F1E6-1F1FF) and the skin-tone modifiers (U+1F3FB-1F3FF)
+# are carved out of the supplementary range on purpose: they are only valid in the specific
+# positions the grammar below gives them, never as a base of their own.
+_PICTOGRAPH = (
+    "[©®‼⁉™ℹ↔-↪⌚-⏿Ⓜ▪-◾"
+    "☀-➿⤴⤵⬅-⭕〰〽㊗㊙"
+    "\U0001F000-\U0001F1E5\U0001F200-\U0001F3FA\U0001F400-\U0001FAFF]"
+)
+_EMOJI_ELEMENT = (
+    "(?:"
+    # A pictograph, optionally forced to emoji presentation (VS16), optionally skin-toned,
+    # optionally followed by a tag sequence (the subdivision flags: England, Scotland, Wales).
+    + _PICTOGRAPH
+    + "️?[\U0001F3FB-\U0001F3FF]?(?:[\U000E0020-\U000E007E]{1,6}\U000E007F)?"
+    # A keycap: digit, # or *, optional VS16, then the combining enclosing keycap.
+    + "|[0-9#*]️?⃣"
+    # A flag: exactly two regional indicators.
+    + "|[\U0001F1E6-\U0001F1FF]{2}"
+    + ")"
+)
+# One emoji: a single element, or up to four joined by ZWJ (a family is four).
+_EMOJI_RE = re.compile(_EMOJI_ELEMENT + "(?:‍" + _EMOJI_ELEMENT + "){0,3}")
+
+
+def validate_emoji(v: str) -> str:
+    """Accept exactly one emoji sequence and nothing else.
+
+    The earlier check only required one non-ASCII code point, so any short string in any script —
+    or arbitrary combinations of private-use and combining characters — counted as a distinct
+    "emoji". Combined with there being no cap on reactions, that let one member mint tens of
+    thousands of distinct reactions on a message.
+
+    This is a structural check against the shape of an emoji sequence (pictograph with optional
+    variation selector / skin tone / tag sequence, keycap, flag, and ZWJ joins of those), not a
+    lookup against the RGI list: shipping and updating that table for every Unicode release is not
+    worth it when the per-message caps in `messages_service.toggle_reaction` are what actually
+    bound the document. It accepts every entry the client's picker can send, and a few
+    well-formed-but-unassigned sequences that simply render as a missing glyph.
     """
     v = v.strip()
     if not v:
         raise ValueError("emoji must not be empty")
-    if v.isascii():
-        raise ValueError("emoji must be an actual emoji, not plain text")
+    if len(v) > MAX_EMOJI_CODEPOINTS or not _EMOJI_RE.fullmatch(v):
+        raise ValueError("emoji must be a single emoji")
     return v
 
 
 class ReactionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    emoji: str = Field(..., min_length=1, max_length=8)
+    # The Field bound is in code points and deliberately looser than MAX_EMOJI_CODEPOINTS so
+    # surrounding whitespace does not turn an otherwise valid emoji into a length error.
+    emoji: str = Field(..., min_length=1, max_length=MAX_EMOJI_CODEPOINTS + 6)
 
     @field_validator("emoji")
     @classmethod
