@@ -17,6 +17,7 @@ import app.domains.files.tasks as files_tasks
 from app.core.config import settings
 from app.infrastructure.minio import minio_manager
 
+from tests.crypto.sealing import send_sealed
 from tests.crypto.test_epoch_api import _group_with
 from tests.crypto.test_identity_api import _register_user
 
@@ -101,14 +102,7 @@ async def test_cleanup_minio_orphans_keeps_an_object_referenced_by_a_message():
         attachment = r.json()["data"]
         key = _key_of(attachment["url"])
 
-        r = await alice.post(
-            "/messages/",
-            json={
-                "chat_id": str(chat_id),
-                "encrypted_content": "x",
-                "attachments": [attachment],
-            },
-        )
+        r = await send_sealed(alice, chat_id, "x", attachments=[attachment])
         assert r.status_code == 201, r.text
 
         with _zero_orphan_age():

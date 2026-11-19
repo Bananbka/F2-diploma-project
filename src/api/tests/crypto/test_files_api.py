@@ -22,9 +22,11 @@ import httpx
 from app.core.config import settings
 from app.domains.crypto.reference.ratchet import SenderChain
 
+from tests.crypto.sealing import edit_sealed, send_sealed
 from tests.crypto.test_channel_api import _channel_with, _post
 from tests.crypto.test_epoch_api import _group_with, _publish_identity
 from tests.crypto.test_identity_api import _register_user, rate_limit_bypass_headers
+from tests.crypto.test_message_crud_api import _insert_legacy
 from tests.crypto.test_message_envelope_api import _encrypted_private_chat
 from tests.crypto.test_rotation_api import _seal
 
@@ -64,14 +66,7 @@ async def test_upload_and_download_through_a_chat():
         attachment = r.json()["data"]
         assert attachment["size"] == len(b"ciphertext-bytes")
 
-        r = await alice.post(
-            "/messages/",
-            json={
-                "chat_id": str(chat_id),
-                "encrypted_content": "x",
-                "attachments": [attachment],
-            },
-        )
+        r = await send_sealed(alice, chat_id, "x", attachments=[attachment])
         assert r.status_code == 201, r.text
 
         key = await _object_key(attachment["url"])
@@ -103,14 +98,9 @@ async def test_download_requires_membership_and_a_reference_in_that_chat():
         attachment = r.json()["data"]
         key = await _object_key(attachment["url"])
 
-        await alice.post(
-            "/messages/",
-            json={
-                "chat_id": str(chat_id),
-                "encrypted_content": "x",
-                "attachments": [attachment],
-            },
-        )
+        r = await send_sealed(alice, chat_id, "x", attachments=[attachment])
+
+        assert r.status_code == 201, r.text
 
         # Not a member of that chat.
         r = await mallory.get(f"/files/attachments/{chat_id}/{key}")
@@ -143,24 +133,12 @@ async def test_cannot_attach_a_file_you_neither_uploaded_nor_can_see():
         r = await _upload(alice)
         attachment = r.json()["data"]
 
-        await alice.post(
-            "/messages/",
-            json={
-                "chat_id": str(private_chat),
-                "encrypted_content": "x",
-                "attachments": [attachment],
-            },
-        )
+        r = await send_sealed(alice, private_chat, "x", attachments=[attachment])
+
+        assert r.status_code == 201, r.text
 
         # Mallory knows the key but neither uploaded it nor is in a chat that references it.
-        r = await mallory.post(
-            "/messages/",
-            json={
-                "chat_id": str(mallory_chat),
-                "encrypted_content": "x",
-                "attachments": [attachment],
-            },
-        )
+        r = await send_sealed(mallory, mallory_chat, "x", attachments=[attachment])
         assert r.status_code == 403, r.text
         assert r.json()["error_code"] == "ATTACHMENT_FORBIDDEN"
     finally:
@@ -182,24 +160,11 @@ async def test_forwarding_someone_elses_attachment_is_allowed():
 
         r = await _upload(alice)
         attachment = r.json()["data"]
-        await alice.post(
-            "/messages/",
-            json={
-                "chat_id": str(shared),
-                "encrypted_content": "x",
-                "attachments": [attachment],
-            },
-        )
+        r = await send_sealed(alice, shared, "x", attachments=[attachment])
+        assert r.status_code == 201, r.text
 
         # Bob did not upload it, but he can see it, so he may forward it.
-        r = await bob.post(
-            "/messages/",
-            json={
-                "chat_id": str(bobs_other),
-                "encrypted_content": "x",
-                "attachments": [attachment],
-            },
-        )
+        r = await send_sealed(bob, bobs_other, "x", attachments=[attachment])
         assert r.status_code == 201, r.text
     finally:
         await alice.aclose()
@@ -320,14 +285,7 @@ async def test_only_the_sender_may_delete_their_message_and_its_attachment():
         attachment = r.json()["data"]
         key = await _object_key(attachment["url"])
 
-        r = await alice.post(
-            "/messages/",
-            json={
-                "chat_id": str(chat_id),
-                "encrypted_content": "x",
-                "attachments": [attachment],
-            },
-        )
+        r = await send_sealed(alice, chat_id, "x", attachments=[attachment])
         assert r.status_code == 201, r.text
         message_id = r.json()["data"]["_id"]
 
@@ -369,25 +327,11 @@ async def test_deleting_one_forward_does_not_reap_a_still_referenced_attachment(
         attachment = r.json()["data"]
         key = await _object_key(attachment["url"])
 
-        r = await alice.post(
-            "/messages/",
-            json={
-                "chat_id": str(shared),
-                "encrypted_content": "x",
-                "attachments": [attachment],
-            },
-        )
+        r = await send_sealed(alice, shared, "x", attachments=[attachment])
         assert r.status_code == 201, r.text
         original_id = r.json()["data"]["_id"]
 
-        r = await bob.post(
-            "/messages/",
-            json={
-                "chat_id": str(bobs_other),
-                "encrypted_content": "x",
-                "attachments": [attachment],
-            },
-        )
+        r = await send_sealed(bob, bobs_other, "x", attachments=[attachment])
         assert r.status_code == 201, r.text
 
         r = await alice.delete(f"/messages/{original_id}")
@@ -432,20 +376,11 @@ async def test_editing_text_only_leaves_attachments_untouched():
         r = await _upload(alice)
         attachment = r.json()["data"]
 
-        r = await alice.post(
-            "/messages/",
-            json={
-                "chat_id": str(chat_id),
-                "encrypted_content": "x",
-                "attachments": [attachment],
-            },
-        )
+        r = await send_sealed(alice, chat_id, "x", attachments=[attachment])
         assert r.status_code == 201, r.text
         message_id = r.json()["data"]["_id"]
 
-        r = await alice.put(
-            f"/messages/{message_id}", json={"encrypted_content": "edited text"}
-        )
+        r = await edit_sealed(alice, message_id, chat_id, "edited text")
         assert r.status_code == 200, r.text
         data = r.json()["data"]
         assert data["is_edited"] is True
@@ -463,9 +398,7 @@ async def test_editing_to_add_an_owned_attachment_succeeds():
     try:
         chat_id = await _group_with(alice, bob_id)
 
-        r = await alice.post(
-            "/messages/", json={"chat_id": str(chat_id), "encrypted_content": "x"}
-        )
+        r = await send_sealed(alice, chat_id, "x")
         assert r.status_code == 201, r.text
         message_id = r.json()["data"]["_id"]
         assert r.json()["data"]["attachments"] is None
@@ -473,10 +406,7 @@ async def test_editing_to_add_an_owned_attachment_succeeds():
         r = await _upload(alice)
         attachment = r.json()["data"]
 
-        r = await alice.put(
-            f"/messages/{message_id}",
-            json={"encrypted_content": "x", "attachments": [attachment]},
-        )
+        r = await edit_sealed(alice, message_id, chat_id, "x", attachments=[attachment])
         assert r.status_code == 200, r.text
         data = r.json()["data"]
         assert len(data["attachments"]) == 1
@@ -500,26 +430,15 @@ async def test_editing_to_add_an_unowned_unseen_attachment_is_rejected():
 
         r = await _upload(alice)
         attachment = r.json()["data"]
-        await alice.post(
-            "/messages/",
-            json={
-                "chat_id": str(private_chat),
-                "encrypted_content": "x",
-                "attachments": [attachment],
-            },
-        )
+        r = await send_sealed(alice, private_chat, "x", attachments=[attachment])
+        assert r.status_code == 201, r.text
 
-        r = await mallory.post(
-            "/messages/", json={"chat_id": str(mallory_chat), "encrypted_content": "x"}
-        )
+        r = await send_sealed(mallory, mallory_chat, "x")
         assert r.status_code == 201, r.text
         message_id = r.json()["data"]["_id"]
 
         # Mallory knows the key but neither uploaded it nor is in a chat that references it.
-        r = await mallory.put(
-            f"/messages/{message_id}",
-            json={"encrypted_content": "x", "attachments": [attachment]},
-        )
+        r = await edit_sealed(mallory, message_id, mallory_chat, "x", attachments=[attachment])
         assert r.status_code == 403, r.text
         assert r.json()["error_code"] == "ATTACHMENT_FORBIDDEN"
     finally:
@@ -540,21 +459,11 @@ async def test_editing_to_remove_all_attachments_with_explicit_empty_list():
         r = await _upload(alice)
         attachment = r.json()["data"]
 
-        r = await alice.post(
-            "/messages/",
-            json={
-                "chat_id": str(chat_id),
-                "encrypted_content": "x",
-                "attachments": [attachment],
-            },
-        )
+        r = await send_sealed(alice, chat_id, "x", attachments=[attachment])
         assert r.status_code == 201, r.text
         message_id = r.json()["data"]["_id"]
 
-        r = await alice.put(
-            f"/messages/{message_id}",
-            json={"encrypted_content": "x", "attachments": []},
-        )
+        r = await edit_sealed(alice, message_id, chat_id, "x", attachments=[])
         assert r.status_code == 200, r.text
         assert r.json()["data"]["attachments"] == []
     finally:
@@ -564,38 +473,31 @@ async def test_editing_to_remove_all_attachments_with_explicit_empty_list():
 
 async def test_editing_a_legacy_plaintext_message_attachment_still_goes_through_authorization():
     """`_authorize_attachments` must gate an edit regardless of `content_format` — a legacy,
-    unencrypted group message is not a special path that skips it."""
+    unencrypted group message is not a special path that skips it.
+
+    Nothing writes legacy documents any more, so one is planted directly in Mongo the way the old
+    server stored it. Once the chat is encrypted the only permitted edit replaces it with an
+    envelope, and that edit still has to pass attachment authorization.
+    """
     alice, alice_id = await _register_user()
     bob, bob_id = await _register_user()
     mallory, mallory_id = await _register_user()
 
     try:
-        chat_id = await _group_with(alice, bob_id)  # legacy_plaintext: no crypto enabled
+        chat_id = await _group_with(alice, bob_id)
+        message_id = await _insert_legacy(chat_id, alice_id, "x")
 
         mallory_chat = await _group_with(mallory, bob_id, title="Mallory's")
         r = await _upload(mallory)
         attachment = r.json()["data"]
-        await mallory.post(
-            "/messages/",
-            json={
-                "chat_id": str(mallory_chat),
-                "encrypted_content": "x",
-                "attachments": [attachment],
-            },
-        )
-
-        r = await alice.post(
-            "/messages/", json={"chat_id": str(chat_id), "encrypted_content": "x"}
-        )
+        r = await send_sealed(mallory, mallory_chat, "x", attachments=[attachment])
         assert r.status_code == 201, r.text
-        message_id = r.json()["data"]["_id"]
-        assert r.json()["data"]["content_format"] == "legacy_plaintext"
+
+        r = await alice.get(f"/chats/{chat_id}/messages")
+        assert r.json()["data"][0]["content_format"] == "legacy_plaintext"
 
         # Alice neither uploaded Mallory's attachment nor can see it from any chat of her own.
-        r = await alice.put(
-            f"/messages/{message_id}",
-            json={"encrypted_content": "x", "attachments": [attachment]},
-        )
+        r = await edit_sealed(alice, message_id, chat_id, "x", attachments=[attachment])
         assert r.status_code == 403, r.text
         assert r.json()["error_code"] == "ATTACHMENT_FORBIDDEN"
     finally:
@@ -628,14 +530,8 @@ async def test_editing_a_channel_post_attachments_is_rejected_as_not_editable():
         mallory_chat = await _group_with(mallory, subscriber_id, title="Mallory's")
         r = await _upload(mallory)
         attachment = r.json()["data"]
-        await mallory.post(
-            "/messages/",
-            json={
-                "chat_id": str(mallory_chat),
-                "encrypted_content": "x",
-                "attachments": [attachment],
-            },
-        )
+        r = await send_sealed(mallory, mallory_chat, "x", attachments=[attachment])
+        assert r.status_code == 201, r.text
 
         r = await owner.put(
             f"/messages/{message_id}",
@@ -776,14 +672,9 @@ async def test_batch_attachment_download_mixed_statuses():
         attachment = r.json()["data"]
         key = await _object_key(attachment["url"])
 
-        await alice.post(
-            "/messages/",
-            json={
-                "chat_id": str(chat_id),
-                "encrypted_content": "x",
-                "attachments": [attachment],
-            },
-        )
+        r = await send_sealed(alice, chat_id, "x", attachments=[attachment])
+
+        assert r.status_code == 201, r.text
 
         # A second, never-referenced key and a key only referenced in a *different* chat of
         # Alice's own, alongside the one real key.
@@ -792,14 +683,8 @@ async def test_batch_attachment_download_mixed_statuses():
         other_r = await _upload(alice)
         other_attachment = other_r.json()["data"]
         other_key = await _object_key(other_attachment["url"])
-        await alice.post(
-            "/messages/",
-            json={
-                "chat_id": str(other_chat),
-                "encrypted_content": "x",
-                "attachments": [other_attachment],
-            },
-        )
+        r = await send_sealed(alice, other_chat, "x", attachments=[other_attachment])
+        assert r.status_code == 201, r.text
 
         r = await alice.post(
             "/files/attachments/batch",
@@ -839,14 +724,9 @@ async def test_batch_attachment_download_gone_for_a_reaped_object():
         attachment = r.json()["data"]
         key = await _object_key(attachment["url"])
 
-        await alice.post(
-            "/messages/",
-            json={
-                "chat_id": str(chat_id),
-                "encrypted_content": "x",
-                "attachments": [attachment],
-            },
-        )
+        r = await send_sealed(alice, chat_id, "x", attachments=[attachment])
+
+        assert r.status_code == 201, r.text
 
         from app.infrastructure.minio import minio_manager
 

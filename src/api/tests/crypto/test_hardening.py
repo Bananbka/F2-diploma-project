@@ -38,6 +38,7 @@ from app.domains.users.services.auth_service import (
 )
 from app.infrastructure.mongo import connect_to_mongo, mongo_client
 
+from tests.crypto.sealing import edit_sealed, enable, seal_for
 from tests.crypto.test_epoch_api import _group_with, _publish_identity
 from tests.crypto.test_identity_api import _register_user
 from tests.crypto.test_rotation_api import _publish_chain, _seal
@@ -382,7 +383,9 @@ async def test_edit_sets_edited_at():
     bob, bob_id = await _register_user()
     try:
         chat_id = await _group_with(alice, bob_id)
-        r = await alice.post("/messages", json={"chat_id": str(chat_id), "encrypted_content": "a"})
+        r = await alice.post(
+            "/messages", json={"chat_id": str(chat_id), "envelope": await seal_for(alice, chat_id, "a")}
+        )
         msg = r.json()["data"]
         assert msg["edited_at"] is None
 
@@ -390,7 +393,7 @@ async def test_edit_sets_edited_at():
         before = datetime.now(timezone.utc)
         before = before.replace(microsecond=before.microsecond // 1000 * 1000)
 
-        r = await alice.put(f"/messages/{msg['_id']}", json={"encrypted_content": "b"})
+        r = await edit_sealed(alice, msg["_id"], chat_id, "b")
         after = datetime.now(timezone.utc)
         assert r.status_code == 200, r.text
 
@@ -410,11 +413,12 @@ async def test_post_without_trailing_slash_is_not_redirected_and_returns_201():
     bob, bob_id = await _register_user()
     try:
         chat_id = await _group_with(alice, bob_id)
-        body = {"chat_id": str(chat_id), "encrypted_content": "hi"}
+        body = {"chat_id": str(chat_id), "envelope": await seal_for(alice, chat_id, "hi")}
 
         r = await alice.post("/messages", json=body, follow_redirects=False)
         assert r.status_code == 201, r.text
 
+        body = {"chat_id": str(chat_id), "envelope": await seal_for(alice, chat_id, "hi")}
         r = await alice.post("/messages/", json=body, follow_redirects=False)
         assert r.status_code == 201, r.text
     finally:
@@ -428,16 +432,21 @@ async def test_replayed_client_message_id_returns_the_original_with_200():
     try:
         chat_id = await _group_with(alice, bob_id)
         cid = str(uuid.uuid4())
-        body = {"chat_id": str(chat_id), "encrypted_content": "once", "client_message_id": cid}
+        body = {
+            "chat_id": str(chat_id),
+            "envelope": await seal_for(alice, chat_id, "once"),
+            "client_message_id": cid,
+        }
 
         first = await alice.post("/messages", json=body)
         assert first.status_code == 201, first.text
 
         # A retry may re-seal, so the content itself is not compared; the original is returned.
-        second = await alice.post("/messages", json={**body, "encrypted_content": "re-sealed"})
+        resealed = await seal_for(alice, chat_id, "re-sealed")
+        second = await alice.post("/messages", json={**body, "envelope": resealed})
         assert second.status_code == 200, second.text
         assert second.json()["data"]["_id"] == first.json()["data"]["_id"]
-        assert second.json()["data"]["encrypted_content"] == "once"
+        assert second.json()["data"]["envelope"] == first.json()["data"]["envelope"]
         assert second.json()["data"]["client_message_id"] == cid
 
         history = await alice.get(f"/chats/{chat_id}/messages")
@@ -453,7 +462,11 @@ async def test_reusing_a_client_message_id_for_a_different_message_is_a_conflict
     try:
         chat_id = await _group_with(alice, bob_id)
         cid = str(uuid.uuid4())
-        body = {"chat_id": str(chat_id), "encrypted_content": "one", "client_message_id": cid}
+        body = {
+            "chat_id": str(chat_id),
+            "envelope": await seal_for(alice, chat_id, "one"),
+            "client_message_id": cid,
+        }
         assert (await alice.post("/messages", json=body)).status_code == 201
 
         for changed in (
@@ -482,9 +495,11 @@ async def test_replay_is_broadcast_again_so_a_lost_publish_is_recoverable():
     bob, bob_id = await _register_user()
     try:
         chat_id = await _group_with(alice, bob_id)
+        # Sealed (and so encryption enabled and the chain published) before the socket opens, so
+        # the only events it sees are the two message broadcasts.
         body = {
             "chat_id": str(chat_id),
-            "encrypted_content": "once",
+            "envelope": await seal_for(alice, chat_id, "once"),
             "client_message_id": str(uuid.uuid4()),
         }
 
@@ -555,9 +570,10 @@ async def test_replay_by_a_removed_member_is_forbidden():
     bob, bob_id = await _register_user()
     try:
         chat_id = await _group_with(alice, bob_id)
+        await enable(alice, chat_id)  # only the owner may enable a group
         body = {
             "chat_id": str(chat_id),
-            "encrypted_content": "x",
+            "envelope": await seal_for(bob, chat_id, "x"),
             "client_message_id": str(uuid.uuid4()),
         }
         assert (await bob.post("/messages", json=body)).status_code == 201
@@ -580,7 +596,7 @@ async def test_concurrent_sends_with_one_client_message_id_store_one_message():
         chat_id = await _group_with(alice, bob_id)
         body = {
             "chat_id": str(chat_id),
-            "encrypted_content": "race",
+            "envelope": await seal_for(alice, chat_id, "race"),
             "client_message_id": str(uuid.uuid4()),
         }
 
@@ -601,13 +617,18 @@ async def test_client_message_id_is_scoped_to_sender_and_checked_after_authoriza
     try:
         chat_id = await _group_with(alice, bob_id)
         cid = str(uuid.uuid4())
-        body = {"chat_id": str(chat_id), "encrypted_content": "x", "client_message_id": cid}
+        body = {
+            "chat_id": str(chat_id),
+            "envelope": await seal_for(alice, chat_id, "x"),
+            "client_message_id": cid,
+        }
 
         first = await alice.post("/messages", json=body)
         assert first.status_code == 201, first.text
 
         # Another member reusing the id is a different message.
-        other = await bob.post("/messages", json=body)
+        bob_body = {**body, "envelope": await seal_for(bob, chat_id, "x")}
+        other = await bob.post("/messages", json=bob_body)
         assert other.status_code == 201, other.text
         assert other.json()["data"]["_id"] != first.json()["data"]["_id"]
 
@@ -638,8 +659,8 @@ async def test_a_new_client_message_id_does_not_bypass_content_validation():
                 "client_message_id": str(uuid.uuid4()),
             },
         )
-        assert r.status_code == 400, r.text
-        assert r.json()["error_code"] == "ENVELOPE_NOT_ALLOWED"
+        assert r.status_code == 409, r.text
+        assert r.json()["error_code"] == "CRYPTO_NOT_ENABLED"
     finally:
         await alice.aclose()
         await bob.aclose()

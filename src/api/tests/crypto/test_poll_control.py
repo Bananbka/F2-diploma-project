@@ -26,6 +26,7 @@ from tests.crypto.test_channel_api import _channel_with, _post
 from tests.crypto.test_epoch_api import _group_with, _publish_identity
 from tests.crypto.test_event_stream import _connect, _recv_type
 from tests.crypto.test_identity_api import _register_user
+from tests.crypto.test_message_crud_api import _insert_legacy
 from tests.crypto.test_read_state import _mark_read
 from tests.crypto.test_rotation_api import _publish_chain, _seal
 
@@ -183,9 +184,10 @@ async def test_channel_cannot_carry_control(ctx):
 
 
 async def test_legacy_chat_cannot_carry_control(ctx):
+    """A chat without crypto settings can hold only legacy documents (nothing writes new ones), and
+    a control message aimed at one is refused before any content check runs."""
     legacy = await _group_with(ctx.alice, ctx.bob_id, title="Legacy")
-    r = await ctx.alice.post("/messages/", json={"chat_id": str(legacy), "encrypted_content": "hi"})
-    legacy_msg = r.json()["data"]["_id"]
+    legacy_msg = await _insert_legacy(legacy, ctx.alice_id, "hi")
     r = await ctx.alice.post("/messages/", json={
         "chat_id": str(legacy), "encrypted_content": "vote",
         "is_control": True, "poll_message_id": legacy_msg,

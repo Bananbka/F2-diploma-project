@@ -13,6 +13,7 @@ import uuid
 import websockets
 
 from tests.crypto.test_authorization import _cookie_header, _private_chat
+from tests.crypto.sealing import send_sealed
 from tests.crypto.test_epoch_api import _group_with
 from tests.crypto.test_identity_api import _register_user
 
@@ -21,10 +22,7 @@ WS_BASE = "ws://localhost:8000/ws"
 
 
 async def _send_message(client, chat_id) -> str:
-    r = await client.post(
-        "/messages/",
-        json={"chat_id": str(chat_id), "encrypted_content": "hello"},
-    )
+    r = await send_sealed(client, chat_id, "hello")
     assert r.status_code == 201, r.text
     return r.json()["data"]["_id"]
 

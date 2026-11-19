@@ -6,6 +6,7 @@ coverage: it is the reason an admin cannot remove an owner, and it is the thing 
 add/remove/change-role gates on.
 """
 
+from tests.crypto.sealing import send_sealed
 from tests.crypto.test_identity_api import _register_user
 
 BASE = "http://localhost:8000"
@@ -308,10 +309,7 @@ async def test_chat_list_orders_most_recently_active_first():
         second = await _group(alice, [carol_id], title="Second")
 
         # Sending touches the chat, so it should jump to the top of the list.
-        r = await alice.post(
-            "/messages/",
-            json={"chat_id": first["id"], "encrypted_content": "hi"},
-        )
+        r = await send_sealed(alice, first["id"], "hi")
         assert r.status_code == 201, r.text
 
         r = await alice.get("/chats/")
@@ -320,10 +318,7 @@ async def test_chat_list_orders_most_recently_active_first():
         assert titles.index("First") < titles.index("Second")
 
         # Now touch the second one and confirm the order flips.
-        r = await alice.post(
-            "/messages/",
-            json={"chat_id": second["id"], "encrypted_content": "hi"},
-        )
+        r = await send_sealed(alice, second["id"], "hi")
         assert r.status_code == 201, r.text
 
         r = await alice.get("/chats/")
@@ -342,20 +337,17 @@ async def test_chat_list_reports_unread_count_and_last_message():
     try:
         chat = await _group(alice, [bob_id])
 
-        r = await alice.post(
-            "/messages/", json={"chat_id": chat["id"], "encrypted_content": "first"}
-        )
+        r = await send_sealed(alice, chat["id"], "first")
         assert r.status_code == 201, r.text
-        r = await alice.post(
-            "/messages/", json={"chat_id": chat["id"], "encrypted_content": "second"}
-        )
+        r = await send_sealed(alice, chat["id"], "second")
         assert r.status_code == 201, r.text
+        second_id = r.json()["data"]["_id"]
 
         r = await bob.get("/chats/")
         assert r.status_code == 200, r.text
         entry = next(c for c in r.json()["data"] if c["id"] == chat["id"])
         assert entry["unread_count"] == 2
-        assert entry["last_message"]["encrypted_content"] == "second"
+        assert entry["last_message"]["_id"] == second_id
 
         # Alice sent both, so from her side they are not unread.
         r = await alice.get("/chats/")

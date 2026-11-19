@@ -3,7 +3,8 @@
 Every envelope here goes through a real `/crypto/chats/{id}/enable` + published sender key, the
 same path `test_rotation_api.py` and `test_authorization.py` use. A private chat has no
 `ChatCryptoSettings` row until `enable` is called, and `send_message`/`update_message` now reject
-any envelope on a chat without one (`ENVELOPE_NOT_ALLOWED`) rather than accepting it unverified —
+any envelope on a chat without one (`CRYPTO_NOT_ENABLED`), and plaintext anywhere
+(`ENVELOPE_REQUIRED`), rather than accepting it unverified —
 so an ad hoc envelope sealed without going through `enable` would no longer be accepted here, and
 testing that shape would be testing the bug the fix closes, not the feature.
 """
@@ -90,8 +91,11 @@ async def test_sealed_message_round_trip_and_storage_is_opaque():
         await bob.aclose()
 
 
-async def test_legacy_plaintext_still_works_and_is_flagged():
-    """Existing group flows must keep working, but must not claim to be encrypted."""
+async def test_plaintext_is_refused_in_an_unenabled_group():
+    """A group nobody has enabled encryption for used to accept and store plaintext (B-M1).
+
+    It is not a plaintext chat; it is a chat that cannot be written to until encryption is on.
+    """
     alice, alice_id = await _register_user()
     bob, bob_id = await _register_user()
     try:
@@ -104,12 +108,11 @@ async def test_legacy_plaintext_still_works_and_is_flagged():
         r = await alice.post("/messages/", json={
             "chat_id": chat_id, "encrypted_content": "hello in the clear",
         })
-        assert r.status_code == 201, r.text
+        assert r.status_code == 400, r.text
+        assert r.json()["error_code"] == "ENVELOPE_REQUIRED"
 
-        data = r.json()["data"]
-        # The old code reported is_encrypted=True here because the computed value was dropped.
-        assert data["content_format"] == "legacy_plaintext"
-        assert data["is_encrypted"] is False
+        r = await bob.get(f"/chats/{chat_id}/messages")
+        assert r.json()["data"] == []
     finally:
         await alice.aclose()
         await bob.aclose()

@@ -16,9 +16,11 @@ What happens instead, all in **one PostgreSQL transaction**:
     their labels and last-seen times erased, and grants addressed to those devices are removed;
   * the account leaves every group and channel, and each encrypted chat opens a new key epoch in the
     same transaction (the departed account keeps every key it held, so the chat must re-key);
-  * a group or channel owner hands ownership to the oldest admin, else the oldest member; a chat
-    nobody else is in is deleted (its messages and their attachments are removed from Mongo and the
-    object store *before* the commit, the same order `chat_services.delete_chat` uses);
+  * a group or channel owner hands ownership to the oldest admin; failing that, a group passes to
+    its oldest member, while a channel is deleted — its subscribers have no rights, and promoting
+    one would be an escalation the owner never chose. A chat nobody else is in is deleted too (in
+    both cases its messages and their attachments are removed from Mongo and the object store
+    *before* the commit, the same order `chat_services.delete_chat` uses);
   * private 1:1 chats keep the tombstone as a participant so the peer still sees who the history is
     with, but become read-only (see `messages_service.ensure_peer_not_deleted`); its read marker and
     mute state are cleared; a private chat whose peer is also deleted is deleted;
@@ -251,9 +253,24 @@ async def _delete_account_once(
             effect = ChatEffect(chat_id, "left", live_ids)
 
             if role is ParticipantRole.OWNER:
-                successor = next(
-                    (o for o in live if o.role is ParticipantRole.ADMIN), live[0]
-                )
+                admin = next((o for o in live if o.role is ParticipantRole.ADMIN), None)
+
+                if admin is None and chat_type is ChatType.CHANNEL:
+                    # A channel's members are subscribers with no rights at all; promoting the
+                    # oldest one would hand the channel — posting as it, its roster, deleting it —
+                    # to someone the owner never chose. With no admin to inherit it, the channel
+                    # goes with its owner, through the same "deleted" effect as a chat nobody else
+                    # is in: the row is removed here, its messages and attachments are purged
+                    # before the commit, and every member gets `chat_deleted` afterwards.
+                    await db.execute(delete(Chat).where(Chat.id == chat_id))
+                    outcome.effects.append(
+                        ChatEffect(chat_id, "deleted", [o.user_id for o in others])
+                    )
+                    continue
+
+                # A group's oldest member already reads and writes everything in it, so
+                # succession there is a continuity choice rather than an escalation.
+                successor = admin or live[0]
                 await db.execute(
                     update(ChatParticipant)
                     .where(

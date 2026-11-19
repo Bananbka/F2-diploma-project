@@ -25,6 +25,7 @@ from app.infrastructure.services.event_publisher import (
     stream_key,
 )
 
+from tests.crypto.sealing import seal_for
 from tests.crypto.test_epoch_api import _group_with
 from tests.crypto.test_identity_api import _register_user, rate_limit_bypass_headers
 from tests.crypto.test_message_crud_api import _send
@@ -103,10 +104,10 @@ async def test_live_events_carry_stream_id():
     alice, _, bob, bob_id, chat_id = await _pair()
     try:
         async with _connect(bob) as ws:
-            await _send(alice, chat_id, "one")
+            sent = await _send(alice, chat_id, "one")
             event = await _recv_type(ws, "new_message")
             assert parse_stream_id(event["stream_id"]) is not None
-            assert event["payload"]["encrypted_content"] == "one"
+            assert _mid(event["payload"]) == _mid(sent)
     finally:
         await alice.aclose()
         await bob.aclose()
@@ -130,9 +131,9 @@ async def test_replay_after_disconnect_returns_missed_events_in_order():
             assert ids[0] > parse_stream_id(cursor)  # exclusive start
 
             # Then live, with no duplicate of anything replayed.
-            await _send(alice, chat_id, "m5")
+            m5 = await _send(alice, chat_id, "m5")
             live = await _recv_type(ws, "new_message")
-            assert live["payload"]["encrypted_content"] == "m5"
+            assert _mid(live["payload"]) == _mid(m5)
             assert parse_stream_id(live["stream_id"]) > ids[-1]
     finally:
         await alice.aclose()
@@ -159,8 +160,8 @@ async def test_cursor_at_head_replays_nothing_and_goes_live():
 
         async with _connect(bob, cursor) as ws:
             assert await _silent(ws)
-            await _send(alice, chat_id, "m2")
-            assert (await _recv_type(ws, "new_message"))["payload"]["encrypted_content"] == "m2"
+            m2 = await _send(alice, chat_id, "m2")
+            assert _mid((await _recv_type(ws, "new_message"))["payload"]) == _mid(m2)
     finally:
         await alice.aclose()
         await bob.aclose()
@@ -185,8 +186,8 @@ async def test_trimmed_cursor_requires_resync(redis_client):
             assert event["payload"]["cursor"] == newest
             assert event.get("stream_id") is None
             # And the socket is still usable afterwards.
-            await _send(alice, chat_id, "m5")
-            assert (await _recv_type(ws, "new_message"))["payload"]["encrypted_content"] == "m5"
+            m5 = await _send(alice, chat_id, "m5")
+            assert _mid((await _recv_type(ws, "new_message"))["payload"]) == _mid(m5)
     finally:
         await alice.aclose()
         await bob.aclose()
@@ -259,6 +260,9 @@ async def test_publish_failure_after_save_keeps_201_and_message():
     from app.infrastructure.services.event_publisher import get_event_publisher
 
     alice, alice_id, bob, bob_id, chat_id = await _pair()
+    # Sealed over the real server first: enabling, publishing the chain and the envelope itself
+    # do not involve the publisher under test.
+    envelope = await seal_for(alice, chat_id, "survives")
 
     class BrokenPublisher:
         async def publish_durable(self, *a, **kw):
@@ -278,14 +282,15 @@ async def test_publish_failure_after_save_keeps_201_and_message():
             ) as inproc:
                 r = await inproc.post(
                     "/messages/",
-                    json={"chat_id": str(chat_id), "encrypted_content": "survives"},
+                    json={"chat_id": str(chat_id), "envelope": envelope},
                 )
                 assert r.status_code == 201, r.text
+                saved_id = r.json()["data"]["_id"]
 
                 # Retrying must not duplicate: the client has no reason to, because it got a 201.
                 r2 = await inproc.get(f"/chats/{chat_id}/messages")
-                contents = [m["encrypted_content"] for m in r2.json()["data"]]
-                assert contents.count("survives") == 1
+                ids = [m["_id"] for m in r2.json()["data"]]
+                assert ids.count(saved_id) == 1
     finally:
         app.dependency_overrides.pop(get_event_publisher, None)
         await alice.aclose()

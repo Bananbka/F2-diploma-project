@@ -271,8 +271,11 @@ class MessageResponse(BaseModel):
 class MessageCreateRequest(BaseModel):
     """Send a message.
 
-    Supply exactly one content form: `envelope` for an encrypted chat, `channel_post` for a
-    broadcast channel, or `encrypted_content` for a legacy unencrypted chat.
+    Supply exactly one content form: `envelope` for a private or group chat, `channel_post` for a
+    broadcast channel. `encrypted_content` is still accepted by the schema but always refused by
+    the service with ENVELOPE_REQUIRED: the server no longer writes legacy plaintext documents, and
+    keeping the field lets an old client get that explicit refusal rather than a bare 422. A chat
+    must have had `POST /crypto/chats/{id}/enable` called before its first envelope is accepted.
 
     `client_message_id` makes a send idempotent: repeating the same (chat, sender, id) returns the
     already-stored message instead of creating a second one.

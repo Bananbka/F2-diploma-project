@@ -23,6 +23,7 @@ from app.domains.messages.schemas.messages_schemas import (
     ContentFormat,
     MessageCreateRequest,
     MessageDocument,
+    MessageEnvelope,
     MessageResponse,
     MessageUpdateRequest,
 )
@@ -207,6 +208,29 @@ def resolve_content_format(doc: dict, chat: Chat) -> ContentFormat:
         if chat.chat_type == ChatType.PRIVATE
         else ContentFormat.LEGACY_PLAINTEXT
     )
+
+
+def _require_encrypted_chat(is_encrypted_chat: bool, envelope: MessageEnvelope | None) -> None:
+    """Refuse any private/group write that is not a sealed envelope in an encrypted chat.
+
+    Checked before the chat's crypto state on purpose: plaintext is refused as ENVELOPE_REQUIRED
+    whether or not encryption has been enabled yet, so "this chat has no settings" can never be
+    read as "this chat accepts plaintext". An envelope for a chat with no epoch cannot be verified
+    against anything, so it is refused too, telling the client to enable encryption first.
+    """
+    if envelope is None:
+        raise AppException(
+            400,
+            "ENVELOPE_REQUIRED",
+            "Messages must be end-to-end encrypted; send an envelope rather than plaintext.",
+        )
+    if not is_encrypted_chat:
+        raise AppException(
+            409,
+            "CRYPTO_NOT_ENABLED",
+            "Encryption has not been enabled for this chat yet; "
+            "call POST /crypto/chats/{id}/enable before sending.",
+        )
 
 
 async def _validate_envelope(db, chat, user_id, settings, envelope) -> None:
@@ -631,22 +655,19 @@ async def send_message(
             collection, chat, user_id, message_in, is_encrypted_chat
         )
 
+    # The server never writes a LEGACY_* document. Private and group chats accept only a sealed
+    # envelope, and only once the chat has crypto settings — a chat nobody has enabled encryption
+    # for is not a plaintext chat, it is a chat that cannot be written to yet. Without this, a
+    # modified client could post readable content into a fresh chat before the honest client's
+    # first-open `POST /crypto/chats/{id}/enable`, and a group whose owner never enabled encryption
+    # stayed readable to the server forever. Legacy history remains readable; nothing adds to it.
     if chat.chat_type == ChatType.CHANNEL:
         await _validate_channel_post(db, chat, user_id, message_in.channel_post)
         content_format = ContentFormat.CHANNEL_SIGNED_V1
-    elif is_encrypted_chat:
+    else:
+        _require_encrypted_chat(is_encrypted_chat, message_in.envelope)
         await _validate_envelope(db, chat, user_id, settings, message_in.envelope)
         content_format = ContentFormat.SENDER_KEYS_V1
-    elif message_in.envelope is not None:
-        raise AppException(
-            400,
-            "ENVELOPE_NOT_ALLOWED",
-            "This chat is not end-to-end encrypted; an envelope cannot be verified here.",
-        )
-    elif chat.chat_type == ChatType.PRIVATE:
-        content_format = ContentFormat.LEGACY_RSA
-    else:
-        content_format = ContentFormat.LEGACY_PLAINTEXT
 
     new_message = MessageDocument(
         **message_in.model_dump(),
@@ -829,52 +850,43 @@ async def update_message(
     # on the signature verifying. None of that ran here, so an edit was a complete bypass: a member
     # could re-seal under a superseded epoch — readable by whoever was just removed — claim another
     # member's chain, or attach a signature that verifies against nothing.
-    if is_encrypted_chat:
-        await _validate_envelope(db, chat, user_id, chat_settings, message_in.envelope)
-    elif message_in.envelope is not None:
+    #
+    # Same rule as the send path: an edit is new content, so it must be a sealed envelope in an
+    # encrypted chat. A legacy document can still be read, and can be edited only by replacing it
+    # with an envelope once the chat is encrypted — never by writing fresh plaintext over it.
+    _require_encrypted_chat(is_encrypted_chat, message_in.envelope)
+    await _validate_envelope(db, chat, user_id, chat_settings, message_in.envelope)
+
+    existing = msg.get("envelope")
+
+    # An index only means anything within one chain. A message key is derived from its chain key,
+    # and every sender_key_id has its own random chain key, so index 0 of a new chain is a
+    # different key from index 0 of the old one — no (key, nonce) pair is repeated.
+    #
+    # Scoping the check to a matching chain is not a relaxation, it is what makes it correct.
+    # Comparing bare indices used to work only because a device could publish one chain per epoch;
+    # since that constraint was lifted, a client whose in-memory chain is gone mints a fresh one
+    # starting at 0, and every edit after a reload was rejected out of hand.
+    same_chain = (
+        existing
+        and str(existing.get("skid")) == str(message_in.envelope.skid)
+        and existing.get("epoch") == message_in.envelope.epoch
+    )
+
+    if same_chain and message_in.envelope.idx <= existing.get("idx", -1):
         raise AppException(
             400,
-            "ENVELOPE_NOT_ALLOWED",
-            "This chat is not end-to-end encrypted; an envelope cannot be verified here.",
+            "CHAIN_INDEX_REUSED",
+            "An edit must use a fresh chain index; reusing one would repeat a message key.",
         )
 
-    if message_in.envelope is not None:
-        existing = msg.get("envelope")
-
-        # An index only means anything within one chain. A message key is derived from its chain key,
-        # and every sender_key_id has its own random chain key, so index 0 of a new chain is a
-        # different key from index 0 of the old one — no (key, nonce) pair is repeated.
-        #
-        # Scoping the check to a matching chain is not a relaxation, it is what makes it correct.
-        # Comparing bare indices used to work only because a device could publish one chain per epoch;
-        # since that constraint was lifted, a client whose in-memory chain is gone mints a fresh one
-        # starting at 0, and every edit after a reload was rejected out of hand.
-        same_chain = (
-            existing
-            and str(existing.get("skid")) == str(message_in.envelope.skid)
-            and existing.get("epoch") == message_in.envelope.epoch
-        )
-
-        if same_chain and message_in.envelope.idx <= existing.get("idx", -1):
-            raise AppException(
-                400,
-                "CHAIN_INDEX_REUSED",
-                "An edit must use a fresh chain index; reusing one would repeat a message key.",
-            )
-
-        update = {
-            "envelope": message_in.envelope.model_dump(mode="json"),
-            "encrypted_content": None,
-            "content_format": ContentFormat.SENDER_KEYS_V1.value,
-            "is_edited": True,
-            "edited_at": datetime.now(timezone.utc),
-        }
-    else:
-        update = {
-            "encrypted_content": message_in.encrypted_content,
-            "is_edited": True,
-            "edited_at": datetime.now(timezone.utc),
-        }
+    update = {
+        "envelope": message_in.envelope.model_dump(mode="json"),
+        "encrypted_content": None,
+        "content_format": ContentFormat.SENDER_KEYS_V1.value,
+        "is_edited": True,
+        "edited_at": datetime.now(timezone.utc),
+    }
 
     if attachments_supplied:
         # Whole-list replacement, not a merge — mirrors `PATCH /chat-folder/{id}` replacing
