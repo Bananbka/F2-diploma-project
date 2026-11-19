@@ -14,12 +14,16 @@ describe('KeyChangeStateService', () => {
     let service: KeyChangeStateService;
     let trust: TrustStoreService;
 
+    /** Injectors made by `reload`, destroyed after each test so their storage listeners go too. */
+    let reloaded: Injector[] = [];
+
     /** A "page reload": fresh trust and key-change services over the same storage. */
     function reload(): { keyChange: KeyChangeStateService; trust: TrustStoreService } {
         const injector = Injector.create({
             parent: TestBed.inject(Injector),
             providers: [KeyChangeStateService, TrustStoreService],
         });
+        reloaded.push(injector);
         return { keyChange: injector.get(KeyChangeStateService), trust: injector.get(TrustStoreService) };
     }
 
@@ -30,7 +34,11 @@ describe('KeyChangeStateService', () => {
         trust = TestBed.inject(TrustStoreService);
     });
 
-    afterEach(() => localStorage.clear());
+    afterEach(() => {
+        reloaded.forEach((injector) => (injector as unknown as { destroy(): void }).destroy());
+        reloaded = [];
+        localStorage.clear();
+    });
 
     /**
      * Observations are what let a key change block sending without a screen asking: the key store
@@ -68,7 +76,12 @@ describe('KeyChangeStateService', () => {
             trust.markVerified(ME, PEER, NUMBER_A);
             service.observe(ME, PEER, NUMBER_B);
 
-            expect(localStorage.getItem('ns.trusted_peers')).not.toContain(NUMBER_B);
+            for (let i = 0; i < localStorage.length; i++) {
+                const key = localStorage.key(i)!;
+                if (key.startsWith('ns.')) {
+                    expect(localStorage.getItem(key)).withContext(key).not.toContain(NUMBER_B);
+                }
+            }
             expect(reload().keyChange.observedState(ME, PEER)).toBeNull();
 
             service.clearSession();
@@ -164,7 +177,9 @@ describe('KeyChangeStateService', () => {
                 .withContext('no event yet')
                 .toBeNull();
 
-            window.dispatchEvent(new StorageEvent('storage', { key: 'ns.refusals' }));
+            window.dispatchEvent(
+                new StorageEvent('storage', { key: 'ns.refusals', newValue: localStorage.getItem('ns.refusals') })
+            );
 
             expect(service.refusalFor(CHAT_B, ME, PEER)?.current).toBe(NUMBER_C);
         });
@@ -205,6 +220,72 @@ describe('KeyChangeStateService', () => {
 
             expect(() => reload().keyChange.refusalFor(CHAT_B, ME, PEER)).not.toThrow();
             expect(reload().keyChange.refusalFor(CHAT_B, ME, PEER)).toBeNull();
+        });
+
+        /** C1: refusals fail closed across tabs — another tab's storage activity never drops one. */
+        it("keeps this tab's refusals when another tab clears storage, and writes them back", () => {
+            localStorage.clear();
+            window.dispatchEvent(new StorageEvent('storage', { key: null }));
+
+            expect(service.refusalFor(CHAT_A, ME, PEER)?.current).toBe(NUMBER_B);
+            expect(localStorage.getItem('ns.refusals'))
+                .withContext('re-persisted, so a reload here still remembers it')
+                .toContain(CHAT_A);
+        });
+
+        it("keeps this tab's refusals when another tab removes the key", () => {
+            localStorage.removeItem('ns.refusals');
+            window.dispatchEvent(new StorageEvent('storage', { key: 'ns.refusals', newValue: null }));
+
+            expect(service.refusalFor(CHAT_A, ME, PEER)?.current).toBe(NUMBER_B);
+        });
+
+        it("keeps a refusal this tab could not persist when another tab's write arrives", () => {
+            const setItem = spyOn(Storage.prototype, 'setItem').and.throwError('QuotaExceededError');
+            service.recordRefusal(CHAT_B, ME, PEER, NUMBER_C, NUMBER_A);
+            setItem.and.callThrough();
+
+            // Another tab rewrites the key from its own (persisted) view, which lacks CHAT_B.
+            const stored = localStorage.getItem('ns.refusals')!;
+            window.dispatchEvent(new StorageEvent('storage', { key: 'ns.refusals', newValue: stored }));
+
+            expect(service.refusalFor(CHAT_B, ME, PEER)?.current).toBe(NUMBER_C);
+            expect(service.refusalFor(CHAT_A, ME, PEER)?.current).toBe(NUMBER_B);
+        });
+
+        it("adopts another tab's cleared refusal", () => {
+            const other = reload().keyChange;
+            other.clearRefusal(CHAT_A, ME, PEER);
+            window.dispatchEvent(
+                new StorageEvent('storage', { key: 'ns.refusals', newValue: localStorage.getItem('ns.refusals') })
+            );
+
+            expect(service.refusalFor(CHAT_A, ME, PEER)).toBeNull();
+        });
+
+        /** C2: a lapsed refusal is deleted from storage, not merely ignored. */
+        it('prunes lapsed refusals from storage on the next write', () => {
+            trust.markVerified(ME, PEER, NUMBER_B);
+            const OTHER = 'f0000000-0000-4000-8000-000000000002';
+            service.recordRefusal(CHAT_B, ME, OTHER, NUMBER_C, NUMBER_A);
+
+            const stored = JSON.parse(localStorage.getItem('ns.refusals')!) as Record<string, unknown>;
+            expect(Object.keys(stored)).toEqual([`${CHAT_B}|${ME}:${OTHER}`]);
+        });
+
+        it('prunes lapsed refusals once at construction', () => {
+            trust.markVerified(ME, PEER, NUMBER_B);
+            expect(localStorage.getItem('ns.refusals')).withContext('nothing written since').toContain(CHAT_A);
+
+            reload();
+
+            expect(JSON.parse(localStorage.getItem('ns.refusals')!)).toEqual({});
+        });
+
+        it('keeps an outstanding refusal at construction', () => {
+            reload();
+
+            expect(localStorage.getItem('ns.refusals')).toContain(CHAT_A);
         });
 
         it('carries whether our own devices were part of the change', () => {

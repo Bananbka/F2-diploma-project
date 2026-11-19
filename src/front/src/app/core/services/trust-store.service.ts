@@ -1,4 +1,7 @@
-import { DestroyRef, inject, Injectable, signal } from '@angular/core';
+import { Injectable, signal } from '@angular/core';
+
+import { bindStorageKey } from './storage-sync';
+import { pairKey, safetyDigits } from './trust-keys';
 
 const STORAGE_KEY = 'ns.trusted_peers';
 
@@ -75,17 +78,20 @@ export class TrustStoreService {
     private forgetGuard: ((selfId: string, peerId: string) => boolean) | null = null;
 
     constructor() {
-        this.bindStorageEvents();
+        // Another tab's write arrives as a `storage` event (never delivered to the tab that wrote
+        // it). Without this a second tab kept the records it read at startup for its whole life, and
+        // sent to a peer verified elsewhere as if unverified.
+        bindStorageKey(STORAGE_KEY, () => this.refresh());
     }
 
     stateFor(selfId: string, peerId: string, currentSafetyNumber: string): TrustState {
-        const key = this.key(selfId, peerId);
+        const key = pairKey(selfId, peerId);
         const record = key ? this.records()[key] : undefined;
 
         if (!record) {
             return { kind: 'unverified' };
         }
-        if (this.normalise(record.safetyNumber) !== this.normalise(currentSafetyNumber)) {
+        if (safetyDigits(record.safetyNumber) !== safetyDigits(currentSafetyNumber)) {
             return { kind: 'changed', previous: record.safetyNumber, verifiedAt: record.verifiedAt };
         }
         return { kind: 'verified', verifiedAt: record.verifiedAt };
@@ -115,7 +121,7 @@ export class TrustStoreService {
      * remembered.
      */
     markVerified(selfId: string, peerId: string, safetyNumber: string): TrustWriteResult {
-        const key = this.key(selfId, peerId);
+        const key = pairKey(selfId, peerId);
         if (!key) {
             return 'unsaved';
         }
@@ -134,7 +140,7 @@ export class TrustStoreService {
      * out, never forgetting the old one.
      */
     forget(selfId: string, peerId: string): TrustWriteResult {
-        const key = this.key(selfId, peerId);
+        const key = pairKey(selfId, peerId);
         if (!key) {
             return 'unsaved';
         }
@@ -147,7 +153,14 @@ export class TrustStoreService {
         return this.write(next);
     }
 
-    /** See `forgetGuard`. */
+    /**
+     * See `forgetGuard`. Installed by `KeyChangeStateService`'s constructor, so the guard exists only
+     * once that service has been constructed. Nothing here can enforce that order (this service is
+     * that one's dependency, not the other way round): it holds because `KeyStoreService` injects
+     * `KeyChangeStateService`, and every screen offering "Clear verification" injects the key store
+     * (directly or through `ChatStoreService`) before it can call `forget`. A new caller of `forget`
+     * that bypasses both must inject `KeyChangeStateService` itself, or clearing is unguarded.
+     */
     setForgetGuard(guard: (selfId: string, peerId: string) => boolean): void {
         this.forgetGuard = guard;
     }
@@ -158,42 +171,9 @@ export class TrustStoreService {
      * since — of any number — is recognisable as newer than the refusal.
      */
     recordStamp(selfId: string, peerId: string): string | null {
-        const key = this.key(selfId, peerId);
+        const key = pairKey(selfId, peerId);
         const record = key ? this.records()[key] : undefined;
-        return record ? `${record.verifiedAt}|${this.normalise(record.safetyNumber)}` : null;
-    }
-
-    /** Null when either id is empty: such a key would put unrelated pairs in one shared bucket. */
-    private key(selfId: string, peerId: string): string | null {
-        return selfId && peerId ? `${selfId}:${peerId}` : null;
-    }
-
-    private normalise(value: string): string {
-        return value.replace(/\D/g, '');
-    }
-
-    /**
-     * Another tab's write arrives as a `storage` event (never delivered to the tab that wrote it).
-     * Without this a second tab kept the records it read at startup for its whole life, and sent to a
-     * peer verified elsewhere as if unverified. `key === null` is `localStorage.clear()`.
-     *
-     * Guarded for SSR, and for specs that construct the service with `new` outside any injector.
-     */
-    private bindStorageEvents(): void {
-        if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') {
-            return;
-        }
-        const listener = (event: StorageEvent): void => {
-            if (event.key === STORAGE_KEY || event.key === null) {
-                this.refresh();
-            }
-        };
-        window.addEventListener('storage', listener);
-        try {
-            inject(DestroyRef).onDestroy(() => window.removeEventListener('storage', listener));
-        } catch {
-            // Constructed outside an injection context: nothing owns this instance's lifetime.
-        }
+        return record ? `${record.verifiedAt}|${safetyDigits(record.safetyNumber)}` : null;
     }
 
     /**

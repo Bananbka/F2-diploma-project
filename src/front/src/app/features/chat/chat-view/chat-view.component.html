@@ -166,6 +166,14 @@
             >
                 Review devices
             </button>
+            <button
+                type="button"
+                class="device-notice-dismiss"
+                aria-label="Dismiss"
+                (click)="dismissOwnDevicesAdded()"
+            >
+                <lucide-icon [img]="closeIcon" />
+            </button>
         </div>
     }
 

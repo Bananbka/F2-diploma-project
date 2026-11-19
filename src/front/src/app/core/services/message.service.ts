@@ -4,7 +4,7 @@ import { firstValueFrom } from 'rxjs';
 import { v4 as uuidv4 } from 'uuid';
 
 import { signChannelPost, verifyChannelPost } from '../crypto/channel';
-import { openMessage, sealMessage } from '../crypto/envelope';
+import { isValidChainIndex, openMessage, sealMessage, verifyEnvelopeSignature } from '../crypto/envelope';
 import { b64uDecode, b64uEncode, fromUtf8, utf8 } from '../crypto/primitives';
 import {
     ChatKeys,
@@ -207,8 +207,13 @@ export class MessageService {
     /** Envelope index each cached plaintext was opened from, so an older version cannot replace it. */
     private readonly openedIdx = new Map<string, number>();
     private readonly inflight = new Map<string, Promise<DecryptedMessage>>();
-    /** Failed results that only mean "index already consumed"; never cached as a verdict. */
-    private readonly consumedFailures = new WeakSet<DecryptedMessage>();
+    /**
+     * Failed results that are not a verdict on the message itself, so never cached: "index already
+     * consumed", and refusals made before the ratchet was touched (no signing key, bad signature).
+     * The latter consumed nothing, so a later look at the same id (e.g. the genuine envelope after
+     * the server first served a forged one under that id) must get a fresh attempt.
+     */
+    private readonly uncachedFailures = new WeakSet<DecryptedMessage>();
 
     /**
      * The freshest known reaction/pin state for a message, keyed by id, independent of whether
@@ -619,7 +624,7 @@ export class MessageService {
 
         // A failure that is merely "this index was already consumed" says nothing about the
         // message itself, so it is reported but not remembered as its verdict.
-        if (withMeta.status !== 'no_key' && !this.consumedFailures.has(result)) {
+        if (withMeta.status !== 'no_key' && !this.uncachedFailures.has(result)) {
             this.opened.set(message._id, withMeta);
             this.openedIdx.set(message._id, idx);
         }
@@ -819,6 +824,20 @@ export class MessageService {
             return { ...base, text: null, status: 'failed', senderVerified: false };
         }
 
+        // Everything below must be settled BEFORE `messageKeyFor`, which is destructive: it derives
+        // the key for `idx`, deletes it from the chain, and advances past it. If a forged envelope
+        // (say, injected by the server under the real sender's skid at a future index) were allowed
+        // to reach it, the genuine message at that index would later report `failed` forever —
+        // selective suppression dressed up as peer tampering. Both checks need only public data.
+        if (!isValidChainIndex(envelope.idx)) {
+            return { ...base, text: null, status: 'failed', senderVerified: false };
+        }
+        if (!signingPublic || !verifyEnvelopeSignature(envelope, signingPublic, chatId, message.sender_id)) {
+            const refused: DecryptedMessage = { ...base, text: null, status: 'failed', senderVerified: false };
+            this.uncachedFailures.add(refused);
+            return refused;
+        }
+
         try {
             const messageKey = chain.messageKeyFor(envelope.idx);
             const plaintext = await openMessage({
@@ -837,14 +856,15 @@ export class MessageService {
                 text: typed ? null : parsed.text,
                 content: parsed.content,
                 status: 'ok',
-                senderVerified: Boolean(signingPublic),
+                // Verified above, and again inside `openMessage`; there is no unverified path here.
+                senderVerified: true,
             };
         } catch (error) {
             // Could be a consumed index, a stale grant, or genuine tampering. The UI must not
             // present any of those as ordinary text.
             const failed: DecryptedMessage = { ...base, text: null, status: 'failed', senderVerified: false };
             if (error instanceof Error && /already consumed/.test(error.message)) {
-                this.consumedFailures.add(failed);
+                this.uncachedFailures.add(failed);
             }
             return failed;
         }

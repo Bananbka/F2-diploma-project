@@ -746,6 +746,11 @@ export class ChatViewComponent {
         this.settings.open('security');
     }
 
+    /** Hide the added-device notice until a device not yet acknowledged turns up. */
+    dismissOwnDevicesAdded(): void {
+        this.store.dismissOwnDevicesAdded();
+    }
+
     /** A "Re-check" from the key-changed banner is in flight. */
     readonly rechecking = signal(false);
 

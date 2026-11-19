@@ -74,6 +74,35 @@ function channelMessage(id: string, senderId: string, postId: string, content: s
     };
 }
 
+const SKID = 'c0000000-0000-4000-8000-000000000003';
+
+/**
+ * A message whose envelope carries a VALID signature over a ciphertext sealed under `sealKey`.
+ * Lets a test get past the pre-ratchet signature check and exercise what happens after the chain
+ * was touched (e.g. a GCM failure because the chain hands back a different key).
+ */
+async function signedMessage(
+    id: string,
+    idx: number,
+    signingPrivate: Uint8Array,
+    sealKey: Uint8Array = crypto.getRandomValues(new Uint8Array(32)),
+    text = 'hello'
+): Promise<MessageResponse> {
+    const raw = envelopeMessage(id, idx);
+    raw.envelope = await sealMessage({
+        messageKey: sealKey,
+        nonce: crypto.getRandomValues(new Uint8Array(12)),
+        signingPrivate,
+        chatId: CHAT,
+        epoch: 1,
+        senderId: SENDER,
+        senderKeyId: SKID,
+        chainIndex: idx,
+        plaintext: utf8(text),
+    });
+    return raw;
+}
+
 describe('MessageService', () => {
     let service: MessageService;
     let keyStore: jasmine.SpyObj<KeyStoreService>;
@@ -156,11 +185,12 @@ describe('MessageService', () => {
      * presents as possible tampering.
      */
     it('opens a given message only once, reusing the plaintext', async () => {
-        const chain = { messageKeyFor: jasmine.createSpy('messageKeyFor').and.throwError('consumed') };
+        const signingPrivate = crypto.getRandomValues(new Uint8Array(32));
+        const chain = { messageKeyFor: jasmine.createSpy('messageKeyFor').and.throwError('tag mismatch') };
         keyStore.getReceiverChain.and.returnValue(chain as never);
-        keyStore.getChainSigningKey.and.returnValue(undefined);
+        keyStore.getChainSigningKey.and.returnValue(ed25519.getPublicKey(signingPrivate));
 
-        const raw = envelopeMessage('m1', 0);
+        const raw = await signedMessage('m1', 0, signingPrivate);
 
         const first = await service.decrypt(CHAT, raw);
         const second = await service.decrypt(CHAT, raw);
@@ -313,16 +343,18 @@ describe('MessageService', () => {
 
     /** A reaction/pin change on an already-opened message must patch in place, not re-decrypt. */
     it('patches reactions and pins on an opened message without re-decrypting', async () => {
+        const signingPrivate = crypto.getRandomValues(new Uint8Array(32));
         const chain = {
             messageKeyFor: jasmine.createSpy('messageKeyFor').and.returnValue({ key: new Uint8Array(32) }),
         };
         keyStore.getReceiverChain.and.returnValue(chain as never);
-        keyStore.getChainSigningKey.and.returnValue(undefined);
+        keyStore.getChainSigningKey.and.returnValue(ed25519.getPublicKey(signingPrivate));
 
-        const raw = envelopeMessage('m-meta', 0);
+        const raw = await signedMessage('m-meta', 0, signingPrivate);
         const opened = await service.decrypt(CHAT, raw);
-        // This particular envelope cannot actually be opened (no real ciphertext), so it lands as
-        // `failed` — irrelevant here, since the point is that a meta patch must not disturb it.
+        // Signed correctly but sealed under a key the chain does not hand back, so it lands as
+        // `failed` after the ratchet was touched — irrelevant here, since the point is that a meta
+        // patch must not disturb it.
         expect(opened.status).toBe('failed');
 
         const patched = raw;
@@ -378,7 +410,7 @@ describe('MessageService', () => {
 
         const chain = { messageKeyFor: jasmine.createSpy('messageKeyFor').and.returnValue({ key: messageKey }) };
         keyStore.getReceiverChain.and.returnValue(chain as never);
-        keyStore.getChainSigningKey.and.returnValue(undefined);
+        keyStore.getChainSigningKey.and.returnValue(ed25519.getPublicKey(signingPrivate));
 
         const result = await service.decrypt(CHAT, raw);
 
@@ -388,7 +420,6 @@ describe('MessageService', () => {
     });
 
     describe('concurrent and out-of-order decrypts', () => {
-        const SKID = 'c0000000-0000-4000-8000-000000000003';
         let sender: SenderChain;
         let receiver: ReceiverChain;
         let signingPrivate: Uint8Array;
@@ -399,7 +430,7 @@ describe('MessageService', () => {
             receiver = new ReceiverChain(chainKey.slice());
             signingPrivate = crypto.getRandomValues(new Uint8Array(32));
             keyStore.getReceiverChain.and.returnValue(receiver as never);
-            keyStore.getChainSigningKey.and.returnValue(undefined);
+            keyStore.getChainSigningKey.and.returnValue(ed25519.getPublicKey(signingPrivate));
         });
 
         /** Seal the next message on the sender chain; its index is whatever the chain is at. */
@@ -454,6 +485,118 @@ describe('MessageService', () => {
         });
     });
 
+    /**
+     * F-M1: the receiver ratchet is destructive, so nothing may reach `messageKeyFor` until the
+     * envelope is known to be well-formed and signed by the chain's key. Otherwise a forged
+     * envelope (e.g. injected by the server under a real sender's skid at a future index) burns the
+     * key the genuine message at that index needs, and that message reports `failed` forever.
+     */
+    describe('checks before the ratchet is touched', () => {
+        let sender: SenderChain;
+        let receiver: ReceiverChain;
+        let signingPrivate: Uint8Array;
+
+        beforeEach(() => {
+            const chainKey = crypto.getRandomValues(new Uint8Array(32));
+            sender = new SenderChain(chainKey.slice());
+            receiver = new ReceiverChain(chainKey.slice());
+            signingPrivate = crypto.getRandomValues(new Uint8Array(32));
+            keyStore.getReceiverChain.and.returnValue(receiver as never);
+            keyStore.getChainSigningKey.and.returnValue(ed25519.getPublicKey(signingPrivate));
+        });
+
+        async function sealNext(id: string, text: string): Promise<MessageResponse> {
+            const { key, index } = sender.nextMessageKey();
+            return signedMessage(id, index, signingPrivate, key, text);
+        }
+
+        /** Same skid, a future index, garbage ciphertext and signature. */
+        function forged(id: string, idx: number): MessageResponse {
+            const raw = envelopeMessage(id, idx);
+            raw.envelope = {
+                ...raw.envelope!,
+                alg: 'A256GCM-SK1',
+                n: b64uEncode(new Uint8Array(12)),
+                ct: b64uEncode(crypto.getRandomValues(new Uint8Array(48))),
+                sig: b64uEncode(crypto.getRandomValues(new Uint8Array(64))),
+            };
+            return raw;
+        }
+
+        it('rejects a bad signature at a future index without advancing the chain', async () => {
+            const spy = spyOn(receiver, 'messageKeyFor').and.callThrough();
+
+            const result = await service.decrypt(CHAT, forged('forged-3', 3));
+
+            expect(result.status).toBe('failed');
+            expect(result.senderVerified).toBeFalse();
+            expect(spy).not.toHaveBeenCalled();
+            expect(receiver.index).toBe(0);
+            expect(receiver.skipped.size).toBe(0);
+        });
+
+        it('still opens the genuine message at that index after a forged one was refused', async () => {
+            await service.decrypt(CHAT, forged('forged-3', 3));
+
+            const genuine: MessageResponse[] = [];
+            for (let i = 0; i <= 3; i += 1) {
+                genuine.push(await sealNext(`m${i}`, `text ${i}`));
+            }
+
+            // Out of order on purpose: index 3 first, the index the forgery targeted.
+            const third = await service.decrypt(CHAT, genuine[3]);
+            expect(third.status).toBe('ok');
+            expect(third.text).toBe('text 3');
+            expect(third.senderVerified).toBeTrue();
+
+            for (const raw of genuine.slice(0, 3)) {
+                expect((await service.decrypt(CHAT, raw)).status).toBe('ok');
+            }
+        });
+
+        it('does not cache a signature refusal as the verdict for that message id', async () => {
+            const refused = await service.decrypt(CHAT, forged('same-id', 0));
+            expect(refused.status).toBe('failed');
+
+            const genuine = await sealNext('same-id', 'the real one');
+            const opened = await service.decrypt(CHAT, genuine);
+
+            expect(opened.status).toBe('ok');
+            expect(opened.text).toBe('the real one');
+        });
+
+        for (const idx of [1.5, -1, 0x100000000, Number.NaN, Number.POSITIVE_INFINITY]) {
+            it(`refuses chain index ${idx} without touching the chain`, async () => {
+                const spy = spyOn(receiver, 'messageKeyFor').and.callThrough();
+                const raw = envelopeMessage(`bad-idx-${idx}`, 0);
+                raw.envelope = { ...raw.envelope!, idx };
+
+                const result = await service.decrypt(CHAT, raw);
+
+                expect(result.status).toBe('failed');
+                expect(spy).not.toHaveBeenCalled();
+                expect(receiver.index).toBe(0);
+                expect(receiver.skipped.size).toBe(0);
+            });
+        }
+
+        it('refuses to open anything when no signing key is known for the chain', async () => {
+            keyStore.getChainSigningKey.and.returnValue(undefined);
+            const spy = spyOn(receiver, 'messageKeyFor').and.callThrough();
+            const genuine = await sealNext('m0', 'hi');
+
+            const result = await service.decrypt(CHAT, genuine);
+
+            expect(result.status).toBe('failed');
+            expect(spy).not.toHaveBeenCalled();
+            expect(receiver.index).toBe(0);
+
+            // Nothing was consumed, so once the key is known the message still opens.
+            keyStore.getChainSigningKey.and.returnValue(ed25519.getPublicKey(signingPrivate));
+            expect((await service.decrypt(CHAT, genuine)).status).toBe('ok');
+        });
+    });
+
     /** Real message history sealed before this feature existed is raw UTF-8, not JSON. */
     it('falls back to legacy plaintext when the decrypted bytes are not the JSON shape', async () => {
         const messageKey = crypto.getRandomValues(new Uint8Array(32));
@@ -478,7 +621,7 @@ describe('MessageService', () => {
 
         const chain = { messageKeyFor: jasmine.createSpy('messageKeyFor').and.returnValue({ key: messageKey }) };
         keyStore.getReceiverChain.and.returnValue(chain as never);
-        keyStore.getChainSigningKey.and.returnValue(undefined);
+        keyStore.getChainSigningKey.and.returnValue(ed25519.getPublicKey(signingPrivate));
 
         const result = await service.decrypt(CHAT, raw);
 
@@ -495,7 +638,8 @@ describe('MessageService', () => {
      * baked into the `MessageResponse` that was originally handed to `decrypt()`.
      */
     it('applies a meta patch that arrives before the first decrypt resolves', async () => {
-        keyStore.getChainSigningKey.and.returnValue(undefined);
+        const signingPrivate = crypto.getRandomValues(new Uint8Array(32));
+        keyStore.getChainSigningKey.and.returnValue(ed25519.getPublicKey(signingPrivate));
 
         // `messageKeyFor` itself is called synchronously in `decryptOnce` (never awaited) — the
         // genuine in-flight window is inside `openMessage`'s real WebCrypto calls, which this test
@@ -505,7 +649,7 @@ describe('MessageService', () => {
         };
         keyStore.getReceiverChain.and.returnValue(chain as never);
 
-        const raw = envelopeMessage('m-race', 0);
+        const raw = await signedMessage('m-race', 0, signingPrivate);
         // Stale reactions/pin baked into the object handed to decrypt() — this is what would be
         // cached if the race were lost.
         raw.reactions = [];
@@ -724,7 +868,7 @@ describe('MessageService', () => {
                 envelope,
                 chatId: CHAT,
                 senderId: SENDER,
-                signingPublic: undefined,
+                signingPublic: ed25519.getPublicKey(signingPrivate),
             });
             const parsed = JSON.parse(new TextDecoder().decode(plaintext));
             expect(parsed.text).toBe('updated text');
@@ -825,7 +969,7 @@ describe('MessageService', () => {
                 envelope,
                 chatId: CHAT,
                 senderId: SENDER,
-                signingPublic: undefined,
+                signingPublic: ed25519.getPublicKey(signingPrivate),
             });
             const parsed = JSON.parse(new TextDecoder().decode(plaintext));
             expect(parsed.text).toBe('updated text');

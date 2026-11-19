@@ -1,4 +1,4 @@
-import { DestroyRef, inject, Injectable } from '@angular/core';
+import { inject, Injectable } from '@angular/core';
 import { firstValueFrom } from 'rxjs';
 
 import { Chat, ChatParticipant } from '../models/chat.model';
@@ -7,9 +7,27 @@ import { MembershipMismatchError, MembershipUnconfirmedError } from './crypto-er
 import { DirectoryService } from './directory.service';
 import { KeyStoreService } from './key-store.service';
 import { SessionService } from './session.service';
+import { bindStorageKey } from './storage-sync';
 
 /** `<own user id>:<chat id>` -> the counterpart of that private chat, as first seen. */
 const PEER_PIN_KEY = 'ns.private_peers';
+
+/** `<own user id>:<chat id>` -> the encrypted type that chat was first seen as. */
+const ENCRYPTED_CHATS_KEY = 'ns.encrypted_chats';
+
+/** The chat types whose messages are sealed. A channel's posts are signed and readable. */
+export type EncryptedChatType = 'private' | 'group';
+
+/**
+ * A chat this client has seen as encrypted is now reported as a channel. Posting would publish the
+ * user's message signed and readable by the server, so it is refused as a membership alarm.
+ */
+export function relabelledAsChannel(was: EncryptedChatType): MembershipMismatchError {
+    return new MembershipMismatchError(
+        `Member verification failed: this was ${was === 'private' ? 'a private chat' : 'an encrypted group'} and ` +
+            'is now reported as a channel. Refusing to post it in the clear.'
+    );
+}
 
 /** Called with the participant list a group publish was checked against, before anything is wrapped. */
 export type GroupMembersSink = (chatId: string, participants: ChatParticipant[]) => void;
@@ -44,10 +62,23 @@ export class MembershipGuardService {
      * The pins, read from storage once and then kept current by the `storage` listener — not by
      * re-parsing storage on every lookup. Holds pins this tab could not persist, too.
      */
-    private readonly pins: Record<string, string> = readPins() ?? {};
+    private readonly pins: Record<string, string> = readStringMap(PEER_PIN_KEY) ?? {};
+
+    /**
+     * Chats this account has seen as private or group with encryption, kept like the pins (read
+     * once, then merged from other tabs; entries this tab could not persist stay). A group is not
+     * pinned — its members legitimately change — so without this a server could relabel one as a
+     * channel and the next message would go out as a readable post with no alarm at all.
+     */
+    private readonly encrypted: Record<string, string> = readStringMap(ENCRYPTED_CHATS_KEY, isEncryptedType) ?? {};
 
     constructor() {
-        this.bindStorageEvents();
+        // Ours win for any chat both tabs recorded: neither record is ever replaced once held, and a
+        // cleared storage (another tab's `localStorage.clear()`) takes nothing away from this tab.
+        bindStorageKey(PEER_PIN_KEY, () => Object.assign(this.pins, { ...readStringMap(PEER_PIN_KEY), ...this.pins }));
+        bindStorageKey(ENCRYPTED_CHATS_KEY, () =>
+            Object.assign(this.encrypted, { ...readStringMap(ENCRYPTED_CHATS_KEY, isEncryptedType), ...this.encrypted })
+        );
     }
 
     /**
@@ -61,17 +92,22 @@ export class MembershipGuardService {
         }
         const pinned = this.pinnedPeer(me, chat.id);
 
+        if (chat.chat_type === 'channel') {
+            const was = this.encryptedTypeOf(chat.id);
+            if (was) {
+                throw relabelledAsChannel(was);
+            }
+            return;
+        }
         if (pinned && chat.chat_type !== 'private') {
             throw new MembershipMismatchError(
                 `Member verification failed: this was a private chat with one person and is now reported as a ` +
                     `${chat.chat_type}. Refusing to distribute keys.`
             );
         }
-        if (chat.chat_type === 'channel') {
-            return;
-        }
-
         if (chat.chat_type === 'group') {
+            // Recorded before anything is sealed for it, so it can never be posted to in the clear.
+            this.noteEncrypted(chat.id, 'group');
             this.keyStore.expectMembers(chat.id, {
                 kind: 'group',
                 resolve: () => this.resolveGroupMembers(chat.id, onGroupMembers),
@@ -128,6 +164,50 @@ export class MembershipGuardService {
         }
     }
 
+    /**
+     * Remember that this chat was seen as an encrypted `type` (for the signed-in account). Called
+     * when a chat's keys load and before anything is sealed for it. Never replaced once recorded.
+     */
+    noteEncrypted(chatId: string, type: EncryptedChatType): void {
+        const me = this.session.user()?.id;
+        const key = me ? pinKey(me, chatId) : null;
+        if (!key || this.encrypted[key]) {
+            return;
+        }
+        const stored = readStringMap(ENCRYPTED_CHATS_KEY, isEncryptedType);
+        this.encrypted[key] = stored?.[key] ?? type;
+        try {
+            localStorage.setItem(
+                ENCRYPTED_CHATS_KEY,
+                JSON.stringify({ ...(stored ?? {}), [key]: this.encrypted[key] })
+            );
+        } catch {
+            // Held in memory for this tab; it still refuses here, just not after a reload.
+        }
+    }
+
+    /**
+     * The encrypted type this chat was seen as — a pinned private chat counts — or null when it has
+     * only ever been seen as a channel (or never seen). Such a chat must never get a readable post.
+     */
+    encryptedTypeOf(chatId: string): EncryptedChatType | null {
+        const me = this.session.user()?.id;
+        const key = me ? pinKey(me, chatId) : null;
+        if (!me || !key) {
+            return null;
+        }
+        if (this.pinnedPeer(me, chatId) !== null) {
+            return 'private';
+        }
+        // A record another tab wrote whose event has not arrived yet still counts (fail closed).
+        const seen = this.encrypted[key] ?? readStringMap(ENCRYPTED_CHATS_KEY, isEncryptedType)?.[key];
+        if (seen && isEncryptedType(seen)) {
+            this.encrypted[key] = seen;
+            return seen;
+        }
+        return null;
+    }
+
     /** A private pin exists for this chat (for the signed-in account). */
     isPinnedPrivate(chatId: string): boolean {
         const me = this.session.user()?.id;
@@ -153,14 +233,17 @@ export class MembershipGuardService {
             return null;
         }
         // A pin another tab wrote whose event has not arrived yet still wins over ours.
-        const existing = this.pins[key] ?? readPins()?.[key];
+        const existing = this.pins[key] ?? readStringMap(PEER_PIN_KEY)?.[key];
         if (existing) {
             this.pins[key] = existing;
             return existing;
         }
         this.pins[key] = peerId;
         try {
-            localStorage.setItem(PEER_PIN_KEY, JSON.stringify({ ...(readPins() ?? {}), [key]: peerId }));
+            localStorage.setItem(
+                PEER_PIN_KEY,
+                JSON.stringify({ ...(readStringMap(PEER_PIN_KEY) ?? {}), [key]: peerId })
+            );
         } catch {
             // Held in memory for this tab; a reload re-pins from the chat as opened then.
         }
@@ -186,25 +269,6 @@ export class MembershipGuardService {
         void this.directory.resolveMissing(ids);
         return ids;
     }
-
-    /** Adopt pins other tabs wrote. Guarded for SSR and for specs that construct with `new`. */
-    private bindStorageEvents(): void {
-        if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') {
-            return;
-        }
-        const listener = (event: StorageEvent): void => {
-            if (event.key === PEER_PIN_KEY || event.key === null) {
-                // Ours win for any chat both tabs pinned: a pin is never replaced once held.
-                Object.assign(this.pins, { ...(readPins() ?? {}), ...this.pins });
-            }
-        };
-        window.addEventListener('storage', listener);
-        try {
-            inject(DestroyRef).onDestroy(() => window.removeEventListener('storage', listener));
-        } catch {
-            // Constructed outside an injection context: nothing owns this instance's lifetime.
-        }
-    }
 }
 
 function counterpartMismatch(): MembershipMismatchError {
@@ -218,16 +282,27 @@ function pinKey(selfId: string, chatId: string): string | null {
     return selfId && chatId ? `${selfId}:${chatId}` : null;
 }
 
-function readPins(): Record<string, string> | null {
+function isEncryptedType(value: string): value is EncryptedChatType {
+    return value === 'private' || value === 'group';
+}
+
+/**
+ * A stored `string -> string` map, keeping only non-empty string values that pass `accept`; null
+ * when storage cannot be read at all. Tampered entries are dropped, never trusted.
+ */
+function readStringMap(
+    storageKey: string,
+    accept: (value: string) => boolean = () => true
+): Record<string, string> | null {
     try {
-        const raw = localStorage.getItem(PEER_PIN_KEY);
+        const raw = localStorage.getItem(storageKey);
         const parsed: unknown = raw ? JSON.parse(raw) : {};
         if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
             return {};
         }
         const valid: Record<string, string> = {};
         for (const [key, value] of Object.entries(parsed)) {
-            if (typeof value === 'string' && value) {
+            if (typeof value === 'string' && value && accept(value)) {
                 valid[key] = value;
             }
         }

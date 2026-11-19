@@ -17,7 +17,7 @@ const NUMBER_B = '11111 22222 33333 44444 55555 66666 77777 88888 99999 00000 12
 
 /** `KeyStoreService.computeSafetyNumber`'s result for a number, with nothing found about our own side. */
 function result(number: string, extra: Partial<SafetyNumberResult> = {}): SafetyNumberResult {
-    return { number, ownDevicesUnknown: false, ownDevicesAdded: false, ...extra };
+    return { number, ownDevicesUnknown: false, ownDevicesUnchecked: false, ownDevicesAdded: false, ...extra };
 }
 
 describe('SafetyNumberComponent', () => {

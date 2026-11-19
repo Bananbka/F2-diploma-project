@@ -17,6 +17,7 @@ import {
     Check,
     CheckCheck,
     Clock,
+    Download,
     Film,
     Forward,
     Layers,
@@ -43,7 +44,6 @@ import { decryptAttachment } from '../../../core/crypto/attachment-crypto';
 import { MessageAttachment } from '../../../core/models/crypto.model';
 import { UnsupportedReason } from '../../../core/models/message-payload';
 import { AttachmentBatchService } from '../../../core/services/attachment-batch.service';
-import { ChatApiService } from '../../../core/services/chat-api.service';
 import { MessageReadReceipt, readablePreviewText } from '../../../core/services/chat-store.service';
 import { DirectoryService } from '../../../core/services/directory.service';
 import { contentOf, DecryptedMessage, DecryptStatus } from '../../../core/services/message.service';
@@ -69,6 +69,28 @@ interface MediaEntry {
     /** `URL.createObjectURL` on the decrypted plaintext — revoked on removal/destroy. */
     objectUrl?: string;
 }
+
+/** A file attachment's on-demand decrypt-and-download, which has no lasting result to keep. */
+interface DownloadEntry {
+    status: 'decrypting' | 'error';
+    /** Shown to the user verbatim when `status` is `error`. */
+    error?: string;
+}
+
+/** How long a download's blob URL outlives the click that used it, so the browser can finish reading it. */
+const DOWNLOAD_URL_TTL_MS = 30_000;
+
+/**
+ * Why a file in a message we could not open is not offered, per status. The key for every
+ * attachment travels inside the sealed message, so no opened message means no key.
+ */
+const UNAVAILABLE_NOTES: Partial<Record<DecryptStatus, string>> = {
+    no_key: 'The file can be decrypted once this message can be. Its key is inside the message.',
+    unverified: 'Not offered: the message’s signature did not verify, so this file may not be what the sender sent.',
+    failed: 'This message could not be decrypted, so the key for this file is unavailable and it cannot be opened.',
+    legacy: 'This message uses the pre-migration scheme. Its file cannot be decrypted.',
+};
+const UNAVAILABLE_FALLBACK = 'This file cannot be decrypted because the message it belongs to could not be opened.';
 
 /**
  * The curated quick-react set. Not exhaustive — a full emoji keyboard is out of scope — but this
@@ -212,7 +234,6 @@ const STATUS_VIEWS: Record<DecryptStatus, StatusView> = {
 export class MessageBubbleComponent {
     private readonly directory = inject(DirectoryService);
     private readonly viewer = inject(MediaViewerService);
-    private readonly chatApi = inject(ChatApiService);
     private readonly attachmentBatch = inject(AttachmentBatchService);
     private readonly destroyRef = inject(DestroyRef);
     private readonly elementRef = inject<ElementRef<HTMLElement>>(ElementRef);
@@ -428,7 +449,10 @@ export class MessageBubbleComponent {
             });
         });
 
-        this.destroyRef.onDestroy(() => this.revokeMediaUrls());
+        this.destroyRef.onDestroy(() => {
+            this.revokeMediaUrls();
+            this.revokeDownloadUrls();
+        });
 
         // Only the first sighting of a no_key gets the grace period. A message still unreadable after
         // the retries have run stays escalated rather than flickering back to a calm state.
@@ -552,6 +576,8 @@ export class MessageBubbleComponent {
     readonly replyIcon = Reply;
     readonly editIcon = Pencil;
     readonly paperclipIcon = Paperclip;
+    readonly downloadIcon = Download;
+    readonly lockIcon = Lock;
     readonly moreIcon = MoreVertical;
     readonly forwardIcon = Forward;
     readonly smileIcon = Smile;
@@ -698,8 +724,140 @@ export class MessageBubbleComponent {
         });
     }
 
-    downloadUrl(file: MessageAttachment): string {
-        return this.chatApi.attachmentUrl(this.message().chatId, file.url);
+    /** Per-file download state, keyed by url. Absent means idle (or the last download succeeded). */
+    readonly downloads = signal<ReadonlyMap<string, DownloadEntry>>(new Map());
+    /** Blob URLs handed to the browser for a download and not yet revoked, with their revoke timers. */
+    private readonly pendingDownloadUrls = new Map<string, ReturnType<typeof setTimeout>>();
+
+    /** Why a file in this (unopened) message is shown but not offered. */
+    readonly unavailableNote = computed(() => UNAVAILABLE_NOTES[this.message().status] ?? UNAVAILABLE_FALLBACK);
+
+    /** An opened message that still carries no key for a file: the sender never sealed one. */
+    readonly noKeyNote =
+        'No decryption key for this file was sealed into the message, so it cannot be opened. ' +
+        'The server holds only ciphertext.';
+
+    downloadStatus(url: string): DownloadEntry['status'] | 'idle' {
+        return this.downloads().get(url)?.status ?? 'idle';
+    }
+
+    downloadError(url: string): string | null {
+        const entry = this.downloads().get(url);
+        return entry?.status === 'error' ? (entry.error ?? 'Could not download this file.') : null;
+    }
+
+    /**
+     * Fetch, decrypt and save one file attachment.
+     *
+     * The server stores only `nonce || ciphertext`, so linking straight to it would hand the user
+     * a file nobody can open. Instead this goes through the same batch fetch + `decryptAttachment`
+     * path images and voice notes use, wraps the plaintext in a blob URL, and clicks a detached
+     * `<a download>` for it. Never cached: a file is fetched again on each click, so its plaintext
+     * does not outlive the download.
+     */
+    async downloadFile(file: MessageAttachment, event?: Event): Promise<void> {
+        // During a bulk selection a click picks the message; let it reach the host's handler.
+        if (this.selecting()) {
+            return;
+        }
+        event?.stopPropagation();
+
+        if (this.downloadStatus(file.url) === 'decrypting') {
+            return;
+        }
+        // The template never offers the button in these cases; refuse defensively all the same.
+        if (!this.canRenderMedia()) {
+            this.setDownload(file.url, { status: 'error', error: this.unavailableNote() });
+            return;
+        }
+        if (!file.decryptionKey) {
+            this.setDownload(file.url, { status: 'error', error: this.noKeyNote });
+            return;
+        }
+
+        this.setDownload(file.url, { status: 'decrypting' });
+
+        let ciphertext: ArrayBuffer;
+        try {
+            ciphertext = await this.attachmentBatch.fetch(this.message().chatId, file.url);
+        } catch {
+            this.setDownload(file.url, {
+                status: 'error',
+                error: 'Could not fetch this file from the server. Try again.',
+            });
+            return;
+        }
+
+        let plaintext: Uint8Array;
+        try {
+            plaintext = await decryptAttachment(new Uint8Array(ciphertext), file.decryptionKey);
+        } catch {
+            this.setDownload(file.url, {
+                status: 'error',
+                error: 'This file could not be decrypted. It may have been altered, or its key does not match.',
+            });
+            return;
+        }
+
+        try {
+            this.saveBlob(plaintext, file.name);
+            this.setDownload(file.url, null);
+        } catch {
+            this.setDownload(file.url, { status: 'error', error: 'The browser refused to save this file.' });
+        }
+    }
+
+    /**
+     * Hand decrypted bytes to the browser as a download.
+     *
+     * Always `application/octet-stream`, whatever the sender declared: a blob URL inherits this
+     * page's origin, so a blob typed `text/html` would be same-origin markup if it were ever
+     * navigated to rather than downloaded. The file name keeps its extension for the OS.
+     */
+    private saveBlob(plaintext: Uint8Array, name: string): void {
+        const objectUrl = URL.createObjectURL(
+            new Blob([plaintext as BufferSource], { type: 'application/octet-stream' })
+        );
+        const link = document.createElement('a');
+        link.href = objectUrl;
+        link.download = name || 'attachment';
+        link.rel = 'noopener';
+        link.style.display = 'none';
+        document.body.appendChild(link);
+        try {
+            link.click();
+        } finally {
+            link.remove();
+            // Revoking synchronously can cancel the download in some browsers before it has read
+            // the blob, so the URL is kept briefly — and revoked on destroy if that comes first.
+            this.pendingDownloadUrls.set(
+                objectUrl,
+                setTimeout(() => {
+                    URL.revokeObjectURL(objectUrl);
+                    this.pendingDownloadUrls.delete(objectUrl);
+                }, DOWNLOAD_URL_TTL_MS)
+            );
+        }
+    }
+
+    private setDownload(url: string, entry: DownloadEntry | null): void {
+        this.downloads.update((current) => {
+            const next = new Map(current);
+            if (entry) {
+                next.set(url, entry);
+            } else {
+                next.delete(url);
+            }
+            return next;
+        });
+    }
+
+    private revokeDownloadUrls(): void {
+        for (const [objectUrl, timer] of this.pendingDownloadUrls) {
+            clearTimeout(timer);
+            URL.revokeObjectURL(objectUrl);
+        }
+        this.pendingDownloadUrls.clear();
     }
 
     readableSize(bytes: number): string {

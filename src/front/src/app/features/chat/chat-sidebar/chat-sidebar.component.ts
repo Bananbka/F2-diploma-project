@@ -5,7 +5,7 @@ import { firstValueFrom } from 'rxjs';
 
 import { Chat, UserSearchResult } from '../../../core/models/chat.model';
 import { ChatApiService } from '../../../core/services/chat-api.service';
-import { ChatStoreService } from '../../../core/services/chat-store.service';
+import { ChatStoreService, PRIVATE_CHAT_MISMATCH_NOTICE } from '../../../core/services/chat-store.service';
 import { DirectoryService } from '../../../core/services/directory.service';
 import { Folder } from '../../../core/services/folder-api.service';
 import { FolderStoreService } from '../../../core/services/folder-store.service';
@@ -235,7 +235,8 @@ export class ChatSidebarComponent {
             // Pinned to the person picked here; a response naming anyone else is not opened.
             this.store.adoptCreatedPrivateChat(chat, person.id);
         } catch {
-            this.toast.error('That chat is not with the person you chose, so it was not opened.');
+            // `adoptCreatedPrivateChat` throws only `MembershipMismatchError`.
+            this.toast.error(PRIVATE_CHAT_MISMATCH_NOTICE);
             return;
         }
         this.query.set('');

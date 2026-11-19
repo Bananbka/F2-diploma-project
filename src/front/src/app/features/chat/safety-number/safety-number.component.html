@@ -117,6 +117,24 @@
             </section>
         }
 
+        @if (ownDevicesUnchecked()) {
+            <!-- Not evidence of anything, but not a confirmation either: still a warning (fail closed). -->
+            <section
+                class="alarm"
+                role="alert"
+            >
+                <lucide-icon [img]="shieldAlertIcon" />
+                <div>
+                    <p class="alarm-title">Your own devices could not be checked</p>
+                    <p class="alarm-note">
+                        This number includes a device under your account that was not on your device list when you
+                        unlocked, and your current device list could not be loaded to confirm it is yours. Matching
+                        digits would confirm that device too. Check your devices in Settings before comparing.
+                    </p>
+                </div>
+            </section>
+        }
+
         @if (ownDevicesAdded() && !ownDevicesUnknown()) {
             <!-- Informational: our own device list confirms the device, so nothing is blocked. -->
             <section class="notice">

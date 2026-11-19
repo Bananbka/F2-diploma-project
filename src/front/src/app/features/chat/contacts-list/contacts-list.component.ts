@@ -5,8 +5,9 @@ import { firstValueFrom } from 'rxjs';
 
 import { Contact } from '../../../core/models/chat.model';
 import { ChatApiService } from '../../../core/services/chat-api.service';
-import { ChatStoreService } from '../../../core/services/chat-store.service';
+import { ChatStoreService, PRIVATE_CHAT_MISMATCH_NOTICE } from '../../../core/services/chat-store.service';
 import { ContactsStoreService } from '../../../core/services/contacts-store.service';
+import { MembershipMismatchError } from '../../../core/services/crypto-errors';
 import { ToastService } from '../../../core/services/toast.service';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
 import { ConfirmService } from '../../../shared/ui/confirm-dialog/confirm.service';
@@ -85,8 +86,11 @@ export class ContactsListComponent {
             this.chatStore.adoptCreatedPrivateChat(chat, contact.contact_id);
             await this.chatStore.loadChats();
             await this.router.navigate(['/chats', chat.id]);
-        } catch {
-            this.toast.error('Could not open that chat.');
+        } catch (error) {
+            // A refused chat is an alarm with its own wording, not an ordinary failure to open.
+            this.toast.error(
+                error instanceof MembershipMismatchError ? PRIVATE_CHAT_MISMATCH_NOTICE : 'Could not open that chat.'
+            );
         }
     }
 

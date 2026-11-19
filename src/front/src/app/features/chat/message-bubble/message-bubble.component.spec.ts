@@ -1,5 +1,6 @@
 import { ComponentFixture, fakeAsync, TestBed, tick } from '@angular/core/testing';
 
+import { encryptAttachment } from '../../../core/crypto/attachment-crypto';
 import { MessageAttachment } from '../../../core/models/crypto.model';
 import { AttachmentBatchService } from '../../../core/services/attachment-batch.service';
 import { ChatApiService } from '../../../core/services/chat-api.service';
@@ -653,6 +654,207 @@ describe('MessageBubbleComponent', () => {
             const host = create(stickerMessage({ status: 'failed' }));
 
             expect(host.querySelector('.sticker-image')).toBeNull();
+        });
+    });
+
+    /**
+     * F-M2: every attachment but a sticker is ciphertext on the server, so a file is never offered
+     * as a link to the stored bytes. It is fetched, decrypted and saved on demand, and a file that
+     * cannot be decrypted is shown inert with the reason rather than offered at all.
+     */
+    describe('file attachments', () => {
+        const PLAINTEXT = new TextEncoder().encode('%PDF-1.7 the real document');
+
+        function fileAttachment(extra: Partial<MessageAttachment> = {}): MessageAttachment {
+            return buildAttachment({
+                kind: 'file',
+                name: 'report.pdf',
+                content_type: 'application/pdf',
+                url: 'https://files.test/report.pdf',
+                ...extra,
+            });
+        }
+
+        function batch(): jasmine.SpyObj<AttachmentBatchService> {
+            return TestBed.inject(AttachmentBatchService) as jasmine.SpyObj<AttachmentBatchService>;
+        }
+
+        function downloadButton(host: HTMLElement): HTMLButtonElement | null {
+            return host.querySelector<HTMLButtonElement>('button.attachment.is-download');
+        }
+
+        /** Captures what would be saved instead of letting the browser start a real download. */
+        function captureDownloads(): { saved: { href: string; name: string }[]; blobs: Blob[] } {
+            const saved: { href: string; name: string }[] = [];
+            const blobs: Blob[] = [];
+            const realCreate = URL.createObjectURL.bind(URL);
+            spyOn(URL, 'createObjectURL').and.callFake((obj: Blob | MediaSource) => {
+                blobs.push(obj as Blob);
+                return realCreate(obj);
+            });
+            spyOn(HTMLAnchorElement.prototype, 'click').and.callFake(function (this: HTMLAnchorElement) {
+                saved.push({ href: this.href, name: this.download });
+            });
+            return { saved, blobs };
+        }
+
+        /**
+         * Let the fetch and WebCrypto promises run. Not `whenStable`: a successful download keeps
+         * its blob URL alive on a timer, which would hold the zone unstable for that long.
+         */
+        async function settle(): Promise<void> {
+            for (let i = 0; i < 10; i += 1) {
+                await new Promise((resolve) => setTimeout(resolve));
+            }
+            fixture.detectChanges();
+        }
+
+        it('never links to the stored ciphertext', () => {
+            const key = crypto.getRandomValues(new Uint8Array(32));
+            const host = create(buildMessage({ text: '', attachments: [fileAttachment({ decryptionKey: key })] }));
+
+            expect(host.querySelector('a[href]')).toBeNull();
+            expect(host.querySelector('a[download]')).toBeNull();
+            expect(downloadButton(host)).not.toBeNull();
+            expect(downloadButton(host)?.getAttribute('aria-label')).toContain('report.pdf');
+        });
+
+        it('fetches, decrypts and saves the plaintext under the original name, then revokes the URL', async () => {
+            const { blob, key } = await encryptAttachment(PLAINTEXT);
+            batch().fetch.and.resolveTo(blob.slice().buffer);
+            const { saved, blobs } = captureDownloads();
+            const revoke = spyOn(URL, 'revokeObjectURL').and.callThrough();
+
+            const host = create(buildMessage({ text: '', attachments: [fileAttachment({ decryptionKey: key })] }));
+            downloadButton(host)!.click();
+            await settle();
+
+            expect(batch().fetch).toHaveBeenCalledWith(CHAT_ID, 'https://files.test/report.pdf');
+            expect(saved.length).toBe(1);
+            expect(saved[0].name).toBe('report.pdf');
+            expect(saved[0].href).toMatch(/^blob:/);
+            // The saved bytes are the plaintext, not nonce || ciphertext.
+            expect(new Uint8Array(await blobs[0].arrayBuffer())).toEqual(PLAINTEXT);
+            // Never typed as the sender declared: a same-origin blob must not be renderable markup.
+            expect(blobs[0].type).toBe('application/octet-stream');
+            expect(host.querySelector('[role="alert"]')).toBeNull();
+
+            fixture.destroy();
+            expect(revoke).toHaveBeenCalledWith(saved[0].href);
+        });
+
+        it('shows a visible error when the bytes do not decrypt under the key', async () => {
+            const { blob } = await encryptAttachment(PLAINTEXT);
+            batch().fetch.and.resolveTo(blob.slice().buffer);
+            const { saved } = captureDownloads();
+
+            const wrongKey = crypto.getRandomValues(new Uint8Array(32));
+            const host = create(buildMessage({ text: '', attachments: [fileAttachment({ decryptionKey: wrongKey })] }));
+            downloadButton(host)!.click();
+            await settle();
+
+            expect(saved).toEqual([]);
+            expect(host.querySelector('[role="alert"]')?.textContent).toContain('could not be decrypted');
+            // Still offered, so the user can try again.
+            expect(downloadButton(host)?.disabled).toBeFalse();
+        });
+
+        it('shows a visible error when the fetch fails', async () => {
+            batch().fetch.and.rejectWith(new Error('gone'));
+            const { saved } = captureDownloads();
+
+            const key = crypto.getRandomValues(new Uint8Array(32));
+            const host = create(buildMessage({ text: '', attachments: [fileAttachment({ decryptionKey: key })] }));
+            downloadButton(host)!.click();
+            await settle();
+
+            expect(saved).toEqual([]);
+            expect(host.querySelector('[role="alert"]')?.textContent).toContain('Could not fetch');
+        });
+
+        it('is disabled while decrypting and ignores repeat clicks', async () => {
+            const key = crypto.getRandomValues(new Uint8Array(32));
+            const host = create(buildMessage({ text: '', attachments: [fileAttachment({ decryptionKey: key })] }));
+            // The default stub never resolves, so the download stays in flight.
+            downloadButton(host)!.click();
+            fixture.detectChanges();
+
+            expect(downloadButton(host)?.disabled).toBeTrue();
+            expect(downloadButton(host)?.textContent).toContain('Decrypting');
+            void fixture.componentInstance.downloadFile(fileAttachment({ decryptionKey: key }));
+            expect(batch().fetch).toHaveBeenCalledTimes(1);
+        });
+
+        it('lets a click pick the message during a bulk selection instead of downloading', () => {
+            fixture = TestBed.createComponent(MessageBubbleComponent);
+            const key = crypto.getRandomValues(new Uint8Array(32));
+            fixture.componentRef.setInput(
+                'message',
+                buildMessage({ text: '', attachments: [fileAttachment({ decryptionKey: key })] })
+            );
+            fixture.componentRef.setInput('selecting', true);
+            fixture.detectChanges();
+            const toggled: string[] = [];
+            fixture.componentInstance.selectionToggled.subscribe((id) => toggled.push(id));
+
+            downloadButton(fixture.nativeElement as HTMLElement)!.click();
+
+            expect(batch().fetch).not.toHaveBeenCalled();
+            expect(toggled).toEqual(['msg-1']);
+        });
+
+        it('an opened message with no key for the file shows it inert, with the reason', () => {
+            const host = create(buildMessage({ text: '', attachments: [fileAttachment()] }));
+
+            expect(downloadButton(host)).toBeNull();
+            expect(host.querySelector('a')).toBeNull();
+            const placeholder = host.querySelector('[data-testid="attachment-unavailable"]');
+            expect(placeholder?.textContent).toContain('report.pdf');
+            expect(host.querySelector('.attachment-note')?.textContent).toContain('No decryption key');
+        });
+
+        const unopened: DecryptStatus[] = ['no_key', 'unverified', 'failed', 'legacy'];
+        for (const status of unopened) {
+            for (const kind of ['file', 'image', 'audio', 'video', 'sticker'] as const) {
+                it(`${status}: a ${kind} attachment is shown inert, never as a link or a download`, () => {
+                    const host = create(
+                        buildMessage({
+                            status,
+                            text: status === 'unverified' ? 'x' : null,
+                            attachments: [fileAttachment({ kind })],
+                        })
+                    );
+
+                    expect(host.querySelector('a')).toBeNull();
+                    expect(downloadButton(host)).toBeNull();
+                    expect(host.querySelector('[data-testid="attachment-unavailable"]')).not.toBeNull();
+                    expect(host.querySelector('.attachment-note')?.textContent?.trim().length).toBeGreaterThan(0);
+                });
+            }
+        }
+
+        it('words the unavailable note per status', () => {
+            const notes = unopened.map((status) => {
+                const host = create(buildMessage({ status, text: null, attachments: [fileAttachment()] }));
+                return host.querySelector('.attachment-note')?.textContent?.trim();
+            });
+
+            expect(new Set(notes).size).toBe(unopened.length);
+        });
+
+        it('a sticker on an opened message still renders from its public url, with no decrypt', () => {
+            const host = create(
+                buildMessage({
+                    text: null,
+                    attachments: [buildAttachment({ kind: 'sticker', url: 'https://files.test/sticker.webp' })],
+                })
+            );
+
+            expect(host.querySelector<HTMLImageElement>('.sticker-image')?.getAttribute('src')).toBe(
+                'https://files.test/sticker.webp'
+            );
+            expect(host.querySelector('[data-testid="attachment-unavailable"]')).toBeNull();
+            expect(batch().fetch).not.toHaveBeenCalled();
         });
     });
 

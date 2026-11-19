@@ -1,5 +1,7 @@
-import { DestroyRef, inject, Injectable, signal } from '@angular/core';
+import { inject, Injectable, signal } from '@angular/core';
 
+import { bindStorageKey } from './storage-sync';
+import { pairKey } from './trust-keys';
 import { TrustState, TrustStoreService } from './trust-store.service';
 
 /**
@@ -79,9 +81,18 @@ export class KeyChangeStateService {
      */
     private readonly refusals = signal<Record<string, Refusal>>(readRefusals() ?? {});
 
+    /**
+     * Refusals this tab holds that storage does not, because the last write failed. Memory is
+     * authoritative for these: adopting another tab's stored copy must not drop them, or a refusal
+     * would lapse here without the user confirming anything.
+     */
+    private unpersisted: Record<string, Refusal> = {};
+
     constructor() {
         this.trust.setForgetGuard((selfId, peerId) => this.hasPendingRefusal(selfId, peerId));
-        this.bindStorageEvents();
+        bindStorageKey(REFUSALS_KEY, (event) => this.adoptStored(event));
+        // Nothing else ever deletes a lapsed refusal, so without this `ns.refusals` only grows.
+        this.pruneLapsed();
     }
 
     /**
@@ -221,14 +232,19 @@ export class KeyChangeStateService {
     refusalFor(chatId: string, selfId: string, peerId: string): Refusal | null {
         const key = pairKey(selfId, peerId);
         const refusal = key && chatId ? this.refusals()[`${chatId}|${key}`] : undefined;
-        if (!refusal) {
-            return null;
-        }
+        return refusal && !this.lapsed(selfId, peerId, refusal) ? refusal : null;
+    }
+
+    /**
+     * Whether the user has confirmed a number since this refusal was recorded: the refused number
+     * itself, or any other (the record's stamp moved). Either way the refusal no longer blocks.
+     */
+    private lapsed(selfId: string, peerId: string, refusal: Refusal): boolean {
         if (this.trust.stateFor(selfId, peerId, refusal.current).kind === 'verified') {
-            return null;
+            return true;
         }
         const stamp = this.trust.recordStamp(selfId, peerId);
-        return stamp !== null && stamp !== refusal.recordedAgainst ? null : refusal;
+        return stamp !== null && stamp !== refusal.recordedAgainst;
     }
 
     /** The chat's own roster check found this pair acceptable again: its refusal is over. */
@@ -238,6 +254,7 @@ export class KeyChangeStateService {
         if (!key || !(id in this.refusals())) {
             return;
         }
+        delete this.unpersisted[id];
         const next = { ...this.latestRefusals() };
         delete next[id];
         this.writeRefusals(next);
@@ -251,40 +268,85 @@ export class KeyChangeStateService {
         );
     }
 
-    /** Storage first, so a refusal another tab wrote a moment ago is not overwritten by our copy. */
+    /**
+     * Storage first, so a refusal another tab wrote a moment ago is not overwritten by our copy —
+     * plus whatever this tab could not persist, which storage cannot know about.
+     */
     private latestRefusals(): Record<string, Refusal> {
-        return readRefusals() ?? this.refusals();
+        const stored = readRefusals();
+        return stored === null ? this.refusals() : { ...stored, ...this.unpersisted };
     }
 
+    /**
+     * Write the refusals, dropping any that have lapsed: `refusalFor` already ignores them, so
+     * keeping them would only let `ns.refusals` grow without bound.
+     */
     private writeRefusals(next: Record<string, Refusal>): void {
-        this.refusals.set(next);
+        const live = this.withoutLapsed(next);
+        this.refusals.set(live);
         try {
-            localStorage.setItem(REFUSALS_KEY, JSON.stringify(next));
+            localStorage.setItem(REFUSALS_KEY, JSON.stringify(live));
+            this.unpersisted = {};
         } catch {
-            // Held in memory for this tab: it still blocks here, just not after a reload.
+            // Held in memory for this tab: it still blocks here, just not after a reload — and a
+            // later storage event from another tab must not drop it (`adoptStored`).
+            this.unpersisted = { ...live };
         }
     }
 
-    /** Adopt other tabs' refusals. Guarded for SSR and for specs that construct with `new`. */
-    private bindStorageEvents(): void {
-        if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') {
+    /** Remove lapsed refusals from memory and storage, if there are any. */
+    private pruneLapsed(): void {
+        // Lapsing is judged against the confirmed records, which another tab may have changed since
+        // this one read them; a stale record could make a fresh refusal look lapsed.
+        this.trust.refresh();
+        const current = this.latestRefusals();
+        if (Object.keys(this.withoutLapsed(current)).length !== Object.keys(current).length) {
+            this.writeRefusals(current);
+        }
+    }
+
+    private withoutLapsed(all: Record<string, Refusal>): Record<string, Refusal> {
+        const live: Record<string, Refusal> = {};
+        for (const [id, refusal] of Object.entries(all)) {
+            const pair = parseRefusalId(id);
+            // An id that does not parse cannot be judged; keep it rather than guess (fail closed).
+            if (!pair || !this.lapsed(pair.selfId, pair.peerId, refusal)) {
+                live[id] = refusal;
+            }
+        }
+        return live;
+    }
+
+    /**
+     * Adopt other tabs' refusals. Refusals fail closed, so this merges rather than replaces:
+     *
+     * - another tab rewrote `ns.refusals` (read-merge-write, so its copy already holds every
+     *   refusal storage held) — take it, plus whatever this tab could not persist;
+     * - storage was cleared or the key removed (`localStorage.clear()` elsewhere, `newValue` null) —
+     *   that says nothing about whether any chat was refused, so keep everything this tab holds and
+     *   write it back, so that a reload here still remembers it.
+     */
+    private adoptStored(event: StorageEvent): void {
+        if (event.key === null || event.newValue === null) {
+            this.writeRefusals({ ...(readRefusals() ?? {}), ...this.refusals() });
             return;
         }
-        const listener = (event: StorageEvent): void => {
-            if (event.key === REFUSALS_KEY || event.key === null) {
-                const stored = readRefusals();
-                if (stored !== null) {
-                    this.refusals.set(stored);
-                }
-            }
-        };
-        window.addEventListener('storage', listener);
-        try {
-            inject(DestroyRef).onDestroy(() => window.removeEventListener('storage', listener));
-        } catch {
-            // Constructed outside an injection context: nothing owns this instance's lifetime.
+        const stored = readRefusals();
+        if (stored !== null) {
+            this.refusals.set({ ...stored, ...this.unpersisted });
         }
     }
+}
+
+/** `<chat id>|<own user id>:<peer user id>` back into its pair, or null when it does not parse. */
+function parseRefusalId(id: string): { selfId: string; peerId: string } | null {
+    const bar = id.indexOf('|');
+    const pair = bar < 0 ? '' : id.slice(bar + 1);
+    const colon = pair.indexOf(':');
+    if (bar <= 0 || colon <= 0 || colon === pair.length - 1) {
+        return null;
+    }
+    return { selfId: pair.slice(0, colon), peerId: pair.slice(colon + 1) };
 }
 
 /**
@@ -325,9 +387,4 @@ function readRefusals(): Record<string, Refusal> | null {
     } catch {
         return {};
     }
-}
-
-/** Null when either id is empty: such a key would put unrelated pairs in one shared bucket. */
-function pairKey(selfId: string, peerId: string): string | null {
-    return selfId && peerId ? `${selfId}:${peerId}` : null;
 }

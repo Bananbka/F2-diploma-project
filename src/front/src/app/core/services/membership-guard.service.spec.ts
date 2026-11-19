@@ -177,4 +177,96 @@ describe('MembershipGuardService', () => {
             expect(sink).toHaveBeenCalledOnceWith(CHAT, [member(ME), member(PEER), member(OTHER_PEER)]);
         });
     });
+
+    /**
+     * S2: a group is never pinned (its members change), so a server could relabel one as a channel
+     * and turn the next message into a readable post. Having been seen as encrypted is what refuses it.
+     */
+    describe('chats seen as encrypted', () => {
+        it('refuses a group it registered once, now reported as a channel', () => {
+            service.register(chat('group', ME, PEER), sink);
+
+            expect(() => service.register(chat('channel', ME, PEER), sink)).toThrowMatching(
+                (error) => error instanceof MembershipMismatchError && /encrypted group.*channel/.test(error.message)
+            );
+        });
+
+        it('refuses a chat noted as encrypted when its keys loaded, now reported as a channel', () => {
+            service.noteEncrypted(CHAT, 'group');
+
+            expect(service.encryptedTypeOf(CHAT)).toBe('group');
+            expect(() => service.register(chat('channel'), sink)).toThrowError(MembershipMismatchError);
+        });
+
+        it('counts a pinned private chat as encrypted, with the private-chat wording', () => {
+            service.pinPeer(ME, CHAT, PEER);
+
+            expect(service.encryptedTypeOf(CHAT)).toBe('private');
+            expect(() => service.register(chat('channel'), sink)).toThrowMatching(
+                (error) => error instanceof MembershipMismatchError && /private chat.*channel/.test(error.message)
+            );
+        });
+
+        it('lets a chat only ever seen as a channel register as one', () => {
+            expect(service.encryptedTypeOf(CHAT)).toBeNull();
+            expect(() => service.register(chat('channel', ME), sink)).not.toThrow();
+            expect(keyStore.expectMembers).not.toHaveBeenCalled();
+        });
+
+        it('never replaces the first recorded type', () => {
+            service.noteEncrypted(CHAT, 'private');
+            service.noteEncrypted(CHAT, 'group');
+
+            expect(service.encryptedTypeOf(CHAT)).toBe('private');
+        });
+
+        it('is kept per account of ours', () => {
+            service.noteEncrypted(CHAT, 'group');
+            const stored = JSON.parse(localStorage.getItem('ns.encrypted_chats')!) as Record<string, string>;
+
+            expect(stored).toEqual({ [`${ME}:${CHAT}`]: 'group' });
+            expect(Object.keys(stored)).not.toContain(`${OTHER_ME}:${CHAT}`);
+        });
+
+        it('survives a reload', () => {
+            service.noteEncrypted(CHAT, 'group');
+
+            expect(reload().encryptedTypeOf(CHAT)).toBe('group');
+        });
+
+        it("honours another tab's record before its storage event arrives", () => {
+            reload().noteEncrypted(CHAT, 'group');
+
+            expect(service.encryptedTypeOf(CHAT)).toBe('group');
+            expect(() => service.register(chat('channel'), sink)).toThrowError(MembershipMismatchError);
+        });
+
+        it("adopts another tab's record through the storage event, and keeps it if storage is cleared", () => {
+            reload().noteEncrypted(CHAT, 'group');
+            window.dispatchEvent(
+                new StorageEvent('storage', {
+                    key: 'ns.encrypted_chats',
+                    newValue: localStorage.getItem('ns.encrypted_chats'),
+                })
+            );
+            localStorage.clear();
+            window.dispatchEvent(new StorageEvent('storage', { key: null }));
+
+            expect(service.encryptedTypeOf(CHAT)).toBe('group');
+        });
+
+        it('keeps its records when another tab clears storage', () => {
+            service.noteEncrypted(CHAT, 'group');
+            localStorage.clear();
+            window.dispatchEvent(new StorageEvent('storage', { key: null }));
+
+            expect(service.encryptedTypeOf(CHAT)).toBe('group');
+        });
+
+        it('drops tampered stored values instead of trusting them', () => {
+            localStorage.setItem('ns.encrypted_chats', JSON.stringify({ [`${ME}:${CHAT}`]: 'channel' }));
+
+            expect(reload().encryptedTypeOf(CHAT)).toBeNull();
+        });
+    });
 });

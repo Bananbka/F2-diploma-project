@@ -165,6 +165,27 @@
     cursor: pointer;
 }
 
+.device-notice-dismiss {
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    padding: 0.25rem;
+    background: none;
+    border: none;
+    border-radius: var(--radius-sm);
+    color: var(--muted-foreground);
+    cursor: pointer;
+
+    &:hover {
+        color: var(--foreground);
+    }
+
+    lucide-icon {
+        width: 0.875rem;
+        height: 0.875rem;
+    }
+}
+
 /* ── Member verification failure ──────────────────────────────────────────────────────────── */
 
 .alarm {

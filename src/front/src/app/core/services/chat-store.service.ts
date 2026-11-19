@@ -25,14 +25,13 @@ import {
     isMembershipUnconfirmed,
     isRetryLimitExceeded,
     isRosterVerificationFailure,
-    MembershipMismatchError,
     RosterFailureCode,
     RosterVerificationError,
 } from './crypto-errors';
 import { DirectoryService } from './directory.service';
 import { KeyChangeStateService } from './key-change-state.service';
 import { KeyStoreService } from './key-store.service';
-import { GroupMembersSink, MembershipGuardService } from './membership-guard.service';
+import { GroupMembersSink, MembershipGuardService, relabelledAsChannel } from './membership-guard.service';
 import { contentOf, DecryptedMessage, MessageService } from './message.service';
 import { PollStoreService } from './poll-store.service';
 import { SessionService } from './session.service';
@@ -54,6 +53,21 @@ export const FORWARD_KEY_CHANGED_NOTICE =
 
 /** A forward refused because the target chat's members could not be confirmed or contradict its pin. */
 export const FORWARD_MEMBERSHIP_NOTICE = 'Not forwarded: the members of that chat could not be verified.';
+
+/**
+ * A just-created private chat was refused (`adoptCreatedPrivateChat` threw `MembershipMismatchError`):
+ * the server's answer is not a private chat with the person the user picked. Shown by every screen
+ * that starts a private chat, so the alarm reads the same wherever it is raised.
+ */
+export const PRIVATE_CHAT_MISMATCH_NOTICE = 'That chat is not with the person you chose, so it was not opened.';
+
+/** The key-changed banner's re-check could not confirm the chat's members (MEMBERSHIP_UNCONFIRMED). */
+export const RECHECK_MEMBERSHIP_NOTICE =
+    'Could not re-check the keys: the members of this chat could not be confirmed. Try again in a moment.';
+
+/** The key-changed banner's re-check could not publish a key after several tries (RETRY_LIMIT_EXCEEDED). */
+export const RECHECK_PUBLISH_NOTICE =
+    'Could not re-check the keys: your key could not be shared with this chat after several tries.';
 
 /** Shown in the composer when the other party of a private chat has deleted their account. */
 export const PEER_DELETED_NOTICE =
@@ -299,11 +313,6 @@ export class ChatStoreService {
     });
 
     /**
-     * The open chat's key change involves *our own* device list, not (only) the peers'. A device
-     * under our own user id changes the number with every verified peer at once; the banner must
-     * not blame them for it.
-     */
-    /**
      * After `POST /chats/private`: pin the person the user chose before anything else can name the
      * counterpart (`MembershipGuardService.pinCreatedPrivateChat`). Throws `MembershipMismatchError`
      * when the response disagrees; the caller must then not open the chat.
@@ -313,8 +322,18 @@ export class ChatStoreService {
     }
 
     /** A device was added to our account since unlock (`KeyStoreService.ownDevicesAdded`). */
-    readonly ownDevicesAdded = computed(() => this.keyStore.ownDevicesAdded());
+    readonly ownDevicesAdded = this.keyStore.ownDevicesAdded;
 
+    /** The user dismissed the added-device notice; see `KeyStoreService.acknowledgeOwnDevicesAdded`. */
+    dismissOwnDevicesAdded(): void {
+        this.keyStore.acknowledgeOwnDevicesAdded();
+    }
+
+    /**
+     * The open chat's key change involves *our own* device list, not (only) the peers'. A device
+     * under our own user id changes the number with every verified peer at once; the banner must
+     * not blame them for it.
+     */
     readonly ownDevicesChanged = computed(() => {
         const chatId = this.activeChatId();
         const me = this.session.user()?.id;
@@ -780,6 +799,11 @@ export class ChatStoreService {
                 // message from a sender we have not ingested yet would report no_key on first paint.
                 knownKeys = await this.ensureEncryptionEnabled(chatId);
                 this.chatKeys.set(knownKeys);
+                if (knownKeys && (chat?.chat_type === 'private' || chat?.chat_type === 'group')) {
+                    // Seen with keys: from here on this chat can never receive a readable channel
+                    // post, whatever type the server reports for it later.
+                    this.membership.noteEncrypted(chatId, chat.chat_type);
+                }
             }
 
             // Pass through what `ensureEncryptionEnabled` just fetched instead of asking
@@ -1333,19 +1357,15 @@ export class ChatStoreService {
     }
 
     /**
-     * The one way this store publishes a signed, readable channel post. Refuses a chat pinned as
-     * private, whatever type it is reported as now: `ensureMembership` already refuses that, and this
-     * is the second line, so a future caller that forgets the first cannot publish a private chat's
-     * message in the clear.
+     * The one way this store publishes a signed, readable channel post. Refuses a chat ever seen as
+     * encrypted — pinned as private, or opened as a private chat or group with keys — whatever type it
+     * is reported as now: `ensureMembership` already refuses that, and this is the second line, so a
+     * future caller that forgets the first cannot publish an encrypted chat's message in the clear.
      */
     private postToChannel(chatId: string, text: string, clientMessageId?: string): Promise<MessageResponse> {
-        if (this.membership.isPinnedPrivate(chatId)) {
-            return Promise.reject(
-                new MembershipMismatchError(
-                    'Member verification failed: this was a private chat and is now reported as a channel. ' +
-                        'Refusing to post it in the clear.'
-                )
-            );
+        const was = this.membership.encryptedTypeOf(chatId);
+        if (was) {
+            return Promise.reject(relabelledAsChannel(was));
         }
         return this.messages_.sendChannelPost(chatId, text, clientMessageId);
     }
@@ -1375,7 +1395,14 @@ export class ChatStoreService {
                 this.memberVerificationCode.set(error.code);
                 return;
             }
-            this.realtimeError.set('Could not re-check the keys for this chat.');
+            // Worded for what happened, as `send` words its failed rows — not a bare "could not".
+            this.realtimeError.set(
+                isMembershipUnconfirmed(error)
+                    ? RECHECK_MEMBERSHIP_NOTICE
+                    : isRetryLimitExceeded(error)
+                      ? RECHECK_PUBLISH_NOTICE
+                      : 'Could not re-check the keys for this chat.'
+            );
         }
     }
 

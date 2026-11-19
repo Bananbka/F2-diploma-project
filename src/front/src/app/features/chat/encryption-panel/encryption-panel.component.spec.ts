@@ -1,13 +1,16 @@
 import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
-import { of } from 'rxjs';
+import { Observable, of, throwError } from 'rxjs';
 
+import { computeMemberSetHash } from '../../../core/crypto/grants';
 import { Chat, ChatParticipant } from '../../../core/models/chat.model';
+import { ChatRoster } from '../../../core/models/crypto.model';
 import { ChatApiService } from '../../../core/services/chat-api.service';
 import { ChatStoreService } from '../../../core/services/chat-store.service';
 import { CryptoApiService } from '../../../core/services/crypto-api.service';
 import { DirectoryService } from '../../../core/services/directory.service';
+import { KeyChangeStateService, Refusal } from '../../../core/services/key-change-state.service';
 import { KeyStoreService } from '../../../core/services/key-store.service';
 import { SessionService } from '../../../core/services/session.service';
 import { TrustStoreService } from '../../../core/services/trust-store.service';
@@ -36,6 +39,18 @@ describe('EncryptionPanelComponent', () => {
     let keyStore: { computeSafetyNumber: jasmine.Spy };
     let chatApi: { getChat: jasmine.Spy };
     let verificationError: ReturnType<typeof signal<string | null>>;
+    let getRoster: jasmine.Spy<() => Observable<ChatRoster>>;
+    let refusals: ReturnType<typeof signal<Record<string, Refusal>>>;
+    let blocking: ReturnType<typeof signal<Record<string, string>>>;
+    let trustState: ReturnType<typeof signal<'unverified' | 'verified'>>;
+
+    /** An empty roster whose commitment really is the hash of its members, so the check passes. */
+    const matchingRoster = (): ChatRoster => ({
+        chat_id: CHAT_ID,
+        current_epoch: 4,
+        member_set_hash: computeMemberSetHash([]),
+        members: [],
+    });
 
     async function open(chat: Partial<Chat>) {
         chatApi.getChat.and.returnValue(of({ id: CHAT_ID, chat_type: 'group', participants: [], ...chat }));
@@ -55,18 +70,31 @@ describe('EncryptionPanelComponent', () => {
                 if (id === 'nokey') {
                     throw new Error('This contact has not published a verifiable identity key.');
                 }
-                return { number: `number-${id}`, ownDevicesUnknown: false, ownDevicesAdded: false };
+                return {
+                    number: `number-${id}`,
+                    ownDevicesUnknown: false,
+                    ownDevicesUnchecked: false,
+                    ownDevicesAdded: false,
+                };
             }),
         };
         chatApi = { getChat: jasmine.createSpy('getChat') };
+        getRoster = jasmine.createSpy('getRoster').and.callFake(() => of(matchingRoster()));
+        refusals = signal<Record<string, Refusal>>({});
+        blocking = signal<Record<string, string>>({});
+        trustState = signal<'unverified' | 'verified'>('unverified');
         TestBed.configureTestingModule({
             providers: [
                 provideRouter([]),
                 { provide: ChatApiService, useValue: chatApi },
+                { provide: CryptoApiService, useValue: { getRoster } },
                 {
-                    provide: CryptoApiService,
+                    provide: KeyChangeStateService,
                     useValue: {
-                        getRoster: () => of({ chat_id: CHAT_ID, current_epoch: 4, member_set_hash: 'h', members: [] }),
+                        refusalFor: (chatId: string, _me: string, peer: string) =>
+                            chatId === CHAT_ID ? (refusals()[peer] ?? null) : null,
+                        blockingNumber: (_me: string, peer: string, chatId?: string) =>
+                            chatId === CHAT_ID ? (blocking()[peer] ?? null) : null,
                     },
                 },
                 { provide: KeyStoreService, useValue: keyStore },
@@ -85,7 +113,7 @@ describe('EncryptionPanelComponent', () => {
                         }),
                     },
                 },
-                { provide: TrustStoreService, useValue: { stateFor: () => ({ kind: 'unverified' }) } },
+                { provide: TrustStoreService, useValue: { stateFor: () => ({ kind: trustState() }) } },
             ],
         });
     });
@@ -130,6 +158,54 @@ describe('EncryptionPanelComponent', () => {
         const root = await open({ participants: participants(ME, 'a') });
         expect(root.textContent).toContain('Member set could not be verified');
         expect(root.textContent).toContain('roster mismatch');
+    });
+
+    /** S1: the header's claim comes from this panel's own check of the roster it fetched. */
+    describe('header claim', () => {
+        it('claims a match only when the fetched roster matches its commitment', async () => {
+            const root = await open({ participants: participants(ME, 'a') });
+            expect(root.textContent).toContain('The member list matches the commitment for the current keys.');
+            expect(root.querySelector('.status.is-alert')).toBeNull();
+        });
+
+        it('says the member list was not checked when the roster could not be fetched', async () => {
+            getRoster.and.returnValue(throwError(() => new Error('network')));
+            const root = await open({ participants: participants(ME, 'a') });
+            expect(root.textContent).toContain('has not been checked');
+            expect(root.textContent).not.toContain('matches the commitment');
+        });
+
+        it('raises the alarm when the fetched roster does not match its commitment', async () => {
+            getRoster.and.returnValue(of({ ...matchingRoster(), member_set_hash: 'forged' }));
+            const root = await open({ participants: participants(ME, 'a') });
+            expect(root.textContent).toContain('Member set does not match');
+            expect(root.textContent).not.toContain('matches the commitment for the current keys.');
+            expect(root.querySelector('.status.is-alert')).not.toBeNull();
+        });
+    });
+
+    /**
+     * S1: a member this chat is refused on reads "Key changed" whatever the lookup says. In the
+     * equivocation case the batch lookup carries the old keys and derives the verified number.
+     */
+    describe("per-member status against this chat's refusals", () => {
+        beforeEach(() => trustState.set('verified'));
+
+        it('shows a refused member as changed even when the lookup reads verified', async () => {
+            refusals.set({ a: { current: 'new', previous: 'old', ownDevicesChanged: false, recordedAgainst: null } });
+            const root = await open({ participants: participants(ME, 'a', 'b') });
+            const rows = Array.from(root.querySelectorAll('.row'));
+            expect(rows[0].querySelector('.badge')?.textContent).toContain('Key changed');
+            expect(rows[1].querySelector('.badge')?.textContent).toContain('Verified');
+        });
+
+        it('shows a member the send path is blocked on as changed', async () => {
+            blocking.set({ b: 'new' });
+            const root = await open({ participants: participants(ME, 'a', 'b') });
+            const rows = Array.from(root.querySelectorAll('.row'));
+            expect(rows[0].querySelector('.badge')?.textContent).toContain('Verified');
+            expect(rows[1].querySelector('.badge')?.textContent).toContain('Key changed');
+        });
     });
 
     it('a channel shows the signed, not encrypted explanation and no member list', async () => {

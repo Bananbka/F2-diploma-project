@@ -114,6 +114,13 @@ export class ReceiverChain {
     }
 
     messageKeyFor(targetIndex: number): MessageKey {
+        // Defensive: the wire carries the index as u32. Anything else must be refused before the
+        // walk below, which would otherwise advance the chain for a fractional index (1.5 passes
+        // the MAX_SKIP comparison) and leave it desynced from the sender.
+        if (!Number.isInteger(targetIndex) || targetIndex < 0 || targetIndex > 0xffffffff) {
+            throw new RangeError(`invalid chain index: ${targetIndex}`);
+        }
+
         const cached = this.skipped.get(targetIndex);
         if (cached) {
             this.skipped.delete(targetIndex);

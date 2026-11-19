@@ -1,5 +1,5 @@
 import { ChangeDetectionStrategy, Component, computed, effect, inject, input, output, signal } from '@angular/core';
-import { LucideAngularModule, ShieldAlert, ShieldCheck, ShieldOff } from 'lucide-angular';
+import { LucideAngularModule, ShieldAlert, ShieldCheck, ShieldOff, ShieldQuestion } from 'lucide-angular';
 import { firstValueFrom } from 'rxjs';
 
 import { Chat } from '../../../core/models/chat.model';
@@ -8,10 +8,12 @@ import { ChatApiService } from '../../../core/services/chat-api.service';
 import { ChatStoreService } from '../../../core/services/chat-store.service';
 import { CryptoApiService } from '../../../core/services/crypto-api.service';
 import { DirectoryService } from '../../../core/services/directory.service';
+import { KeyChangeStateService } from '../../../core/services/key-change-state.service';
 import { KeyStoreService } from '../../../core/services/key-store.service';
 import { SessionService } from '../../../core/services/session.service';
 import { TrustStoreService } from '../../../core/services/trust-store.service';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
+import { rosterMatchesCommitment } from '../roster-commitment';
 import { classifySafetyError } from '../safety-number/safety-number.component';
 
 export type MemberKeyStatus = 'checking' | 'verified' | 'unverified' | 'changed' | 'no-keys' | 'error';
@@ -42,6 +44,7 @@ export class EncryptionPanelComponent {
     private readonly cryptoApi = inject(CryptoApiService);
     private readonly keyStore = inject(KeyStoreService);
     private readonly trust = inject(TrustStoreService);
+    private readonly keyChange = inject(KeyChangeStateService);
     private readonly directory = inject(DirectoryService);
     private readonly session = inject(SessionService);
     private readonly store = inject(ChatStoreService);
@@ -58,6 +61,17 @@ export class EncryptionPanelComponent {
 
     readonly isChannel = computed(() => this.chat()?.chat_type === 'channel');
     readonly verificationError = this.store.memberVerificationError;
+
+    /**
+     * The header's claim, from this panel's own check of the roster it fetched — the same check as
+     * chat-info's `memberSetVerified`. Null when no roster could be fetched: nothing was checked, so
+     * the header says so instead of claiming a match. The send path's alarm (`verificationError`)
+     * still wins over a passing check, since it may have seen a roster this panel did not.
+     */
+    readonly memberSetCheck = computed<boolean | null>(() => {
+        const roster = this.roster();
+        return roster ? rosterMatchesCommitment(roster) : null;
+    });
     readonly epoch = computed(() => this.roster()?.current_epoch ?? this.store.chatKeys()?.current_epoch ?? null);
     /** When the current epoch began, i.e. the last key rotation, when the keys are loaded. */
     readonly rotatedAt = computed(() => {
@@ -67,6 +81,7 @@ export class EncryptionPanelComponent {
 
     readonly members = computed(() => {
         const me = this.session.user()?.id;
+        const chatId = this.chatId();
         return (this.chat()?.participants ?? [])
             .filter((p) => p.user_id !== me)
             .map((p) => {
@@ -75,7 +90,9 @@ export class EncryptionPanelComponent {
                     userId: p.user_id,
                     name: identity.name,
                     avatarUrl: identity.avatarUrl,
-                    status: this.statuses()[p.user_id] ?? ('checking' as MemberKeyStatus),
+                    status: this.blocked(me, p.user_id, chatId)
+                        ? ('changed' as const)
+                        : (this.statuses()[p.user_id] ?? ('checking' as MemberKeyStatus)),
                 };
             });
     });
@@ -84,6 +101,7 @@ export class EncryptionPanelComponent {
     readonly okIcon = ShieldCheck;
     readonly alertIcon = ShieldAlert;
     readonly offIcon = ShieldOff;
+    readonly uncheckedIcon = ShieldQuestion;
 
     constructor() {
         effect(() => void this.load(this.chatId()));
@@ -132,6 +150,21 @@ export class EncryptionPanelComponent {
             }
             this.statuses.update((all) => ({ ...all, [participant.user_id]: status }));
         }
+    }
+
+    /**
+     * Sending in this chat is blocked on this member's number: this chat holds a refusal for them, or
+     * the send path's roster derived a number that differs from the confirmed one. Overrides the
+     * lookup-derived status, as the safety-number screen does — a server that equivocates can answer
+     * the batch lookup with the old keys while the roster carries new ones, and the badge would then
+     * read "Verified" for exactly the member sending is refused on. Reactive.
+     */
+    private blocked(me: string | undefined, userId: string, chatId: string): boolean {
+        return (
+            !!me &&
+            (this.keyChange.refusalFor(chatId, me, userId) !== null ||
+                this.keyChange.blockingNumber(me, userId, chatId) !== null)
+        );
     }
 
     openMember(userId: string): void {

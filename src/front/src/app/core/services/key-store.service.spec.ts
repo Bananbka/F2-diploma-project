@@ -1393,6 +1393,146 @@ describe('KeyStoreService', () => {
                 await service.lock();
                 expect(service.ownDevicesAdded()).toBeFalse();
             });
+
+            /** C3: the notice is lowered by acknowledging it, and the same device does not raise it again. */
+            it('lowers the added-device notice on acknowledgement, until a different device turns up', async () => {
+                const mine = await unlockWithBundle(true);
+                const peer = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                const newPhone = generateIdentity(USER, SECOND_DEVICE);
+                const THIRD_DEVICE = 'e3000000-0000-4000-8000-00000000003e';
+                const tablet = generateIdentity(USER, THIRD_DEVICE);
+                cryptoApi.getOwnIdentities.and.returnValue(
+                    of([ownRow(DEVICE, mine), ownRow(SECOND_DEVICE, newPhone), ownRow(THIRD_DEVICE, tablet)])
+                );
+                const lookup = (...extra: [string, IdentityBundle][]) =>
+                    cryptoApi.getKeysBatch.and.returnValue(
+                        of([
+                            publicKeyFor(USER, DEVICE, mine),
+                            ...extra.map(([id, bundle]) => publicKeyFor(USER, id, bundle)),
+                            publicKeyFor(SENDER_USER, SENDER_DEVICE, peer),
+                        ])
+                    );
+
+                lookup([SECOND_DEVICE, newPhone]);
+                await service.computeSafetyNumber(SENDER_USER);
+                expect(service.ownDevicesAdded()).toBeTrue();
+
+                service.acknowledgeOwnDevicesAdded();
+                expect(service.ownDevicesAdded()).toBeFalse();
+
+                const again = await service.computeSafetyNumber(SENDER_USER);
+                expect(again.ownDevicesAdded).withContext('the screen still says what the number covers').toBeTrue();
+                expect(service.ownDevicesAdded()).withContext('already acknowledged').toBeFalse();
+
+                lookup([SECOND_DEVICE, newPhone], [THIRD_DEVICE, tablet]);
+                await service.computeSafetyNumber(SENDER_USER);
+                expect(service.ownDevicesAdded()).withContext('a device not yet acknowledged').toBeTrue();
+            });
+
+            it('exposes the added-device notice read-only', async () => {
+                await unlockWithBundle(true);
+                expect((service.ownDevicesAdded as unknown as { set?: unknown }).set).toBeUndefined();
+            });
+
+            /** C4: a failed fresh device list is "could not check", not "unknown device". */
+            it('reports our own devices as unchecked, not unknown, when the fresh device list fails', async () => {
+                const mine = await unlockWithBundle(true);
+                const peer = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                const extraOfMine = generateIdentity(USER, SECOND_DEVICE);
+                cryptoApi.getKeysBatch.and.returnValue(
+                    of([
+                        publicKeyFor(USER, DEVICE, mine),
+                        publicKeyFor(USER, SECOND_DEVICE, extraOfMine),
+                        publicKeyFor(SENDER_USER, SENDER_DEVICE, peer),
+                    ])
+                );
+                cryptoApi.getOwnIdentities.and.returnValue(throwError(() => new HttpErrorResponse({ status: 503 })));
+
+                const result = await service.computeSafetyNumber(SENDER_USER);
+
+                expect(result.ownDevicesUnchecked).toBeTrue();
+                expect(result.ownDevicesUnknown).toBeFalse();
+                expect(result.ownDevicesAdded).withContext('not confirmed as ours either').toBeFalse();
+                expect(service.ownDevicesAdded()).toBeFalse();
+            });
+
+            it('does not report our own devices as unchecked when there is nothing to check', async () => {
+                const mine = await unlockWithBundle(true);
+                const peer = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                cryptoApi.getKeysBatch.and.returnValue(
+                    of([publicKeyFor(USER, DEVICE, mine), publicKeyFor(SENDER_USER, SENDER_DEVICE, peer)])
+                );
+                cryptoApi.getOwnIdentities.and.returnValue(throwError(() => new HttpErrorResponse({ status: 503 })));
+
+                const result = await service.computeSafetyNumber(SENDER_USER);
+
+                expect(result.ownDevicesUnchecked).toBeFalse();
+                expect(result.ownDevicesUnknown).toBeFalse();
+            });
+        });
+
+        /**
+         * S3: the wrap and the upload are awaited, and a verification can land in another tab during
+         * either. The chain was checked against the confirmations from before it, so it must not be
+         * cached or returned; the publish is redone from a fresh roster read.
+         */
+        describe('S3: a verification landing while a chain is being published', () => {
+            /** Simulates another tab confirming a number: storage only, no event yet. */
+            function confirmInAnotherTab(peerId: string, number: string): void {
+                const stored = JSON.parse(localStorage.getItem('ns.trusted_peers') ?? '{}') as Record<string, unknown>;
+                stored[`${USER}:${peerId}`] = { safetyNumber: number, verifiedAt: new Date().toISOString() };
+                localStorage.setItem('ns.trusted_peers', JSON.stringify(stored));
+            }
+
+            it('does not use the chain, and republishes against a re-checked roster', async () => {
+                const mine = await unlockWithBundle(true);
+                const peer = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                service.expectMembers(CHAT, { kind: 'private', selfId: USER, peerId: SENDER_USER });
+                cryptoApi.getRoster.and.returnValue(
+                    of(roster(entryFor(USER, DEVICE, mine), entryFor(SENDER_USER, SENDER_DEVICE, peer)))
+                );
+                let uploads = 0;
+                cryptoApi.publishSenderKey.and.callFake(() => {
+                    if (++uploads === 1) {
+                        // Someone unrelated to this chat is verified mid-upload.
+                        confirmInAnotherTab(OUTSIDER, numberFor([mine], [generateIdentity(OUTSIDER, OUTSIDER_DEVICE)]));
+                    }
+                    return of({}) as never;
+                });
+
+                const chain = await service.ensureSenderChain(CHAT, 1);
+
+                expect(cryptoApi.publishSenderKey).toHaveBeenCalledTimes(2);
+                expect(cryptoApi.getRoster).toHaveBeenCalledTimes(2);
+                expect(chain.senderKeyId)
+                    .withContext('the chain from the re-checked publish, not the first one')
+                    .toBe(cryptoApi.publishSenderKey.calls.mostRecent().args[2].sender_key_id);
+                expect(await service.ensureSenderChain(CHAT, 1))
+                    .withContext('and it is the one cached')
+                    .toBe(chain);
+            });
+
+            it('refuses the send when the verification made mid-publish exposes a changed key', async () => {
+                const mine = await unlockWithBundle(true);
+                const peer = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                const original = generateIdentity(SENDER_USER, SENDER_DEVICE);
+                service.expectMembers(CHAT, { kind: 'private', selfId: USER, peerId: SENDER_USER });
+                cryptoApi.getRoster.and.returnValue(
+                    of(roster(entryFor(USER, DEVICE, mine), entryFor(SENDER_USER, SENDER_DEVICE, peer)))
+                );
+                cryptoApi.publishSenderKey.and.callFake(() => {
+                    // The user confirms, elsewhere, a number this roster's keys do not derive.
+                    confirmInAnotherTab(SENDER_USER, numberFor([mine], [original]));
+                    return of({}) as never;
+                });
+
+                const failure = await failureOf(service.ensureSenderChain(CHAT, 1));
+
+                expect(failure).toBeInstanceOf(KeyChangedError);
+                expect(cryptoApi.publishSenderKey)
+                    .withContext('only the first, discarded upload')
+                    .toHaveBeenCalledTimes(1);
+            });
         });
 
         /** Round 2, item 1: a private expectation can never become a group one. */

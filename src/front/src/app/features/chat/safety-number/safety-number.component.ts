@@ -7,17 +7,13 @@ import { DirectoryService } from '../../../core/services/directory.service';
 import { KeyChangeStateService } from '../../../core/services/key-change-state.service';
 import { KeyStoreService } from '../../../core/services/key-store.service';
 import { SessionService } from '../../../core/services/session.service';
+import { safetyDigits } from '../../../core/services/trust-keys';
 import { TrustState, TrustStoreService } from '../../../core/services/trust-store.service';
 import { safetyNumberGroups } from '../../../shared/utils/display';
 import { SettingsService } from '../../settings/settings.service';
 
 /** Why a safety number could not be produced, so each case can say what is actually wrong. */
 export type SafetyFailure = 'peer-no-keys' | 'self-no-keys' | 'failed';
-
-/** Digits only, so formatting differences never read as a different number. */
-function digits(value: string): string {
-    return value.replace(/\D/g, '');
-}
 
 export function classifySafetyError(error: unknown): SafetyFailure {
     const message = error instanceof Error ? error.message : '';
@@ -90,7 +86,7 @@ export class SafetyNumberComponent {
     readonly numberChanged = computed(() => {
         const shown = this.shown();
         const live = this.liveNumber();
-        return !!shown && !!live && digits(shown) !== digits(live);
+        return !!shown && !!live && safetyDigits(shown) !== safetyDigits(live);
     });
 
     /**
@@ -100,11 +96,14 @@ export class SafetyNumberComponent {
     readonly lookupDisagrees = computed(() => {
         const blocking = this.blocking();
         const lookedUp = this.lookedUp();
-        return !!blocking && !!lookedUp && digits(blocking) !== digits(lookedUp);
+        return !!blocking && !!lookedUp && safetyDigits(blocking) !== safetyDigits(lookedUp);
     });
 
     /** Our own side of the number covers a device no device list of ours contains. */
     readonly ownDevicesUnknown = signal(false);
+
+    /** Our side covers a device our device list at unlock lacks, and a fresh list could not be fetched. */
+    readonly ownDevicesUnchecked = signal(false);
 
     /** Our side covers a device our account gained since unlock. A notice, not an alarm (N). */
     readonly ownDevicesAdded = signal(false);
@@ -180,6 +179,7 @@ export class SafetyNumberComponent {
         this.lookedUp.set(null);
         this.shown.set(null);
         this.ownDevicesUnknown.set(false);
+        this.ownDevicesUnchecked.set(false);
         this.ownDevicesAdded.set(false);
         this.saveFailed.set(false);
         this.forgetRefused.set(false);
@@ -194,6 +194,7 @@ export class SafetyNumberComponent {
             }
             this.lookedUp.set(result.number);
             this.ownDevicesUnknown.set(result.ownDevicesUnknown);
+            this.ownDevicesUnchecked.set(result.ownDevicesUnchecked);
             this.ownDevicesAdded.set(result.ownDevicesAdded);
             await this.reloadComparison();
         } catch (error) {

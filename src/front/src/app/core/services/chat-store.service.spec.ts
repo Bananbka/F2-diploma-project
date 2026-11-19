@@ -9,12 +9,19 @@ import { b64uEncode } from '../crypto/primitives';
 import { Chat } from '../models/chat.model';
 import { ChatKeys, ChatRoster, MessageAttachment, MessageResponse, RosterEntry } from '../models/crypto.model';
 import { ChatApiService } from './chat-api.service';
-import { ChatStoreService, FORWARD_KEY_CHANGED_NOTICE, FORWARD_MEMBERSHIP_NOTICE } from './chat-store.service';
+import {
+    ChatStoreService,
+    FORWARD_KEY_CHANGED_NOTICE,
+    FORWARD_MEMBERSHIP_NOTICE,
+    RECHECK_MEMBERSHIP_NOTICE,
+    RECHECK_PUBLISH_NOTICE,
+} from './chat-store.service';
 import { CryptoApiService } from './crypto-api.service';
 import {
     KeyChangedError,
     MemberSetMismatchError,
     MembershipMismatchError,
+    MembershipUnconfirmedError,
     RetryLimitExceededError,
     RosterVerificationError,
 } from './crypto-errors';
@@ -104,6 +111,7 @@ describe('ChatStoreService', () => {
             'expectMembers',
             'invalidateOwnChains',
             'recheckRoster',
+            'acknowledgeOwnDevicesAdded',
         ]);
         (keyStore as unknown as { ownDevicesAdded: unknown }).ownDevicesAdded = signal(false);
         TestBed.configureTestingModule({
@@ -568,6 +576,32 @@ describe('ChatStoreService', () => {
                 expect(store.realtimeError()).toBe(FORWARD_MEMBERSHIP_NOTICE);
             });
 
+            /** S2: a group target once seen as encrypted never receives a readable post. */
+            it('publishes nothing into an encrypted group the server now reports as a channel', async () => {
+                TestBed.inject(MembershipGuardService).noteEncrypted(TARGET, 'group');
+                store.chats.update((list) =>
+                    list.map((c) => (c.id === TARGET ? { ...c, chat_type: 'channel' as const } : c))
+                );
+
+                const sent = await store.forwardSelected(TARGET);
+
+                expect(sent).toBe(0);
+                expect(messages.sendChannelPost).not.toHaveBeenCalled();
+                expect(store.realtimeError()).toBe(FORWARD_MEMBERSHIP_NOTICE);
+            });
+
+            it('refuses a channel post into an encrypted group even if the membership check is bypassed', async () => {
+                const guard = TestBed.inject(MembershipGuardService);
+                guard.noteEncrypted(TARGET, 'group');
+                spyOn(guard, 'register');
+                store.chats.update((list) =>
+                    list.map((c) => (c.id === TARGET ? { ...c, chat_type: 'channel' as const } : c))
+                );
+
+                expect(await store.forwardSelected(TARGET)).toBe(0);
+                expect(messages.sendChannelPost).not.toHaveBeenCalled();
+            });
+
             it('stops at the first roster refusal instead of trying every message', async () => {
                 messages.sendText.and.rejectWith(new RosterVerificationError('Roster verification failed: x'));
                 store.messages.set([decrypted('m1', 'ok'), decrypted('m2', 'ok')]);
@@ -621,6 +655,28 @@ describe('ChatStoreService', () => {
                 await store.recheckKeyChange();
 
                 expect(store.memberVerificationCode()).toBe('MEMBER_SET_MISMATCH');
+            });
+
+            /** C6: a re-check that could not confirm membership says so, as a failed send row does. */
+            it('says the members could not be confirmed when that is why the re-check failed', async () => {
+                const cryptoApi = TestBed.inject(CryptoApiService) as jasmine.SpyObj<CryptoApiService>;
+                cryptoApi.getChatKeys.and.returnValue(of({ current_epoch: 1 } as ChatKeys));
+                keyStore.recheckRoster.and.rejectWith(new MembershipUnconfirmedError());
+
+                await store.recheckKeyChange();
+
+                expect(store.realtimeError()).toBe(RECHECK_MEMBERSHIP_NOTICE);
+                expect(store.memberVerificationError()).withContext('not an alarm').toBeNull();
+            });
+
+            it('says the key could not be shared when publishing kept failing', async () => {
+                const cryptoApi = TestBed.inject(CryptoApiService) as jasmine.SpyObj<CryptoApiService>;
+                cryptoApi.getChatKeys.and.returnValue(of({ current_epoch: 1 } as ChatKeys));
+                keyStore.recheckRoster.and.rejectWith(new RetryLimitExceededError(3, null));
+
+                await store.recheckKeyChange();
+
+                expect(store.realtimeError()).toBe(RECHECK_PUBLISH_NOTICE);
             });
         });
     });
@@ -804,6 +860,45 @@ describe('ChatStoreService', () => {
 
             expect(TestBed.inject(MessageService).sendChannelPost).not.toHaveBeenCalled();
             expect(store.memberVerificationCode()).toBe('MEMBERSHIP_MISMATCH');
+        });
+
+        /** S2: a group is never pinned, so being seen as encrypted is what protects it. */
+        it('raises the alarm instead of posting in the clear when an encrypted group becomes a channel', async () => {
+            store.chats.set([chat({ chat_type: 'group' })]);
+            store.activeChatId.set(CHAT);
+            await store.send('hello');
+
+            store.chats.set([chat({ chat_type: 'channel' })]);
+            await store.send('now a channel?');
+
+            expect(TestBed.inject(MessageService).sendChannelPost).not.toHaveBeenCalled();
+            expect(store.memberVerificationCode()).toBe('MEMBERSHIP_MISMATCH');
+            expect(store.memberVerificationError()).toContain('encrypted group');
+        });
+
+        it('remembers an encrypted group across a reload', async () => {
+            store.chats.set([chat({ chat_type: 'group' })]);
+            store.activeChatId.set(CHAT);
+            await store.send('hello');
+
+            const reloaded = Injector.create({
+                parent: TestBed.inject(Injector),
+                providers: [MembershipGuardService],
+            }).get(MembershipGuardService);
+
+            expect(reloaded.encryptedTypeOf(CHAT)).toBe('group');
+        });
+
+        it('still posts to a chat only ever seen as a channel', async () => {
+            const messages = TestBed.inject(MessageService) as jasmine.SpyObj<MessageService>;
+            messages.sendChannelPost.and.resolveTo(messageResponse({ _id: 'post', sender_id: ME }));
+            store.chats.set([chat({ chat_type: 'channel' })]);
+            store.activeChatId.set(CHAT);
+
+            await store.send('hello');
+
+            expect(messages.sendChannelPost).toHaveBeenCalledTimes(1);
+            expect(store.memberVerificationError()).toBeNull();
         });
 
         it('raises the alarm on open, not just on send, when the chat contradicts its pin', async () => {
@@ -1141,6 +1236,29 @@ describe('ChatStoreService', () => {
             await new Promise((resolve) => setTimeout(resolve, 0));
 
             expect(messages.loadMessages).toHaveBeenCalledWith(CHAT, 50, undefined, keys);
+        });
+
+        /** S2: a chat opened with keys is remembered as encrypted, before anything is sent in it. */
+        it('records a group opened with keys as encrypted', async () => {
+            sessionUser = { id: ME };
+            const chatApi = TestBed.inject(ChatApiService) as jasmine.SpyObj<ChatApiService>;
+            const cryptoApi = TestBed.inject(CryptoApiService) as jasmine.SpyObj<CryptoApiService>;
+            const messages = TestBed.inject(MessageService) as jasmine.SpyObj<MessageService>;
+            chatApi.getChat.and.returnValue(of(chat()));
+            cryptoApi.getChatKeys.and.returnValue(
+                of({ current_epoch: 1, epochs: [], distributions: [] } as unknown as ChatKeys)
+            );
+            chatApi.getPinnedMessages.and.returnValue(of([]));
+            chatApi.getReadState.and.returnValue(of([]));
+            messages.loadMessages.and.resolveTo({ raw: [], messages: [] });
+            const guard = TestBed.inject(MembershipGuardService);
+            expect(guard.encryptedTypeOf(CHAT)).toBeNull();
+
+            store.chats.set([chat()]);
+            store.activeChatId.set(CHAT);
+            await new Promise((resolve) => setTimeout(resolve, 0));
+
+            expect(guard.encryptedTypeOf(CHAT)).toBe('group');
         });
     });
 

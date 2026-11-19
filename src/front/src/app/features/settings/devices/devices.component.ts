@@ -62,6 +62,8 @@ export class DevicesComponent {
                     signed_prekey_created_at: identity.signed_prekey_created_at,
                 }))
             );
+            // The user is looking at the device list now: that is what the "device added" notice asks.
+            this.keyStore.acknowledgeOwnDevicesAdded();
         } catch {
             this.deviceError.set('Could not load your devices.');
         } finally {

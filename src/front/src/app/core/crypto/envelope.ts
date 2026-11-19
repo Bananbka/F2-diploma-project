@@ -95,6 +95,24 @@ export async function sealMessage(params: SealParams): Promise<MessageEnvelope> 
     };
 }
 
+/** Largest chain index the wire format can carry: the AAD encodes it as u32be. */
+export const MAX_CHAIN_INDEX = 0xffffffff;
+
+/**
+ * True when `idx` is something the AAD can encode at all. Checked before anything touches a
+ * receiver ratchet: a fractional or out-of-range index would otherwise pass the ratchet's skip
+ * arithmetic, advance the chain, and only then fail inside `u32be`, leaving the chain desynced.
+ */
+export function isValidChainIndex(idx: unknown): idx is number {
+    return typeof idx === 'number' && Number.isInteger(idx) && idx >= 0 && idx <= MAX_CHAIN_INDEX;
+}
+
+/**
+ * Check the envelope's signature without any message key. Needs only public material, so a
+ * receiver can (and must) run it BEFORE deriving the message key from its ratchet: deriving is
+ * destructive, and a forged envelope at a future index would otherwise burn the key the genuine
+ * message at that index needs.
+ */
 export function verifyEnvelopeSignature(
     envelope: MessageEnvelope,
     signingPublic: Uint8Array,
@@ -114,17 +132,22 @@ export interface OpenParams {
     envelope: MessageEnvelope;
     chatId: string;
     senderId: string;
-    signingPublic?: Uint8Array;
+    /** Required: there is no "open without verifying" mode. */
+    signingPublic: Uint8Array;
 }
 
 /**
- * Verify and decrypt. Signature verification happens BEFORE decryption when a key is supplied: a
- * client must never act on a message whose sender it has not authenticated.
+ * Verify and decrypt. Signature verification always happens BEFORE decryption: a client must
+ * never act on a message whose sender it has not authenticated. The key is mandatory so a caller
+ * that lost track of it fails loudly instead of silently skipping the check.
  */
 export async function openMessage(params: OpenParams): Promise<Uint8Array> {
-    const { envelope, chatId, senderId } = params;
+    const { envelope, chatId, senderId, signingPublic } = params;
 
-    if (params.signingPublic && !verifyEnvelopeSignature(envelope, params.signingPublic, chatId, senderId)) {
+    if (!(signingPublic instanceof Uint8Array) || signingPublic.length === 0) {
+        throw new Error('envelope signing key is required');
+    }
+    if (!verifyEnvelopeSignature(envelope, signingPublic, chatId, senderId)) {
         throw new Error('envelope signature does not verify');
     }
 

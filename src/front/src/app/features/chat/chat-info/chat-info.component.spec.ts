@@ -1,8 +1,13 @@
+import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter, Router } from '@angular/router';
 import { of, throwError } from 'rxjs';
 
+import { computeMemberSetHash } from '../../../core/crypto/grants';
+import { generateIdentity } from '../../../core/crypto/identity';
+import { b64uEncode } from '../../../core/crypto/primitives';
 import { Chat, InviteLink } from '../../../core/models/chat.model';
+import { ChatRoster, RosterEntry } from '../../../core/models/crypto.model';
 import { ChatApiService } from '../../../core/services/chat-api.service';
 import { ChatStoreService } from '../../../core/services/chat-store.service';
 import { ContactsApiService } from '../../../core/services/contacts-api.service';
@@ -45,8 +50,35 @@ function makeLink(id: string, token: string): InviteLink {
     };
 }
 
+/** A roster whose bindings and commitment really verify, so the green claim is reachable. */
+function validRoster(ids: string[]): ChatRoster {
+    const members: RosterEntry[] = ids.map((user_id) => {
+        // Device ids are signed over as UUIDs; derive one per user by swapping the first group.
+        const device_id = `dddddddd${user_id.slice(8)}`;
+        const bundle = generateIdentity(user_id, device_id, false);
+        return {
+            user_id,
+            device_id,
+            identity_key_id: 'k',
+            identity_public_key: b64uEncode(bundle.identityPublic),
+            signing_public_key: b64uEncode(bundle.signingPublic),
+            identity_key_signature: b64uEncode(bundle.identityKeySignature),
+            signed_prekey_public: null,
+            signed_prekey_signature: null,
+        };
+    });
+    return {
+        chat_id: CHAT_ID,
+        current_epoch: 1,
+        member_set_hash: computeMemberSetHash(members),
+        members,
+    } as ChatRoster;
+}
+
 describe('ChatInfoComponent', () => {
     let fixture: ComponentFixture<ChatInfoComponent>;
+    let keyChangedPeers: ReturnType<typeof signal<string[]>>;
+    let memberVerificationError: ReturnType<typeof signal<string | null>>;
     let chatApi: jasmine.SpyObj<ChatApiService>;
     const linkA = makeLink('link-a', 'token-a');
     const linkB = makeLink('link-b', 'token-b');
@@ -87,7 +119,11 @@ describe('ChatInfoComponent', () => {
         const contactsApi = jasmine.createSpyObj<ContactsApiService>('ContactsApiService', ['addContact']);
 
         const session = { user: () => ({ id: OWNER_ID }) } as unknown as SessionService;
+        keyChangedPeers = signal<string[]>([]);
+        memberVerificationError = signal<string | null>(null);
         const store = {
+            keyChangedPeers,
+            memberVerificationError,
             chats: () => [],
             activeChatId: { set: () => {} },
             loadChats: async () => {},
@@ -560,6 +596,7 @@ describe('ChatInfoComponent', () => {
             spyOn(TestBed.inject(KeyStoreService), 'computeSafetyNumber').and.resolveTo({
                 number: NUMBER,
                 ownDevicesUnknown: false,
+                ownDevicesUnchecked: false,
                 ownDevicesAdded: false,
             });
         });
@@ -660,6 +697,30 @@ describe('ChatInfoComponent', () => {
 
             expect(fixture.componentInstance.selectedMemberId()).toBeNull();
             expect(fixture.componentInstance.tab()).toBe('main');
+        });
+
+        /** S1: the green epoch badge is withheld while sending is blocked for a reason it cannot see. */
+        describe('the "Key epoch verified" badge', () => {
+            const badge = (host: HTMLElement) => host.querySelector('.badge.is-ok');
+
+            beforeEach(() => cryptoApi.getRoster.and.returnValue(of(validRoster([OWNER_ID, PEER_ID])) as never));
+
+            it('shows for a roster that matches its commitment', async () => {
+                const host = await mount();
+                expect(badge(host)?.textContent).toContain('Key epoch verified');
+            });
+
+            it('is withheld while a verified member has a changed key', async () => {
+                keyChangedPeers.set([PEER_ID]);
+                const host = await mount();
+                expect(badge(host)).toBeNull();
+            });
+
+            it('is withheld while the send path reports a membership failure', async () => {
+                memberVerificationError.set('Member verification failed: an outsider.');
+                const host = await mount();
+                expect(badge(host)).toBeNull();
+            });
         });
     });
 });

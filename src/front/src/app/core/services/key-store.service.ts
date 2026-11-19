@@ -38,6 +38,7 @@ import {
     MembershipUnconfirmedError,
     RetryLimitExceededError,
     RosterVerificationError,
+    TrustChangedDuringPublishError,
     UnknownOwnDeviceError,
 } from './crypto-errors';
 import { KeyChangeStateService, ObservationSource } from './key-change-state.service';
@@ -136,6 +137,12 @@ export interface SafetyNumberResult {
      * Matching digits would then confirm that device too.
      */
     ownDevicesUnknown: boolean;
+    /**
+     * Our side covers a device not in our device list at unlock, and a fresh list could not be
+     * fetched to say whether it is ours. Not the same claim as `ownDevicesUnknown` — nothing is known
+     * to be wrong — but the screen must still warn rather than imply the device was checked.
+     */
+    ownDevicesUnchecked: boolean;
     /** Our side covers a device our account gained since unlock (listed by our device list now). */
     ownDevicesAdded: boolean;
 }
@@ -220,8 +227,19 @@ export class KeyStoreService {
      * A device was added to our account since unlock: seen under our id in a roster or a lookup,
      * absent from the unlock-time list, present in a fresh device list. Not blocking — the user may
      * well have just signed in elsewhere — but worth a notice pointing at Settings → Devices.
+     * Raised only here; lowered by `acknowledgeOwnDevicesAdded` (or `lock`).
      */
-    readonly ownDevicesAdded = signal(false);
+    private readonly ownDevicesAddedState = signal(false);
+    readonly ownDevicesAdded = this.ownDevicesAddedState.asReadonly();
+
+    /** Signing keys behind the current `ownDevicesAdded` notice. */
+    private readonly addedOwnKeys = new Set<string>();
+
+    /**
+     * Added devices the user has acknowledged (looked at the device list, or dismissed the notice).
+     * Seeing one of these again does not raise the notice again; a device not among them does.
+     */
+    private readonly acknowledgedOwnKeys = new Set<string>();
 
     readonly isUnlocked = signal(false);
 
@@ -476,35 +494,66 @@ export class KeyStoreService {
         // fresh one knows. It is part of the digits being compared, so the screen must say so: two
         // people can match a number that covers a device neither of them controls.
         const extra = this.extraOwnKeys(identity, verified);
-        let ownDevicesUnknown: boolean;
+        let ownDevicesUnknown = false;
+        let ownDevicesUnchecked = false;
         try {
-            ownDevicesUnknown = (await this.unknownOwnKeys(identity, verified)).length > 0;
+            ownDevicesUnknown = (await this.unknownOwnKeys(identity, extra)).length > 0;
         } catch {
-            // Could not re-check our own device list: warn rather than imply it was confirmed.
-            ownDevicesUnknown = extra.length > 0;
+            // Could not re-check our own device list. Not evidence of anything — but the screen
+            // still warns, rather than implying the extra device was confirmed as ours.
+            ownDevicesUnchecked = true;
         }
-        const ownDevicesAdded = extra.length > 0 && !ownDevicesUnknown;
+        const ownDevicesAdded = extra.length > 0 && !ownDevicesUnknown && !ownDevicesUnchecked;
         if (ownDevicesAdded) {
-            this.ownDevicesAdded.set(true);
+            this.noteOwnDevicesAdded(extra);
         }
-        return { number, ownDevicesUnknown, ownDevicesAdded };
+        return { number, ownDevicesUnknown, ownDevicesUnchecked, ownDevicesAdded };
     }
 
-    /** Signing keys under our own id in `keys` that are not among our devices as known at unlock. */
+    /**
+     * The user has seen the devices behind the `ownDevicesAdded` notice — the device list was shown,
+     * or the notice dismissed. Lowers it; those devices do not raise it again this session.
+     */
+    acknowledgeOwnDevicesAdded(): void {
+        this.addedOwnKeys.forEach((key) => this.acknowledgedOwnKeys.add(key));
+        this.addedOwnKeys.clear();
+        this.ownDevicesAddedState.set(false);
+    }
+
+    /** Raise the `ownDevicesAdded` notice for any of these confirmed-ours keys not yet acknowledged. */
+    private noteOwnDevicesAdded(extra: readonly string[]): void {
+        const fresh = extra.filter((key) => !this.acknowledgedOwnKeys.has(key));
+        if (fresh.length > 0) {
+            fresh.forEach((key) => this.addedOwnKeys.add(key));
+            this.ownDevicesAddedState.set(true);
+        }
+    }
+
+    /**
+     * Signing keys under our own id in `keys` that are not among our devices as known at unlock.
+     *
+     * Also what attributes a verified peer's changed number to *our* side: a device under our id
+     * changes the number with every verified peer at once, and blaming each peer would mislead.
+     * Extra keys only: a device revoked this session is merely absent, which changes the number but
+     * is our own doing.
+     *
+     * TODO(G6): attribute precisely by storing our own fingerprint material in each trust record at
+     * verification time; then a change can be pinned to whichever side's material moved, without
+     * relying on any server-supplied device list.
+     */
     private extraOwnKeys(identity: UnlockedIdentity, keys: readonly KeyRow[]): string[] {
         const known = new Set(this.ownDevicesAtUnlock.values());
         return [...this.activeSigningKeys(keys, identity.userId)].filter((key) => !known.has(key));
     }
 
     /**
-     * Signing keys under our own id in `keys` that neither our device list at unlock nor a fresh
-     * `GET /crypto/identity/me` contains. Only *extra* keys count: a device revoked this session
-     * is simply absent from a roster, which is not suspicious. The fresh list is fetched only when
-     * the unlock-time list does not already account for every key; a transient failure of that
-     * fetch propagates (the publish retry policy handles it) rather than being read as an alarm.
+     * Those of `extra` (from `extraOwnKeys`) that a fresh `GET /crypto/identity/me` does not contain
+     * either. Only *extra* keys count: a device revoked this session is simply absent from a roster,
+     * which is not suspicious. The fresh list is fetched only when there is an extra key to explain;
+     * a transient failure of that fetch propagates (the publish retry policy handles it) rather than
+     * being read as an alarm.
      */
-    private async unknownOwnKeys(identity: UnlockedIdentity, keys: readonly KeyRow[]): Promise<string[]> {
-        const extra = this.extraOwnKeys(identity, keys);
+    private async unknownOwnKeys(identity: UnlockedIdentity, extra: readonly string[]): Promise<string[]> {
         if (extra.length === 0) {
             return [];
         }
@@ -584,7 +633,8 @@ export class KeyStoreService {
      * decide what an absent self means instead (the roster path refuses outright).
      *
      * Same filter as `computeSafetyNumber`, so both derive the same number from the same devices.
-     * The confirmed records are re-read first: another tab may have verified someone a moment ago.
+     * Callers re-read the confirmed records (`TrustStoreService.refresh`) first — once per batch of
+     * calls, not per call: another tab may have verified someone a moment ago.
      */
     private recordNumbersAndFindChanges(
         identity: UnlockedIdentity,
@@ -592,8 +642,6 @@ export class KeyStoreService {
         source: ObservationSource,
         chatId?: string
     ): KeyChangedPeer[] | null {
-        this.trust.refresh();
-
         const byUser = new Map<string, Uint8Array[]>();
         for (const key of this.bindingVerifiedActive(keys)) {
             const list = byUser.get(key.user_id) ?? [];
@@ -630,22 +678,6 @@ export class KeyStoreService {
         }
 
         return changed;
-    }
-
-    /**
-     * Whether the roster carries a key under our own user id that was not ours at unlock — i.e. a
-     * device of ours added since (by the time this runs, `unknownOwnKeys` has already refused any
-     * key the fresh device list does not have either). Asked once a verified peer's number changed,
-     * to say *whose* side changed: a device under our id changes the number with every verified
-     * peer at once, and blaming each peer would mislead. Extra keys only: a device revoked this
-     * session is merely absent, which changes the number but is our own doing.
-     *
-     * TODO(G6): attribute precisely by storing our own fingerprint material in each trust record at
-     * verification time; then a change can be pinned to whichever side's material moved, without
-     * relying on any server-supplied device list.
-     */
-    private ownDevicesDiffer(identity: UnlockedIdentity, roster: ChatRoster): boolean {
-        return this.extraOwnKeys(identity, roster.members).length > 0;
     }
 
     /**
@@ -708,7 +740,9 @@ export class KeyStoreService {
         this.chainOwners.clear();
         this.memberExpectations.clear();
         this.ownDevicesAtUnlock = new Map();
-        this.ownDevicesAdded.set(false);
+        this.ownDevicesAddedState.set(false);
+        this.addedOwnKeys.clear();
+        this.acknowledgedOwnKeys.clear();
         this.isUnlocked.set(false);
         // Persisted skipped keys go with the KEK that wraps them: lock, logout, password reset and
         // account deletion all land here.
@@ -896,11 +930,12 @@ export class KeyStoreService {
 
         // A device under our own id reads everything we send, in every chat, and no unverified
         // peer's number would ever reveal it — so this is checked regardless of verification state.
-        const unknownOwn = await this.unknownOwnKeys(identity, roster.members);
-        if (unknownOwn.length === 0 && this.extraOwnKeys(identity, roster.members).length > 0) {
+        const extraOwn = this.extraOwnKeys(identity, roster.members);
+        const unknownOwn = await this.unknownOwnKeys(identity, extraOwn);
+        if (unknownOwn.length === 0 && extraOwn.length > 0) {
             // A device our account gained since unlock, confirmed by our own device list: allowed,
             // but surfaced as a notice (`ownDevicesAdded`).
-            this.ownDevicesAdded.set(true);
+            this.noteOwnDevicesAdded(extraOwn);
         }
         if (unknownOwn.length > 0) {
             throw new UnknownOwnDeviceError(
@@ -916,10 +951,12 @@ export class KeyStoreService {
         // derive to must still be the one on record, or nothing is wrapped. Peers never verified
         // (trust on first use) are unaffected, as are peers whose number still matches.
         //
-        // The revision is read after `recordNumbersAndFindChanges` refreshed the records it compared against,
-        // and stamped on the chain: any later change to what the user confirmed retires the chain.
-        const changed = this.recordNumbersAndFindChanges(identity, roster.members, 'roster', chatId);
+        // The records are re-read first and the revision taken with them, then stamped on the chain:
+        // any later change to what the user confirmed retires the chain (and one that lands while
+        // this chain is being wrapped and published is caught before it is returned, below).
+        this.trust.refresh();
         const trustRevision = this.trust.revision();
+        const changed = this.recordNumbersAndFindChanges(identity, roster.members, 'roster', chatId);
         if (changed === null) {
             // `verifyRosterMembership` already refused a roster without us; kept as a type guard.
             throw ownDevicesMissing();
@@ -927,7 +964,9 @@ export class KeyStoreService {
         if (changed.length > 0) {
             // Remembered per chat, so another chat's honest roster for the same person cannot erase
             // what this one was refused on (see `KeyChangeStateService.refusals`).
-            const ownDevicesChanged = this.ownDevicesDiffer(identity, roster);
+            // Attributed to our side when the roster carries a device of ours added since unlock
+            // (`extraOwnKeys`): it changes the number with every verified peer at once.
+            const ownDevicesChanged = extraOwn.length > 0;
             for (const peer of changed) {
                 this.keyChange.recordRefusal(
                     chatId,
@@ -998,6 +1037,15 @@ export class KeyStoreService {
                 grants,
             })
         );
+
+        // The wrap and the upload above are awaited, and a verification (here or in another tab)
+        // can land during either. The roster was checked against the confirmations as they were
+        // before it, so this chain must not seal the message in flight: drop it uncached and let the
+        // retry loop in `ensureSenderChain` publish afresh against a re-read, re-checked roster.
+        this.trust.refresh();
+        if (this.trust.revision() !== trustRevision) {
+            throw new TrustChangedDuringPublishError();
+        }
 
         const own: OwnChain = {
             senderKeyId,
@@ -1074,6 +1122,9 @@ export class KeyStoreService {
     async ingestDistributions(chatId: string, distributions: Distribution[]): Promise<void> {
         const identity = this.requireIdentity();
         const token = this.sessionToken;
+        // Once for the whole batch rather than per distribution: each refresh re-reads and re-parses
+        // the stored records, and a verification made mid-batch is caught by the next send anyway.
+        this.trust.refresh();
 
         for (const dist of distributions) {
             const cacheKey = `${chatId}:${dist.epoch}:${dist.sender_key_id}`;

@@ -154,6 +154,18 @@ export function isRetryLimitExceeded(error: unknown): error is RetryLimitExceede
     return error instanceof RetryLimitExceededError;
 }
 
+/**
+ * What the user has confirmed changed while a sender chain was being wrapped and published — here or
+ * in another tab. The roster was checked against the old confirmations, so the chain is not used:
+ * not an alarm, just a publish to redo from a fresh roster read (`isRetryablePublishError`).
+ */
+export class TrustChangedDuringPublishError extends Error {
+    constructor() {
+        super('Your verified safety numbers changed while the key was being published; re-checking.');
+        this.name = 'TrustChangedDuringPublishError';
+    }
+}
+
 /** Sending must be blocked outright: we refused to distribute keys to an unverifiable roster. */
 export function isRosterVerificationFailure(error: unknown): error is RosterVerificationError {
     return error instanceof RosterVerificationError;
@@ -161,10 +173,14 @@ export function isRosterVerificationFailure(error: unknown): error is RosterVeri
 
 /**
  * Failures worth another attempt at publishing a sender key: no response at all, a server fault,
- * the epoch closing under us, or the member set moving between the roster read and the upload.
+ * the epoch closing under us, the member set moving between the roster read and the upload, or the
+ * user's confirmed safety numbers changing while the chain was being wrapped.
  * Everything else (a 4xx that says "no", or a roster refusal) will not change by asking again.
  */
 export function isRetryablePublishError(error: unknown): boolean {
+    if (error instanceof TrustChangedDuringPublishError) {
+        return true;
+    }
     if (!(error instanceof HttpErrorResponse)) {
         return false;
     }
