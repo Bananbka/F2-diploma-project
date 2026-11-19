@@ -1482,14 +1482,35 @@ export class ChatStoreService {
         this.messages.update((list) => list.filter((m) => m.id !== messageId));
     }
 
-    /** Toggle the caller's reaction: the same emoji again removes it, a different one adds another. */
+    /**
+     * Toggle the caller's reaction: the same emoji again removes it, a different one adds another.
+     *
+     * The per-message caps are enforced by the API alone and reported here. There is deliberately
+     * no client-side pre-check: the server removes an existing reaction before it ever consults a
+     * cap, so toggling one off always works, and a local guard counting reactions from a possibly
+     * stale message could only get that wrong.
+     */
     async react(messageId: string, emoji: string): Promise<void> {
         try {
             const raw = await firstValueFrom(this.chatApi.toggleReaction(messageId, emoji));
             this.applyMeta(raw);
-        } catch {
-            this.realtimeError.set('Could not react to that message.');
+        } catch (error) {
+            this.realtimeError.set(this.reactErrorMessage(error));
         }
+    }
+
+    private reactErrorMessage(error: unknown): string {
+        const code =
+            error instanceof HttpErrorResponse && typeof error.error?.error_code === 'string'
+                ? error.error.error_code
+                : null;
+        if (code === 'REACTION_LIMIT_REACHED') {
+            return 'You can add at most 3 reactions to a message. Remove one of yours first.';
+        }
+        if (code === 'REACTION_EMOJI_LIMIT_REACHED') {
+            return 'This message already has the maximum of 20 different reactions. Pick one of the existing ones.';
+        }
+        return 'Could not react to that message.';
     }
 
     /** Explicit removal — used by the "remove your reaction" affordance rather than the toggle. */

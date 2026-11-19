@@ -1450,6 +1450,57 @@ describe('ChatStoreService', () => {
             expect(store.messages()[0].reactions).toEqual(raw.reactions);
         });
 
+        /** The caps are the server's; each one gets its own explanation rather than a generic failure. */
+        it('reports REACTION_LIMIT_REACHED as the per-user cap', async () => {
+            chatApi.toggleReaction.and.returnValue(
+                throwError(
+                    () => new HttpErrorResponse({ status: 409, error: { error_code: 'REACTION_LIMIT_REACHED' } })
+                )
+            );
+
+            await store.react('a', '🔥');
+
+            expect(store.realtimeError()).toContain('at most 3 reactions');
+        });
+
+        it('reports REACTION_EMOJI_LIMIT_REACHED as the per-message cap', async () => {
+            chatApi.toggleReaction.and.returnValue(
+                throwError(
+                    () =>
+                        new HttpErrorResponse({ status: 409, error: { error_code: 'REACTION_EMOJI_LIMIT_REACHED' } })
+                )
+            );
+
+            await store.react('a', '🔥');
+
+            expect(store.realtimeError()).toContain('20 different reactions');
+        });
+
+        it('keeps the generic notice for any other reaction failure', async () => {
+            chatApi.toggleReaction.and.returnValue(throwError(() => new HttpErrorResponse({ status: 500 })));
+
+            await store.react('a', '🔥');
+
+            expect(store.realtimeError()).toBe('Could not react to that message.');
+        });
+
+        /**
+         * Taking a reaction back must never be refused locally: a user already at the cap of three
+         * still reaches the endpoint, which removes before it checks any limit.
+         */
+        it('sends a toggle-off to the server even when the user already holds three reactions', async () => {
+            const mine = ['👍', '🔥', '🎉'].map((e) => ({ user_id: 'me', emoji: e, created_at: 'now' }));
+            store.messages.set([{ ...decrypted('a', 'ok'), reactions: mine }]);
+            const raw = messageResponse({ _id: 'a', reactions: mine.slice(1) });
+            chatApi.toggleReaction.and.returnValue(of(raw));
+            messages.patchMeta.and.returnValue({ ...decrypted('a', 'ok'), reactions: raw.reactions, isPinned: false });
+
+            await store.react('a', '👍');
+
+            expect(chatApi.toggleReaction).toHaveBeenCalledWith('a', '👍');
+            expect(store.messages()[0].reactions).toEqual(raw.reactions);
+        });
+
         /** A permission refusal must surface, not disappear silently. */
         it('reports PIN_FORBIDDEN as a readable message', async () => {
             chatApi.pinMessage.and.returnValue(
