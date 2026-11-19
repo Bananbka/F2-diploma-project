@@ -53,8 +53,10 @@ import { ContextMenuService } from '../../../shared/ui/context-menu/context-menu
 import { DismissStackService } from '../../../shared/ui/dismiss/dismiss-layer.service';
 import { DismissOnEscapeDirective } from '../../../shared/ui/dismiss/dismiss-on-escape.directive';
 import { avatarKindFor, DELETED_USER_LABEL } from '../../../shared/utils/display';
+import { SettingsService } from '../../settings/settings.service';
 import { ChatBackgroundComponent } from '../chat-background/chat-background.component';
 import { ComposedMessage, ComposerComponent } from '../composer/composer.component';
+import { InfoDialogService } from '../info-dialog/info-dialog.service';
 import { MessageBubbleComponent, MessageMenuRequest } from '../message-bubble/message-bubble.component';
 import { StickerPackViewerService } from '../stickers/sticker-pack-dialog/sticker-pack-viewer';
 import { StickToBottom } from './stick-to-bottom';
@@ -88,6 +90,8 @@ export class ChatViewComponent {
     private readonly session = inject(SessionService);
     private readonly router = inject(Router);
     private readonly panel = inject(ChatPanelStoreService);
+    private readonly infoDialog = inject(InfoDialogService);
+    private readonly settings = inject(SettingsService);
     // Root-scoped, like the composer's own instance — injected here too so edit-start can refuse
     // to fire while a voice note is in flight, rather than threading a new output through the
     // composer just to observe its recording state.
@@ -104,6 +108,20 @@ export class ChatViewComponent {
     readonly canSend = this.store.canSend;
     readonly memberVerificationError = this.store.memberVerificationError;
     readonly memberVerificationCode = this.store.memberVerificationCode;
+    /**
+     * Verified members whose key changed. Blocks sending like the roster alarm, but is its own
+     * state: the roster is consistent, it just is not the person the user compared numbers with.
+     * Resolved only from the safety-number screen, so the banner is not dismissible — hiding it
+     * would leave a disabled composer with no way out.
+     */
+    readonly keyChangedPeers = this.store.keyChangedPeers;
+    /** The change is in our own device list; the banner then must not blame the peers. */
+    readonly ownDevicesChanged = this.store.ownDevicesChanged;
+    /** A device was added to our account since unlock (non-blocking notice, linking to Devices). */
+    readonly ownDevicesAdded = this.store.ownDevicesAdded;
+    readonly keyChangedMembers = computed(() =>
+        this.keyChangedPeers().map((userId) => ({ userId, name: this.directory.lookup(userId).name }))
+    );
     readonly encryptionUnavailable = this.store.encryptionUnavailable;
     readonly sendBlockedReason = this.store.sendBlockedReason;
     readonly peerDeleted = this.store.peerDeleted;
@@ -625,6 +643,14 @@ export class ChatViewComponent {
 
         const editing = this.editing();
         const replyTo = this.replyingTo();
+
+        // An edit is sealed on the sending chain, so whatever blocks sending blocks it too. Checked
+        // before the compose state is cleared: the edited text stays in the composer, and the user is
+        // told, rather than the edit silently vanishing.
+        if (editing && !this.canSend()) {
+            this.store.realtimeError.set('Not edited: sending is blocked in this chat.');
+            return;
+        }
         this.cancelCompose();
 
         if (editing) {
@@ -713,6 +739,37 @@ export class ChatViewComponent {
      */
     openProfile(): void {
         this.panel.showProfile();
+    }
+
+    /** Devices live on the Security tab of the settings dialog. */
+    reviewDevices(): void {
+        this.settings.open('security');
+    }
+
+    /** Hide the added-device notice until a device not yet acknowledged turns up. */
+    dismissOwnDevicesAdded(): void {
+        this.store.dismissOwnDevicesAdded();
+    }
+
+    /** A "Re-check" from the key-changed banner is in flight. */
+    readonly rechecking = signal(false);
+
+    /** Re-run the open chat's roster check (`ChatStoreService.recheckKeyChange`). */
+    async recheckKeys(): Promise<void> {
+        this.rechecking.set(true);
+        try {
+            await this.store.recheckKeyChange();
+        } finally {
+            this.rechecking.set(false);
+        }
+    }
+
+    /** The key-changed banner's way out: the existing safety-number screen, on that person. */
+    reviewSafetyNumber(userId: string): void {
+        const chatId = this.chat()?.id;
+        if (chatId) {
+            this.infoDialog.openSafety(chatId, userId);
+        }
     }
 
     async backToList(): Promise<void> {

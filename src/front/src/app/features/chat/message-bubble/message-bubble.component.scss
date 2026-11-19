@@ -310,6 +310,59 @@
     opacity: 0.7;
 }
 
+/* A file is decrypted on demand, so it is a button rather than a link to the stored ciphertext. */
+.attachment.is-download {
+    width: 100%;
+    border: 0;
+    font: inherit;
+    font-size: 0.75rem;
+    text-align: left;
+    cursor: pointer;
+
+    &:focus-visible {
+        outline: 2px solid var(--ring, currentColor);
+        outline-offset: 1px;
+    }
+
+    &:disabled {
+        cursor: progress;
+        opacity: 0.75;
+    }
+}
+
+/* Nothing to download: shown, never offered. No hover, no pointer, dashed so it reads as absent. */
+.attachment.is-unavailable {
+    background: transparent;
+    border: 1px dashed rgb(255 255 255 / 20%);
+    opacity: 0.8;
+    cursor: default;
+
+    &:hover {
+        background: transparent;
+    }
+}
+
+.attachment-note {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    margin: 0.25rem 0 0;
+    font-size: 0.6875rem;
+    line-height: 1.35;
+    opacity: 0.8;
+
+    &.is-error {
+        color: var(--danger);
+        opacity: 1;
+    }
+
+    lucide-icon {
+        flex-shrink: 0;
+        width: 0.75rem;
+        height: 0.75rem;
+    }
+}
+
 /* ── Media attachments ───────────────────────────────────────────────────────────────────────── */
 
 .media-tile {

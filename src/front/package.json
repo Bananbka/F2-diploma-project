@@ -18,13 +18,13 @@
   "private": true,
   "dependencies": {
     "@angular/animations": "^19.2.25",
-    "@angular/common": "^19.2.0",
-    "@angular/compiler": "^19.2.0",
-    "@angular/core": "^19.2.0",
-    "@angular/forms": "^19.2.0",
-    "@angular/platform-browser": "^19.2.0",
-    "@angular/platform-browser-dynamic": "^19.2.0",
-    "@angular/router": "^19.2.0",
+    "@angular/common": "^19.2.25",
+    "@angular/compiler": "^19.2.25",
+    "@angular/core": "^19.2.25",
+    "@angular/forms": "^19.2.25",
+    "@angular/platform-browser": "^19.2.25",
+    "@angular/platform-browser-dynamic": "^19.2.25",
+    "@angular/router": "^19.2.25",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0",
     "@twemoji/api": "^17.0.3",
@@ -39,7 +39,7 @@
     "@angular-devkit/build-angular": "^19.2.27",
     "@angular-eslint/eslint-plugin": "^19.8.1",
     "@angular/cli": "^19.2.27",
-    "@angular/compiler-cli": "^19.2.0",
+    "@angular/compiler-cli": "^19.2.25",
     "@twemoji/svg": "^15.0.0",
     "@types/jasmine": "~5.1.0",
     "@types/qrcode": "^1.5.6",
@@ -55,5 +55,17 @@
     "typescript": "~5.7.2",
     "typescript-eslint": "^8.65.0",
     "unicode-emoji-json": "0.9.0"
+  },
+  "overrides": {
+    "brace-expansion@1": "^1.1.22",
+    "express@4": "^4.22.3",
+    "http-proxy-middleware@3": "^3.0.11",
+    "piscina@4": "^4.9.4",
+    "postcss@8": "^8.5.33",
+    "qs@6": "^6.17.1",
+    "serialize-javascript": "^7.1.4",
+    "tar": "^7.5.23",
+    "vite@6": "^6.4.6",
+    "webpack-dev-middleware@7": "^7.4.6"
   }
 }

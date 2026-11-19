@@ -29,7 +29,9 @@ from app.domains.users.models import User  # noqa: F401
 from app.domains.chats.services import chat_services
 from app.domains.users.services import account_deletion_service
 
+from tests.crypto.test_channel_api import _post as _channel_post
 from tests.crypto.test_epoch_api import _group_with, _publish_identity
+from tests.crypto.test_event_stream import _connect as _ws_connect, _recv_type
 from tests.crypto.test_identity_api import BASE, _register_user, rate_limit_bypass_headers
 from tests.crypto.test_message_envelope_api import _encrypted_private_chat
 from tests.crypto.test_rotation_api import _publish_chain, _seal
@@ -605,20 +607,86 @@ async def test_deleting_the_owner_while_they_transfer_ownership_leaves_exactly_o
             await c.aclose()
 
 
-async def test_channel_ownership_follows_the_same_rule():
+async def _channel(owner, subscriber_ids) -> uuid.UUID:
+    r = await owner.post("/chats/channel", json={
+        "title": "News", "description": "d", "subscriber_ids": [str(s) for s in subscriber_ids],
+    })
+    assert r.status_code == 200, r.text
+    return uuid.UUID(r.json()["data"]["id"])
+
+
+async def test_channel_ownership_passes_to_an_admin_not_an_older_subscriber():
     alice, alice_id = await _register_user()
     bob, bob_id = await _register_user()
+    carol, carol_id = await _register_user()
     try:
-        r = await alice.post("/chats/channel", json={
-            "title": "News", "description": "d", "subscriber_ids": [str(bob_id)],
-        })
+        chat_id = await _channel(alice, [bob_id, carol_id])
+        r = await alice.post(
+            f"/chats/{chat_id}/change-role", json={"user_id": str(carol_id), "role": "admin"}
+        )
         assert r.status_code == 200, r.text
-        chat_id = uuid.UUID(r.json()["data"]["id"])
 
         assert (await _delete_account(alice)).status_code == 200
 
+        roles = await _roles(chat_id)
+        assert await _owners(chat_id) == [carol_id]
+        assert roles[bob_id].lower().endswith("member"), "a subscriber is never promoted"
+        assert alice_id not in roles
+    finally:
+        for c in (alice, bob, carol):
+            await c.aclose()
+
+
+async def test_channel_without_an_admin_is_deleted_with_its_owner():
+    """B-M7: promoting the oldest subscriber of an open-enrollment channel to owner was a privilege
+    escalation the owner never chose. With no admin to inherit it, the channel goes: the row, its
+    posts, and a `chat_deleted` to every subscriber, exactly as `DELETE /chats/{id}` would."""
+    alice, alice_id = await _register_user()
+    bob, bob_id = await _register_user()
+    carol, carol_id = await _register_user()
+    try:
+        _, keys = await _publish_identity(alice, alice_id)
+        chat_id = await _channel(alice, [bob_id, carol_id])
+        r = await alice.post("/messages/", json={
+            "chat_id": str(chat_id), "channel_post": _channel_post(keys, chat_id, alice_id),
+        })
+        assert r.status_code == 201, r.text
+
+        async with _ws_connect(bob) as ws:
+            assert (await _delete_account(alice)).status_code == 200
+            event = await _recv_type(ws, "chat_deleted", timeout=5.0)
+            assert event["payload"]["chat_id"] == str(chat_id)
+
+        assert await _scalar("SELECT count(*) FROM chats WHERE id = :c", c=chat_id) == 0
+        assert await _scalar(
+            "SELECT count(*) FROM chat_participants WHERE chat_id = :c", c=chat_id
+        ) == 0
+
+        mongo = AsyncIOMotorClient(app_settings.MONGO_URL, uuidRepresentation="standard")
+        try:
+            messages = mongo[app_settings.MONGO_DB_NAME]["messages"]
+            assert await messages.count_documents({"chat_id": chat_id}) == 0
+        finally:
+            mongo.close()
+
+        r = await bob.get(f"/chats/{chat_id}")
+        assert r.status_code == 403, r.text
+    finally:
+        for c in (alice, bob, carol):
+            await c.aclose()
+
+
+async def test_group_without_an_admin_still_passes_to_its_oldest_member():
+    """The channel rule must not leak into groups, whose members already read and write
+    everything: there the oldest member inherits, as before."""
+    alice, alice_id = await _register_user()
+    bob, bob_id = await _register_user()
+    try:
+        chat_id = await _group_with(alice, bob_id)
+        assert (await _delete_account(alice)).status_code == 200
+
+        assert await _scalar("SELECT count(*) FROM chats WHERE id = :c", c=chat_id) == 1
         assert await _owners(chat_id) == [bob_id]
-        assert alice_id not in await _roles(chat_id)
     finally:
         await alice.aclose()
         await bob.aclose()

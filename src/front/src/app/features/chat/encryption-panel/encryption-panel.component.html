@@ -21,20 +21,38 @@
 } @else {
     <section
         class="status"
-        [class.is-alert]="verificationError()"
+        [class.is-alert]="verificationError() || memberSetCheck() === false"
+        [class.is-neutral]="!verificationError() && memberSetCheck() === null"
     >
-        <lucide-icon [img]="verificationError() ? alertIcon : okIcon" />
+        <lucide-icon
+            [img]="
+                verificationError() || memberSetCheck() === false
+                    ? alertIcon
+                    : memberSetCheck() === null
+                      ? uncheckedIcon
+                      : okIcon
+            "
+        />
         <div>
-            <p class="status-title">
-                {{ verificationError() ? 'Member set could not be verified' : 'End-to-end encrypted' }}
-            </p>
-            <p class="muted">
-                @if (verificationError()) {
-                    {{ verificationError() }}
-                } @else {
-                    The member list matches the commitment for the current keys.
-                }
-            </p>
+            @if (verificationError()) {
+                <p class="status-title">Member set could not be verified</p>
+                <p class="muted">{{ verificationError() }}</p>
+            } @else if (memberSetCheck() === false) {
+                <p class="status-title">Member set does not match</p>
+                <p class="muted">
+                    The member list does not match the commitment for the current keys. A device may have been added
+                    without the members' knowledge; this client will not distribute keys while that is true.
+                </p>
+            } @else if (memberSetCheck() === true) {
+                <p class="status-title">End-to-end encrypted</p>
+                <p class="muted">The member list matches the commitment for the current keys.</p>
+            } @else {
+                <p class="status-title">End-to-end encrypted</p>
+                <p class="muted">
+                    The member list has not been checked against the commitment for the current keys: it could not be
+                    loaded.
+                </p>
+            }
             <dl class="facts">
                 @if (epoch() !== null) {
                     <div>

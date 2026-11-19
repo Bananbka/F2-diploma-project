@@ -16,7 +16,6 @@ from app.domains.messages.schemas.messages_schemas import (
     MessageCreateRequest,
     MessageUpdateRequest,
     ReactionRequest,
-    validate_emoji,
 )
 from app.domains.messages.schemas.ws_schemas import WSMessageEnvelope, WSEventType
 from app.domains.messages.services import messages_service
@@ -238,7 +237,7 @@ async def react_to_message(
 )
 async def unreact_to_message(
         message_id: str = Path(..., description="Message ID"),
-        emoji: str = Path(..., description="The emoji to remove", min_length=1, max_length=8),
+        emoji: str = Path(..., description="The emoji to remove", min_length=1, max_length=32),
         user: User = Depends(get_current_user),
         db: AsyncSession = Depends(get_db), mongo_db: AsyncIOMotorDatabase = Depends(get_mongo_db),
         redis: Redis = Depends(get_redis),
@@ -246,10 +245,13 @@ async def unreact_to_message(
 ):
     """Explicit removal, distinct from the toggle above and idempotent: removing a reaction that
     was never there is a success, not a 404."""
-    try:
-        emoji = validate_emoji(emoji)
-    except ValueError as exc:
-        raise AppException(422, "INVALID_EMOJI", str(exc))
+    # Deliberately NOT `validate_emoji`: that guards what may be *added*. Removal is a `$pull` of
+    # the caller's own entry matching this exact string, so there is nothing a malformed value can
+    # do except match nothing — while running the stricter add-time grammar here would strand any
+    # reaction stored before that grammar existed, with no way for its owner to take it back.
+    emoji = emoji.strip()
+    if not emoji:
+        raise AppException(422, "INVALID_EMOJI", "emoji must not be empty")
 
     await enforce_rate_limit(
         redis,

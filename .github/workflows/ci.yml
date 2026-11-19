@@ -239,6 +239,27 @@ jobs:
           chmod +x "$shim_dir/docker"
           PATH="$shim_dir:$PATH" npm run interop
 
+  # Blocking: a known advisory in any pinned backend dependency fails this job. Kept as its own
+  # job, apart from the npm audit below, so that one can stay informational until the Angular
+  # upgrade without also hiding Python findings. To clear a failure, bump the pin in
+  # src/api/requirements.txt; if no fixed release exists yet, add `--ignore-vuln <ID>` here with
+  # a comment saying why, rather than making the whole step non-blocking again.
+  audit-python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: pip-audit
+        run: |
+          pip install pip-audit
+          pip-audit -r src/api/requirements.txt
+
   # Informational only: findings here never fail the workflow (continue-on-error: true).
   # Pre-existing advisories should not block merges; review the output periodically.
   audit:
@@ -249,19 +270,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-
-      - name: pip-audit (informational)
-        continue-on-error: true
-        run: |
-          pip install pip-audit
-          pip-audit -r src/api/requirements.txt
 
       - name: npm audit (informational)
         continue-on-error: true

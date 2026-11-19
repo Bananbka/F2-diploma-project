@@ -10,6 +10,7 @@ test environment, so actual delivery is out of scope.
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from loguru import logger
 from motor.motor_asyncio import AsyncIOMotorClient
 
 from app.core import audit
@@ -117,3 +118,24 @@ async def test_send_email_rejects_an_unknown_email_type():
         assert result is False
     finally:
         app_settings.SMTP_USER, app_settings.SMTP_PASSWORD = original
+
+
+async def test_simulated_email_log_never_contains_the_otp():
+    """With SMTP unconfigured the task logs a simulated send. It used to log its kwargs verbatim,
+    which put every verification and reset code in the log for anyone with log access to redeem.
+    """
+    otp = "583920"
+    lines: list[str] = []
+    sink_id = logger.add(lines.append, level="WARNING", format="{message}")
+    original = _without_smtp_credentials()
+    try:
+        app_settings.SMTP_USER = None
+        app_settings.SMTP_PASSWORD = None
+
+        assert send_email(EmailTasks.PASSWORD_RESET.value, "nobody@example.com", otp=otp) is False
+    finally:
+        app_settings.SMTP_USER, app_settings.SMTP_PASSWORD = original
+        logger.remove(sink_id)
+
+    assert any("Simulated" in line for line in lines), "the simulated send must still be logged"
+    assert all(otp not in line for line in lines)

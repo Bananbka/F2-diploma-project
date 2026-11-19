@@ -101,6 +101,17 @@
     line-height: 1.6;
 }
 
+/* An inline action inside notice text. */
+.link {
+    padding: 0;
+    background: none;
+    border: none;
+    color: var(--primary);
+    font: inherit;
+    text-decoration: underline;
+    cursor: pointer;
+}
+
 /* ── The number itself ────────────────────────────────────────────────────────────────────── */
 
 .compare {
@@ -229,6 +240,11 @@
     &:hover {
         color: var(--foreground);
     }
+}
+
+/* "Show the new number" sits inside the alarm text, not below the action row. */
+.alarm .ghost {
+    margin-top: 0.75rem;
 }
 
 @media (width < 34rem) {

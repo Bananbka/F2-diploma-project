@@ -1,7 +1,11 @@
 import base64
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack
 
-from fastapi import APIRouter, Depends, File, Form, Response, UploadFile
+import anyio
+from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi.responses import StreamingResponse
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,6 +14,7 @@ from app.core.exceptions import AppException
 from app.core.rate_limit import enforce_rate_limit
 from app.core.responses import SuccessResponse
 from app.domains.files.schemas.file_schemas import (
+    MAX_BATCH_ATTACHMENT_BYTES,
     AttachmentFetchStatus,
     BatchAttachmentRequest,
     BatchAttachmentResult,
@@ -41,9 +46,10 @@ ALLOWED_AVATAR_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 UPLOAD_WINDOW = 3600
 UPLOAD_LIMIT = 100
 
-# Looser than the upload limit by design: a batch call only reads existing objects (no write, no
-# size cap to enforce), and opening several chats in a session can plausibly fire one batch call
-# per chat, each covering up to MAX_BATCH_ATTACHMENT_KEYS objects.
+# Looser than the upload limit by design: a batch call only reads existing objects, and opening
+# several chats in a session can plausibly fire one batch call per chat, each covering up to
+# MAX_BATCH_ATTACHMENT_KEYS objects. What one call may read is bounded separately, by
+# MAX_BATCH_ATTACHMENT_BYTES.
 BATCH_WINDOW = 3600
 BATCH_LIMIT = 300
 
@@ -182,22 +188,39 @@ async def download_attachment(
             404, "ATTACHMENT_NOT_FOUND", "No attachment with that key in this chat."
         )
 
+    # Opened here, before the response starts, so a missing object is still a clean 410 rather
+    # than a 200 that dies mid-body. Only the headers have arrived at this point; the body is
+    # relayed chunk by chunk below and never held whole — reading it into memory first meant every
+    # in-flight download cost its full size (up to 50 MB) in this process.
+    stack = AsyncExitStack()
     try:
-        body, content_type, length = await minio_manager.stream_object(
-            object_key, settings.MINIO_MESSAGE_BUCKET
+        obj = await stack.enter_async_context(
+            minio_manager.open_object(object_key, settings.MINIO_MESSAGE_BUCKET)
         )
     except Exception:
+        await stack.aclose()
         # The row survives but the object does not — most often the 24h GC reaped a blob whose
         # message was never sent, or an earlier delete removed it.
         raise AppException(
             410, "ATTACHMENT_GONE", "This attachment is no longer stored."
         )
 
-    return Response(
-        content=body,
-        media_type=content_type,
+    async def relay() -> AsyncIterator[bytes]:
+        try:
+            async for chunk in obj.iter_chunks():
+                yield chunk
+        finally:
+            # Runs on completion, on a store error, and when the client disconnects part-way.
+            # Shielded because a disconnect cancels this task, and an unshielded await during
+            # cancellation would abandon the store connection instead of releasing it.
+            with anyio.CancelScope(shield=True):
+                await stack.aclose()
+
+    return StreamingResponse(
+        relay(),
+        media_type=obj.content_type,
         headers={
-            "Content-Length": str(length),
+            "Content-Length": str(obj.content_length),
             # Never inline: the payload is attacker-supplied ciphertext, and rendering it in the
             # origin would hand any content-sniffing bug a same-origin foothold.
             "Content-Disposition": f'attachment; filename="{object_key}"',
@@ -224,6 +247,19 @@ async def download_attachments_batch(
     is actually referenced by a message in *this* chat. A key that fails the second check is never
     read from the object store at all, exactly like today; this must not become a looser gate just
     because it now serves several keys per call.
+
+    The response is one JSON body, so everything it returns is in memory at once — twice, counting
+    the base64. A call therefore reads at most `MAX_BATCH_ATTACHMENT_BYTES` in total. Each object's
+    size is taken from the store's response headers *before* its body is read; one that would take
+    the call over budget is reported as `too_large` (with its size) and not read at all, and the
+    client fetches it through the streaming single-object endpoint instead. Later, smaller keys are
+    still considered, so one large video does not starve the thumbnails behind it.
+
+    One deliberate exception: the first object served is served whatever its size. Without it an
+    object larger than the whole budget could never be returned by this endpoint, and a client that
+    only knows the batch path would lose access to every large file. The per-call worst case is
+    therefore one maximum-size upload (50 MB), not the budget — still a fixed bound, against the
+    2.5 GB it was.
     """
     await enforce_rate_limit(
         redis,
@@ -260,6 +296,8 @@ async def download_attachments_batch(
                 referenced_urls.add(attachment_url)
 
     results: list[BatchAttachmentResult] = []
+    remaining = MAX_BATCH_ATTACHMENT_BYTES
+    served_any = False
     for key, url in key_to_url.items():
         if url not in referenced_urls:
             results.append(
@@ -270,9 +308,24 @@ async def download_attachments_batch(
             continue
 
         try:
-            file_bytes, content_type, length = await minio_manager.stream_object(
+            async with minio_manager.open_object(
                 key, settings.MINIO_MESSAGE_BUCKET
-            )
+            ) as obj:
+                length = obj.content_length
+                if served_any and length > remaining:
+                    # Leaving the block without reading drops the connection; the body never
+                    # enters this process.
+                    results.append(
+                        BatchAttachmentResult(
+                            object_key=key,
+                            status=AttachmentFetchStatus.TOO_LARGE,
+                            content_length=length,
+                        )
+                    )
+                    continue
+
+                content_type = obj.content_type
+                file_bytes = await obj.read()
         except Exception:
             # Mirrors the single-endpoint's ATTACHMENT_GONE: the row survives but the object does
             # not, most often because the 24h GC reaped a blob whose message was never sent.
@@ -281,13 +334,16 @@ async def download_attachments_batch(
             )
             continue
 
+        served_any = True
+        remaining = max(0, remaining - len(file_bytes))
+
         results.append(
             BatchAttachmentResult(
                 object_key=key,
                 status=AttachmentFetchStatus.OK,
                 content_type=content_type,
                 content_base64=base64.b64encode(file_bytes).decode("ascii"),
-                content_length=length,
+                content_length=len(file_bytes),
             )
         )
 

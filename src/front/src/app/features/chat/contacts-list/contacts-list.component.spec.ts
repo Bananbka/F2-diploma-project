@@ -33,8 +33,10 @@ describe('ContactsListComponent', () => {
     let chatApi: jasmine.SpyObj<ChatApiService>;
     let confirm: jasmine.SpyObj<ConfirmService>;
     let router: Router;
+    let adoptCreatedPrivateChat: jasmine.Spy;
 
     beforeEach(async () => {
+        adoptCreatedPrivateChat = jasmine.createSpy('adoptCreatedPrivateChat');
         store = {
             contacts: signal([contact('u2', 'Bob Brown', 'bob'), contact('u1', 'Ada Lovelace', 'ada', 'Countess')]),
             loading: signal(false),
@@ -53,7 +55,10 @@ describe('ContactsListComponent', () => {
                 provideRouter([]),
                 { provide: ContactsStoreService, useValue: store },
                 { provide: ChatApiService, useValue: chatApi },
-                { provide: ChatStoreService, useValue: { loadChats: () => Promise.resolve() } },
+                {
+                    provide: ChatStoreService,
+                    useValue: { loadChats: () => Promise.resolve(), adoptCreatedPrivateChat },
+                },
                 { provide: ConfirmService, useValue: confirm },
             ],
         }).compileComponents();
@@ -95,7 +100,19 @@ describe('ContactsListComponent', () => {
         host.querySelector<HTMLButtonElement>('button.row')!.click();
         await fixture.whenStable();
         expect(chatApi.createPrivateChat).toHaveBeenCalledWith('u2');
+        expect(adoptCreatedPrivateChat).toHaveBeenCalledWith(jasmine.objectContaining({ id: 'chat-9' }), 'u2');
         expect(router.navigate).toHaveBeenCalledWith(['/chats', 'chat-9']);
+    });
+
+    /** Round 3, M: a created chat that names someone else is not opened. */
+    it('does not open a created chat whose counterpart is not the contact', async () => {
+        adoptCreatedPrivateChat.and.throwError('Member verification failed');
+
+        host.querySelector<HTMLButtonElement>('button.row')!.click();
+        // Not `whenStable`: the error toast's dismiss timer keeps the zone busy for seconds.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(router.navigate).not.toHaveBeenCalled();
     });
 
     it('renames through the store, sending the trimmed alias', async () => {

@@ -136,13 +136,15 @@
                 }
 
                 <!-- Fetched through the API rather than from the URL the upload returned: the message
-                 bucket is private, so only an authorised request can read it. Media kinds are
-                 decrypted client-side before rendering; only a message we actually opened
-                 (`canRenderMedia`) is ever offered that treatment — see docs/ui-states.md. -->
+                 bucket is private, so only an authorised request can read it. Every kind but a
+                 sticker is ciphertext on the server and is decrypted client-side, files included;
+                 only a message we actually opened (`canRenderMedia`) can do that, since the key
+                 travels inside the sealed message. Anything else gets an inert placeholder rather
+                 than a link to bytes nobody can read — see docs/ui-states.md. -->
                 @if (message().attachments.length) {
                     <ul class="attachments">
                         @for (file of message().attachments; track file.url) {
-                            @switch (canRenderMedia() ? (file.kind ?? 'file') : 'file') {
+                            @switch (canRenderMedia() ? (file.kind ?? 'file') : 'unavailable') {
                                 @case ('image') {
                                     <li
                                         class="media-tile is-viewable"
@@ -163,7 +165,7 @@
                                                 <img
                                                     class="media-image"
                                                     [src]="mediaObjectUrl(file.url)"
-                                                    [alt]="file.name"
+                                                    [alt]="fileName(file)"
                                                     (load)="onImageLoad(file, $event)"
                                                 />
                                             }
@@ -199,7 +201,7 @@
                                                 <img
                                                     class="media-image"
                                                     [src]="mediaObjectUrl(file.url)"
-                                                    [alt]="file.name"
+                                                    [alt]="fileName(file)"
                                                     (load)="onImageLoad(file, $event)"
                                                 />
                                                 <span class="tile-badge">GIF</span>
@@ -296,7 +298,7 @@
                                                 role="button"
                                                 tabindex="0"
                                                 [src]="file.url"
-                                                [alt]="file.name"
+                                                [alt]="fileName(file)"
                                                 [attr.data-sticker-url]="file.url"
                                                 aria-label="Open sticker pack"
                                                 (click)="openStickerPack($event, file)"
@@ -307,23 +309,65 @@
                                             <img
                                                 class="sticker-image"
                                                 [src]="file.url"
-                                                [alt]="file.name"
+                                                [alt]="fileName(file)"
                                             />
                                         }
                                     </li>
                                 }
-                                @default {
-                                    <li>
-                                        <a
-                                            class="attachment"
-                                            [href]="downloadUrl(file)"
-                                            [download]="file.name"
-                                            rel="noopener"
+                                @case ('unavailable') {
+                                    <li class="attachment-item">
+                                        <div
+                                            class="attachment is-unavailable"
+                                            data-testid="attachment-unavailable"
                                         >
-                                            <lucide-icon [img]="paperclipIcon" />
-                                            <span class="attachment-name">{{ file.name }}</span>
+                                            <lucide-icon [img]="lockIcon" />
+                                            <span class="attachment-name">{{ fileName(file) }}</span>
                                             <span class="attachment-size">{{ readableSize(file.size) }}</span>
-                                        </a>
+                                        </div>
+                                        <p class="attachment-note">{{ unavailableNote() }}</p>
+                                    </li>
+                                }
+                                @default {
+                                    <li class="attachment-item">
+                                        @if (file.decryptionKey) {
+                                            <button
+                                                type="button"
+                                                class="attachment is-download"
+                                                [disabled]="downloadStatus(file.url) === 'decrypting'"
+                                                [attr.aria-busy]="downloadStatus(file.url) === 'decrypting'"
+                                                [attr.aria-label]="'Decrypt and download ' + fileName(file)"
+                                                (click)="downloadFile(file, $event)"
+                                            >
+                                                <lucide-icon [img]="downloadIcon" />
+                                                <span class="attachment-name">{{ fileName(file) }}</span>
+                                                <span class="attachment-size">
+                                                    @if (downloadStatus(file.url) === 'decrypting') {
+                                                        Decrypting…
+                                                    } @else {
+                                                        {{ readableSize(file.size) }}
+                                                    }
+                                                </span>
+                                            </button>
+                                            @if (downloadError(file.url); as error) {
+                                                <p
+                                                    class="attachment-note is-error"
+                                                    role="alert"
+                                                >
+                                                    <lucide-icon [img]="alertIcon" />
+                                                    {{ error }}
+                                                </p>
+                                            }
+                                        } @else {
+                                            <div
+                                                class="attachment is-unavailable"
+                                                data-testid="attachment-unavailable"
+                                            >
+                                                <lucide-icon [img]="lockIcon" />
+                                                <span class="attachment-name">{{ fileName(file) }}</span>
+                                                <span class="attachment-size">{{ readableSize(file.size) }}</span>
+                                            </div>
+                                            <p class="attachment-note">{{ noKeyNote }}</p>
+                                        }
                                     </li>
                                 }
                             }

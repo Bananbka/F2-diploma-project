@@ -12,6 +12,8 @@ from app.core.exceptions import AppException
 from app.core.rate_limit import client_identifier, enforce_rate_limit, reset_rate_limit
 from app.core.responses import SuccessResponse
 from app.core.security import delete_token_cookies, revocation_cutoff, verify_password_async
+from app.domains.chats.models import Chat
+from app.domains.files.services import avatar_ownership
 from app.domains.users.dependencies import get_current_user
 from app.domains.users.models import User
 from app.domains.users.schemas.appearance_schemas import Appearance, AppearanceResponse
@@ -254,6 +256,14 @@ async def change_me(
 
     old_avatar_url = user.avatar_url if "avatar_url" in update_data else None
 
+    # The schema only anchors the url to the avatar bucket, which is public: every avatar url is
+    # known to everyone who has seen it. Without this check, setting a victim's url and then
+    # switching away from it made the reap below delete the victim's avatar. Re-sending the avatar
+    # you already have is not a claim on anything new, so it is let through unchecked.
+    new_avatar_url = update_data.get("avatar_url")
+    if new_avatar_url is not None and new_avatar_url != user.avatar_url:
+        await avatar_ownership.require_owned_avatar(new_avatar_url, user.id)
+
     for key, value in update_data.items():
         setattr(user, key, value)
 
@@ -270,10 +280,30 @@ async def change_me(
     # issue a fresh column-level SELECT rather than trusting the ORM identity map.
     if old_avatar_url is not None and old_avatar_url != user.avatar_url:
         current_avatar_url = await db.scalar(select(User.avatar_url).where(User.id == user.id))
-        if current_avatar_url != old_avatar_url:
+        if current_avatar_url != old_avatar_url and await _may_reap_avatar(
+            db, old_avatar_url, user
+        ):
             await minio_manager.delete_file(old_avatar_url, settings.MINIO_AVATAR_BUCKET)
 
     return SuccessResponse(data=user)
+
+
+async def _may_reap_avatar(db: AsyncSession, url: str, user: User) -> bool:
+    """Only an object the caller uploaded, and that nothing else still displays, is deleted.
+
+    Ownership is the real gate: a profile row set before ownership checks existed may still point
+    at someone else's object, and switching away from it must not delete it. The reference check
+    covers the caller's own upload reused elsewhere — e.g. as the avatar of a group they created.
+    Anything skipped here is left to the avatar garbage collector, which reaps unreferenced keys.
+    """
+    if not await avatar_ownership.is_owned_avatar(url, user.id):
+        return False
+
+    still_used_by_user = await db.scalar(
+        select(User.id).where(User.avatar_url == url, User.id != user.id).limit(1)
+    )
+    still_used_by_chat = await db.scalar(select(Chat.id).where(Chat.avatar_url == url).limit(1))
+    return still_used_by_user is None and still_used_by_chat is None
 
 
 # Same budget and the same counter as change-password: both re-check the password of an

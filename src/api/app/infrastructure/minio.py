@@ -1,10 +1,42 @@
 import json
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from typing import Any
 
 import botocore
 from aiobotocore.session import get_session
 
 from app.core.config import settings
+
+
+# Chunk size for streamed reads: large enough that a 50 MB object is ~800 chunks rather than the
+# ~50,000 aiobotocore's 1 KB default would produce, small enough that the per-request memory held
+# at any moment is negligible.
+OBJECT_STREAM_CHUNK_BYTES = 64 * 1024
+
+
+@dataclass(slots=True)
+class OpenObject:
+    """An object whose headers have been received but whose body has not been read yet.
+
+    `content_length` comes from the store's response headers, so a caller can decide whether it is
+    willing to read the body at all *before* a single byte of it is in memory.
+    """
+
+    body: Any
+    content_type: str
+    content_length: int
+
+    async def iter_chunks(
+        self, chunk_size: int = OBJECT_STREAM_CHUNK_BYTES
+    ) -> AsyncIterator[bytes]:
+        async for chunk in self.body.iter_chunks(chunk_size):
+            yield chunk
+
+    async def read(self) -> bytes:
+        return await self.body.read()
 
 
 class MinioClient:
@@ -133,19 +165,41 @@ class MinioClient:
             file_url = f"{base_url}/{bucket_name}/{unique_filename}"
             return file_url
 
-    async def stream_object(self, object_key: str, bucket_name: str):
-        """Open an object for reading. Yields (body_stream, content_type, content_length).
+    @asynccontextmanager
+    async def open_object(
+        self, object_key: str, bucket_name: str
+    ) -> AsyncIterator[OpenObject]:
+        """Open an object for reading without reading it.
 
         A read path is needed at all because the message bucket carries no public-read policy —
         deliberately, since anonymous GET on ciphertext would leak size and access patterns to anyone
         holding a URL. Authorisation therefore has to happen in the API, which means the bytes come
         back through it rather than straight from MinIO.
+
+        Yields once the store has answered with headers; the body is still on the wire. The caller
+        either streams it (`iter_chunks`), reads it (`read`), or leaves the block without touching
+        it, in which case the connection is dropped and the body never enters this process. The
+        client and the response are both released when the block exits, on every path.
         """
         async with self.get_client() as client:
             response = await client.get_object(Bucket=bucket_name, Key=object_key)
-            body = await response["Body"].read()
+            async with response["Body"] as _:
+                yield OpenObject(
+                    body=response["Body"],
+                    content_type=response.get("ContentType", "application/octet-stream"),
+                    content_length=int(response.get("ContentLength") or 0),
+                )
 
-        return body, response.get("ContentType", "application/octet-stream"), len(body)
+    async def stream_object(self, object_key: str, bucket_name: str):
+        """Read a whole object into memory. Returns (body, content_type, content_length).
+
+        Only for objects with a small, server-enforced size cap (the appearance background image).
+        Anything that can be attachment-sized must go through `open_object` and be streamed or
+        size-checked first — buffering those here is what let one request hold gigabytes.
+        """
+        async with self.open_object(object_key, bucket_name) as obj:
+            body = await obj.read()
+            return body, obj.content_type, len(body)
 
     async def put_object_at(
         self, key: str, body: bytes, content_type: str, bucket_name: str, owner_id: str | None = None

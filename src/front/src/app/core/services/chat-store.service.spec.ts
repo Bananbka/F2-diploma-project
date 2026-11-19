@@ -1,22 +1,44 @@
 import { HttpErrorResponse } from '@angular/common/http';
-import { TestBed } from '@angular/core/testing';
+import { Injector, signal } from '@angular/core';
+import { fakeAsync, TestBed, tick } from '@angular/core/testing';
 import { of, Subject, throwError } from 'rxjs';
 
+import { computeMemberSetHash } from '../crypto/grants';
+import { generateIdentity, IdentityBundle } from '../crypto/identity';
+import { b64uEncode } from '../crypto/primitives';
 import { Chat } from '../models/chat.model';
-import { ChatKeys, MessageAttachment, MessageResponse } from '../models/crypto.model';
+import { ChatKeys, ChatRoster, MessageAttachment, MessageResponse, RosterEntry } from '../models/crypto.model';
 import { ChatApiService } from './chat-api.service';
-import { ChatStoreService } from './chat-store.service';
+import {
+    ChatStoreService,
+    FORWARD_KEY_CHANGED_NOTICE,
+    FORWARD_MEMBERSHIP_NOTICE,
+    RECHECK_MEMBERSHIP_NOTICE,
+    RECHECK_PUBLISH_NOTICE,
+} from './chat-store.service';
 import { CryptoApiService } from './crypto-api.service';
-import { MemberSetMismatchError, RetryLimitExceededError, RosterVerificationError } from './crypto-errors';
+import {
+    KeyChangedError,
+    MemberSetMismatchError,
+    MembershipMismatchError,
+    MembershipUnconfirmedError,
+    RetryLimitExceededError,
+    RosterVerificationError,
+} from './crypto-errors';
 import { DirectoryService } from './directory.service';
+import { KeyChangeStateService } from './key-change-state.service';
+import { KeyStoreService, MemberExpectation } from './key-store.service';
+import { MembershipGuardService } from './membership-guard.service';
 import { DecryptedMessage, DecryptStatus, MessageService } from './message.service';
 import { PollStoreService } from './poll-store.service';
 import { SessionService } from './session.service';
 import { ToastService } from './toast.service';
+import { TrustStoreService } from './trust-store.service';
 import { WebSocketService } from './websocket.service';
 
 const CHAT = 'a0000000-0000-4000-8000-000000000001';
 const PEER = 'b0000000-0000-4000-8000-000000000002';
+const ME = 'c0000000-0000-4000-8000-000000000003';
 
 function decrypted(id: string, status: DecryptStatus): DecryptedMessage {
     return {
@@ -78,11 +100,24 @@ function messageResponse(overrides: Partial<MessageResponse> = {}): MessageRespo
 
 describe('ChatStoreService', () => {
     let store: ChatStoreService;
+    /** Who is signed in, as `SessionService.user()` reports it. Null (signed out) unless a test sets it. */
+    let sessionUser: { id: string } | null;
+    let keyStore: jasmine.SpyObj<KeyStoreService>;
 
     beforeEach(() => {
+        localStorage.clear();
+        sessionUser = null;
+        keyStore = jasmine.createSpyObj<KeyStoreService>('KeyStoreService', [
+            'expectMembers',
+            'invalidateOwnChains',
+            'recheckRoster',
+            'acknowledgeOwnDevicesAdded',
+        ]);
+        (keyStore as unknown as { ownDevicesAdded: unknown }).ownDevicesAdded = signal(false);
         TestBed.configureTestingModule({
             providers: [
                 ChatStoreService,
+                { provide: KeyStoreService, useValue: keyStore },
                 {
                     provide: ChatApiService,
                     useValue: jasmine.createSpyObj('ChatApiService', [
@@ -111,6 +146,7 @@ describe('ChatStoreService', () => {
                     useValue: jasmine.createSpyObj('MessageService', [
                         'loadMessages',
                         'decrypt',
+                        'decryptEdit',
                         'refreshGrants',
                         'sendText',
                         'sendChannelPost',
@@ -126,9 +162,10 @@ describe('ChatStoreService', () => {
                         'resolveMissing',
                         'rememberPrivateChatPeer',
                         'markDeleted',
+                        'lookup',
                     ]),
                 },
-                { provide: SessionService, useValue: { user: () => null } },
+                { provide: SessionService, useValue: { user: () => sessionUser } },
                 {
                     provide: WebSocketService,
                     useValue: {
@@ -248,6 +285,703 @@ describe('ChatStoreService', () => {
                 // queue implying it will go out later.
                 expect(store.pending().length).withContext('no pending row may survive').toBe(0);
             }
+        });
+    });
+
+    /**
+     * A verified member's key changed. The roster passed every §5.0.2 check, so this is not the
+     * member-set alarm — it is the safety number the user compared doing its job. Blocking, and
+     * lifted only by the user re-confirming the number, which must resume sending with no reload.
+     */
+    describe('key change of a verified peer', () => {
+        const NUMBER_A = '04672 91834 52017 73649 18293 64751 39082 57164 82031 46918 73052 19374';
+        const NUMBER_B = '11111 22222 33333 44444 55555 66666 77777 88888 99999 00000 12345 67890';
+        let messages: jasmine.SpyObj<MessageService>;
+        let trust: TrustStoreService;
+
+        /**
+         * What the real key store does when it refuses: record the refusal per chat and the roster
+         * observation, then throw. The chat store itself records nothing (one source of truth).
+         */
+        function refuseWithKeyChange(chatId: string, ownDevicesChanged: boolean): void {
+            messages.sendText.and.callFake(async () => {
+                const keyChange = TestBed.inject(KeyChangeStateService);
+                keyChange.observe(ME, PEER, NUMBER_B, 'roster');
+                keyChange.recordRefusal(chatId, ME, PEER, NUMBER_B, NUMBER_A, ownDevicesChanged);
+                throw new KeyChangedError(
+                    chatId,
+                    [{ userId: PEER, current: NUMBER_B, previous: NUMBER_A }],
+                    ownDevicesChanged
+                );
+            });
+        }
+
+        beforeEach(() => {
+            sessionUser = { id: ME };
+            messages = TestBed.inject(MessageService) as jasmine.SpyObj<MessageService>;
+            trust = TestBed.inject(TrustStoreService);
+            const directory = TestBed.inject(DirectoryService) as jasmine.SpyObj<DirectoryService>;
+            directory.lookup.and.callFake((id: string) => ({
+                userId: id,
+                name: id === PEER ? 'Alice' : 'Someone',
+                username: null,
+                avatarUrl: null,
+                resolved: true,
+            }));
+            store.chats.set([
+                chat({
+                    participants: [
+                        { user_id: ME, role: 'owner', joined_at: '2026-01-01T00:00:00Z' },
+                        { user_id: PEER, role: 'member', joined_at: '2026-01-01T00:00:00Z' },
+                    ],
+                }),
+            ]);
+            store.activeChatId.set(CHAT);
+            trust.markVerified(ME, PEER, NUMBER_A);
+        });
+
+        it('turns KeyChangedError into its own blocking state, distinct from the roster alarm', async () => {
+            refuseWithKeyChange(CHAT, false);
+            expect(store.canSend()).toBeTrue();
+
+            await store.send('hello');
+
+            expect(store.canSend()).toBeFalse();
+            expect(store.keyChangedPeers()).toEqual([PEER]);
+            expect(store.memberVerificationError()).withContext('not the roster alarm').toBeNull();
+            expect(store.sendBlockedReason()).toBe(
+                'The security key of Alice changed. Review their safety number before sending.'
+            );
+            // G4: the draft survives as a failed row with its own wording, rather than vanishing.
+            expect(store.pending().length).withContext('the draft is kept').toBe(1);
+            expect(store.pending()[0]).toEqual(
+                jasmine.objectContaining({ text: 'hello', status: 'failed', keyChangedFailure: true })
+            );
+        });
+
+        it('does not reach the API again while the block holds, and resumes once the number is confirmed', async () => {
+            refuseWithKeyChange(CHAT, false);
+            await store.send('hello');
+            expect(messages.sendText).toHaveBeenCalledTimes(1);
+
+            // A cached chain would let this send go out to the substituted device; the store must not try.
+            await store.send('again');
+            expect(messages.sendText).toHaveBeenCalledTimes(1);
+            // Only the first draft's failed row; the blocked second send never became one.
+            expect(store.pending().length).toBe(1);
+
+            // Nor may Retry reach the API, or drop the row it is retrying, while the block holds.
+            await store.retry(store.pending()[0].localId);
+            expect(messages.sendText).toHaveBeenCalledTimes(1);
+            expect(store.pending().length).toBe(1);
+
+            // The user compared the new number out of band and accepted it in the safety-number screen.
+            trust.markVerified(ME, PEER, NUMBER_B);
+
+            expect(store.keyChangedPeers()).toEqual([]);
+            expect(store.canSend()).toBeTrue();
+            expect(store.sendBlockedReason()).toBeNull();
+
+            messages.sendText.and.resolveTo(messageResponse({ _id: 'sent', sender_id: ME }));
+            messages.recordOutgoing.and.returnValue({ ...decrypted('sent', 'ok'), senderId: ME });
+            await store.send('resumed');
+            expect(messages.sendText).toHaveBeenCalledTimes(2);
+        });
+
+        /**
+         * F1: a distribution vouched for by a device that changed a verified peer's number is refused
+         * at ingest, so its messages are `no_key`. Confirming the new number must bring them back
+         * without a reload - long after the ordinary grant retries have run out.
+         */
+        it('fetches grants again and opens what it could not read once a number is confirmed', fakeAsync(() => {
+            // Setting the active chat would otherwise load it for real once effects run.
+            spyOn(store as unknown as { openChat: () => Promise<void> }, 'openChat').and.resolveTo();
+            const raw = messageResponse({ _id: 'a', sender_id: PEER });
+            (store as unknown as { rawMessages: Map<string, MessageResponse> }).rawMessages.set('a', raw);
+            store.messages.set([decrypted('a', 'no_key')]);
+            messages.refreshGrants.and.resolveTo();
+            messages.decrypt.and.resolveTo(decrypted('a', 'no_key'));
+
+            // The ordinary retries: bounded, and exhausted while the user is still comparing digits.
+            TestBed.flushEffects();
+            tick(60_000);
+            const before = messages.refreshGrants.calls.count();
+            tick(60_000);
+            expect(messages.refreshGrants.calls.count()).withContext('retries had stopped').toBe(before);
+            expect(store.messages()[0].status).toBe('no_key');
+
+            // The key store now accepts the distribution, so the message opens.
+            messages.decrypt.and.resolveTo(decrypted('a', 'ok'));
+            trust.markVerified(ME, PEER, NUMBER_B);
+            TestBed.flushEffects();
+            tick(60_000);
+
+            expect(messages.refreshGrants.calls.count()).toBeGreaterThan(before);
+            expect(messages.refreshGrants).toHaveBeenCalledWith(CHAT);
+            expect(messages.decrypt).toHaveBeenCalledWith(CHAT, raw);
+            expect(store.messages()[0].status).toBe('ok');
+        }));
+
+        /** The receive path records the change in the trust store; the block follows without a send. */
+        it('blocks as soon as the trust store observes a changed number for a member', () => {
+            expect(store.canSend()).toBeTrue();
+
+            TestBed.inject(KeyChangeStateService).observe(ME, PEER, NUMBER_B);
+
+            expect(store.keyChangedPeers()).toEqual([PEER]);
+            expect(store.canSend()).toBeFalse();
+        });
+
+        it('ignores a changed number for someone who is not in the open chat', () => {
+            const outsider = 'd0000000-0000-4000-8000-000000000004';
+            trust.markVerified(ME, outsider, NUMBER_A);
+            TestBed.inject(KeyChangeStateService).observe(ME, outsider, NUMBER_B);
+
+            expect(store.keyChangedPeers()).toEqual([]);
+            expect(store.canSend()).toBeTrue();
+        });
+
+        /**
+         * G4: the block must not depend on the server-supplied participant list. If `GET /chats/{id}`
+         * failed or left the peer out, the refusal used to leave no banner and no draft.
+         */
+        it('blocks and names the peer from the refusal itself when the participant list omits them', async () => {
+            store.chats.set([chat({ participants: [] })]);
+            refuseWithKeyChange(CHAT, false);
+
+            await store.send('hello');
+
+            expect(store.keyChangedPeers()).toEqual([PEER]);
+            expect(store.canSend()).toBeFalse();
+            expect(store.sendBlockedReason()).toContain('Alice');
+            expect(store.pending()[0]?.keyChangedFailure).toBeTrue();
+
+            // Lifted by accepting the number it was refused on, with nothing to clear by hand.
+            trust.markVerified(ME, PEER, NUMBER_B);
+            expect(store.keyChangedPeers()).toEqual([]);
+            expect(store.canSend()).toBeTrue();
+        });
+
+        /** Round 2, item 4: "Clear verification" must not be a silent way out of a refusal. */
+        it('keeps a refused chat blocked when the verification is cleared instead of a number accepted', async () => {
+            refuseWithKeyChange(CHAT, false);
+            await store.send('hello');
+
+            trust.forget(ME, PEER);
+
+            expect(store.keyChangedPeers()).toEqual([PEER]);
+            expect(store.canSend()).toBeFalse();
+            expect(TestBed.inject(KeyChangeStateService).blockingNumber(ME, PEER, CHAT)).toBe(NUMBER_B);
+        });
+
+        it('lets Retry resend the kept draft once the new number is accepted', async () => {
+            refuseWithKeyChange(CHAT, false);
+            await store.send('keep me');
+            const [row] = store.pending();
+
+            trust.markVerified(ME, PEER, NUMBER_B);
+            messages.sendText.and.resolveTo(messageResponse({ _id: 'sent', sender_id: ME }));
+            messages.recordOutgoing.and.returnValue({ ...decrypted('sent', 'ok'), senderId: ME });
+            await store.retry(row.localId);
+
+            expect(messages.sendText).toHaveBeenCalledTimes(2);
+            expect(messages.sendText.calls.mostRecent().args[1]).toBe('keep me');
+            expect(messages.sendText.calls.mostRecent().args[5])
+                .withContext('same idempotency key')
+                .toBe(row.clientMessageId);
+            expect(store.pending()).toEqual([]);
+        });
+
+        /** G5: the refusal's numbers are roster observations, so a lookup cannot clear them. */
+        it('keeps a refusal that a later lookup shows the old number for', async () => {
+            refuseWithKeyChange(CHAT, false);
+            await store.send('hello');
+
+            TestBed.inject(KeyChangeStateService).observe(ME, PEER, NUMBER_A, 'lookup');
+
+            expect(TestBed.inject(KeyChangeStateService).blockingNumber(ME, PEER)).toBe(NUMBER_B);
+            expect(store.keyChangedPeers()).toEqual([PEER]);
+        });
+
+        /** G6: a change on our own side must not be worded as the peer's. */
+        it('words the block as our own device list when the refusal says so', async () => {
+            refuseWithKeyChange(CHAT, true);
+
+            await store.send('hello');
+
+            expect(store.ownDevicesChanged()).toBeTrue();
+            expect(store.sendBlockedReason()).toContain('Your own device list changed');
+            expect(store.sendBlockedReason()).not.toContain('Alice');
+        });
+
+        /** G3: a forward is a send into the target chat and gets the same block. */
+        describe('forwarding', () => {
+            const TARGET = 'e0000000-0000-4000-8000-00000000000e';
+
+            beforeEach(() => {
+                store.chats.update((list) => [
+                    ...list,
+                    chat({
+                        id: TARGET,
+                        participants: [
+                            { user_id: ME, role: 'owner', joined_at: '2026-01-01T00:00:00Z' },
+                            { user_id: PEER, role: 'member', joined_at: '2026-01-01T00:00:00Z' },
+                        ],
+                    }),
+                ]);
+                store.messages.set([decrypted('m1', 'ok')]);
+                store.toggleSelected('m1');
+            });
+
+            it('refuses to forward into a chat where a verified member’s key changed', async () => {
+                TestBed.inject(KeyChangeStateService).observe(ME, PEER, NUMBER_B, 'roster');
+
+                const sent = await store.forwardSelected(TARGET);
+
+                expect(sent).toBe(0);
+                expect(messages.sendText).not.toHaveBeenCalled();
+                expect(store.realtimeError()).toContain('security key');
+                expect(store.selectionCount()).withContext('kept for another try').toBe(1);
+            });
+
+            it('records a KeyChangedError from the target and stops', async () => {
+                refuseWithKeyChange(TARGET, false);
+                store.messages.set([decrypted('m1', 'ok'), decrypted('m2', 'ok')]);
+                store.toggleSelected('m2');
+
+                const sent = await store.forwardSelected(TARGET);
+
+                expect(sent).toBe(0);
+                expect(messages.sendText).withContext('stops at the first refusal').toHaveBeenCalledTimes(1);
+                expect(store.realtimeError()).toBe(FORWARD_KEY_CHANGED_NOTICE);
+                expect(TestBed.inject(KeyChangeStateService).blockingNumber(ME, PEER)).toBe(NUMBER_B);
+            });
+
+            it('forwards normally when nothing changed', async () => {
+                messages.sendText.and.resolveTo(messageResponse({ _id: 'fwd', sender_id: ME }));
+
+                expect(await store.forwardSelected(TARGET)).toBe(1);
+                expect(messages.sendText).toHaveBeenCalledTimes(1);
+                expect(keyStore.expectMembers).toHaveBeenCalledWith(
+                    TARGET,
+                    jasmine.objectContaining({ kind: 'group' })
+                );
+            });
+
+            /** Round 3, A: membership is checked for every target type, before the channel branch. */
+            it('publishes nothing into a pinned private chat the server now reports as a channel', async () => {
+                TestBed.inject(MembershipGuardService).pinPeer(ME, TARGET, PEER);
+                store.chats.update((list) =>
+                    list.map((c) => (c.id === TARGET ? { ...c, chat_type: 'channel' as const, participants: [] } : c))
+                );
+
+                const sent = await store.forwardSelected(TARGET);
+
+                expect(sent).toBe(0);
+                expect(messages.sendChannelPost).not.toHaveBeenCalled();
+                expect(messages.sendText).not.toHaveBeenCalled();
+                expect(store.realtimeError()).toBe(FORWARD_MEMBERSHIP_NOTICE);
+            });
+
+            it('raises the membership alarm when that target is the open chat', async () => {
+                TestBed.inject(MembershipGuardService).pinPeer(ME, TARGET, PEER);
+                store.chats.update((list) =>
+                    list.map((c) => (c.id === TARGET ? { ...c, chat_type: 'channel' as const } : c))
+                );
+                store.activeChatId.set(TARGET);
+
+                await store.forwardSelected(TARGET);
+
+                expect(store.memberVerificationCode()).toBe('MEMBERSHIP_MISMATCH');
+                expect(messages.sendChannelPost).not.toHaveBeenCalled();
+            });
+
+            it('refuses a channel post into a pinned chat even if the membership check is bypassed', async () => {
+                const guard = TestBed.inject(MembershipGuardService);
+                guard.pinPeer(ME, TARGET, PEER);
+                spyOn(guard, 'register');
+                store.chats.update((list) =>
+                    list.map((c) => (c.id === TARGET ? { ...c, chat_type: 'channel' as const } : c))
+                );
+
+                const sent = await store.forwardSelected(TARGET);
+
+                expect(sent).toBe(0);
+                expect(messages.sendChannelPost).not.toHaveBeenCalled();
+                expect(store.realtimeError()).toBe(FORWARD_MEMBERSHIP_NOTICE);
+            });
+
+            /** S2: a group target once seen as encrypted never receives a readable post. */
+            it('publishes nothing into an encrypted group the server now reports as a channel', async () => {
+                TestBed.inject(MembershipGuardService).noteEncrypted(TARGET, 'group');
+                store.chats.update((list) =>
+                    list.map((c) => (c.id === TARGET ? { ...c, chat_type: 'channel' as const } : c))
+                );
+
+                const sent = await store.forwardSelected(TARGET);
+
+                expect(sent).toBe(0);
+                expect(messages.sendChannelPost).not.toHaveBeenCalled();
+                expect(store.realtimeError()).toBe(FORWARD_MEMBERSHIP_NOTICE);
+            });
+
+            it('refuses a channel post into an encrypted group even if the membership check is bypassed', async () => {
+                const guard = TestBed.inject(MembershipGuardService);
+                guard.noteEncrypted(TARGET, 'group');
+                spyOn(guard, 'register');
+                store.chats.update((list) =>
+                    list.map((c) => (c.id === TARGET ? { ...c, chat_type: 'channel' as const } : c))
+                );
+
+                expect(await store.forwardSelected(TARGET)).toBe(0);
+                expect(messages.sendChannelPost).not.toHaveBeenCalled();
+            });
+
+            it('stops at the first roster refusal instead of trying every message', async () => {
+                messages.sendText.and.rejectWith(new RosterVerificationError('Roster verification failed: x'));
+                store.messages.set([decrypted('m1', 'ok'), decrypted('m2', 'ok')]);
+                store.toggleSelected('m2');
+
+                expect(await store.forwardSelected(TARGET)).toBe(0);
+                expect(messages.sendText).toHaveBeenCalledTimes(1);
+                expect(store.realtimeError()).toBe(FORWARD_MEMBERSHIP_NOTICE);
+            });
+        });
+
+        /** Round 3, C: the banner's "Re-check" re-runs the roster check, which no send can while blocked. */
+        describe('re-check', () => {
+            it('re-runs the roster check for the current epoch', async () => {
+                const cryptoApi = TestBed.inject(CryptoApiService) as jasmine.SpyObj<CryptoApiService>;
+                cryptoApi.getChatKeys.and.returnValue(of({ current_epoch: 4 } as ChatKeys));
+                keyStore.recheckRoster.and.resolveTo();
+
+                await store.recheckKeyChange();
+
+                expect(keyStore.recheckRoster).toHaveBeenCalledOnceWith(CHAT, 4);
+                expect(store.realtimeError()).toBeNull();
+            });
+
+            it('lifts the block once the re-check clears the refusal', async () => {
+                refuseWithKeyChange(CHAT, false);
+                await store.send('hello');
+                expect(store.canSend()).toBeFalse();
+
+                // The user confirms a different number (N2); the re-check finds the roster derives it.
+                const N2 = '33333 44444 55555 66666 77777 88888 99999 00000 11111 22222 34567 89012';
+                trust.markVerified(ME, PEER, N2);
+                const cryptoApi = TestBed.inject(CryptoApiService) as jasmine.SpyObj<CryptoApiService>;
+                cryptoApi.getChatKeys.and.returnValue(of({ current_epoch: 1 } as ChatKeys));
+                keyStore.recheckRoster.and.callFake(async () => {
+                    TestBed.inject(KeyChangeStateService).clearRefusal(CHAT, ME, PEER);
+                    TestBed.inject(KeyChangeStateService).observe(ME, PEER, N2, 'roster');
+                });
+
+                await store.recheckKeyChange();
+
+                expect(store.keyChangedPeers()).toEqual([]);
+                expect(store.canSend()).toBeTrue();
+            });
+
+            it('raises the roster alarm if the re-check finds an inconsistent roster', async () => {
+                const cryptoApi = TestBed.inject(CryptoApiService) as jasmine.SpyObj<CryptoApiService>;
+                cryptoApi.getChatKeys.and.returnValue(of({ current_epoch: 1 } as ChatKeys));
+                keyStore.recheckRoster.and.rejectWith(new MemberSetMismatchError('Member set verification failed'));
+
+                await store.recheckKeyChange();
+
+                expect(store.memberVerificationCode()).toBe('MEMBER_SET_MISMATCH');
+            });
+
+            /** C6: a re-check that could not confirm membership says so, as a failed send row does. */
+            it('says the members could not be confirmed when that is why the re-check failed', async () => {
+                const cryptoApi = TestBed.inject(CryptoApiService) as jasmine.SpyObj<CryptoApiService>;
+                cryptoApi.getChatKeys.and.returnValue(of({ current_epoch: 1 } as ChatKeys));
+                keyStore.recheckRoster.and.rejectWith(new MembershipUnconfirmedError());
+
+                await store.recheckKeyChange();
+
+                expect(store.realtimeError()).toBe(RECHECK_MEMBERSHIP_NOTICE);
+                expect(store.memberVerificationError()).withContext('not an alarm').toBeNull();
+            });
+
+            it('says the key could not be shared when publishing kept failing', async () => {
+                const cryptoApi = TestBed.inject(CryptoApiService) as jasmine.SpyObj<CryptoApiService>;
+                cryptoApi.getChatKeys.and.returnValue(of({ current_epoch: 1 } as ChatKeys));
+                keyStore.recheckRoster.and.rejectWith(new RetryLimitExceededError(3, null));
+
+                await store.recheckKeyChange();
+
+                expect(store.realtimeError()).toBe(RECHECK_PUBLISH_NOTICE);
+            });
+        });
+    });
+
+    /** Round 3, I: an edit while sending is blocked throws, so the caller can say so. */
+    it('throws instead of silently dropping an edit while sending is blocked', async () => {
+        store.chats.set([chat()]);
+        store.activeChatId.set(CHAT);
+        store.memberVerificationError.set('roster mismatch');
+
+        await expectAsync(store.editMessage('m1', 'new text')).toBeRejectedWithError('sending is blocked');
+        expect(TestBed.inject(MessageService).editText).not.toHaveBeenCalled();
+    });
+
+    /** Round 3, M: a chat this client just created is pinned to the person the user chose. */
+    describe('adoptCreatedPrivateChat', () => {
+        const OTHER = 'f0000000-0000-4000-8000-00000000000f';
+        const created = (...ids: string[]) =>
+            chat({
+                chat_type: 'private',
+                participants: ids.map((user_id) => ({
+                    user_id,
+                    role: 'member' as const,
+                    joined_at: '2026-01-01T00:00:00Z',
+                })),
+            });
+
+        beforeEach(() => (sessionUser = { id: ME }));
+
+        it('pins the chosen person', () => {
+            store.adoptCreatedPrivateChat(created(ME, PEER), PEER);
+
+            expect(TestBed.inject(MembershipGuardService).pinnedPeer(ME, CHAT)).toBe(PEER);
+        });
+
+        it('pins the chosen person even when the response carries no participants', () => {
+            store.adoptCreatedPrivateChat(created(), PEER);
+
+            expect(TestBed.inject(MembershipGuardService).pinnedPeer(ME, CHAT)).toBe(PEER);
+        });
+
+        it('refuses a response naming someone else, or not being a private chat, and pins nothing', () => {
+            expect(() => store.adoptCreatedPrivateChat(created(ME, OTHER), PEER)).toThrowError(MembershipMismatchError);
+            expect(() => store.adoptCreatedPrivateChat(chat({ chat_type: 'group' }), PEER)).toThrowError(
+                MembershipMismatchError
+            );
+            expect(TestBed.inject(MembershipGuardService).pinnedPeer(ME, CHAT)).toBeNull();
+        });
+
+        it('refuses when an existing pin names someone else', () => {
+            TestBed.inject(MembershipGuardService).pinPeer(ME, CHAT, OTHER);
+
+            expect(() => store.adoptCreatedPrivateChat(created(), PEER)).toThrowError(MembershipMismatchError);
+        });
+    });
+
+    /**
+     * G1: the key store refuses a roster naming anyone outside the chat, so the store must tell it
+     * who that is — from the chat as opened, never from the roster being checked.
+     */
+    describe('member expectations', () => {
+        const OTHER = 'f0000000-0000-4000-8000-00000000000f';
+
+        beforeEach(() => {
+            sessionUser = { id: ME };
+            const messages = TestBed.inject(MessageService) as jasmine.SpyObj<MessageService>;
+            messages.sendText.and.resolveTo(messageResponse({ _id: 'sent', sender_id: ME }));
+            messages.recordOutgoing.and.returnValue({ ...decrypted('sent', 'ok'), senderId: ME });
+        });
+
+        it('pins a private chat to exactly me and the counterpart', async () => {
+            store.chats.set([
+                chat({
+                    chat_type: 'private',
+                    participants: [
+                        { user_id: ME, role: 'member', joined_at: '2026-01-01T00:00:00Z' },
+                        { user_id: PEER, role: 'member', joined_at: '2026-01-01T00:00:00Z' },
+                    ],
+                }),
+            ]);
+            store.activeChatId.set(CHAT);
+
+            await store.send('hello');
+
+            expect(keyStore.expectMembers).toHaveBeenCalledOnceWith(CHAT, {
+                kind: 'private',
+                selfId: ME,
+                peerId: PEER,
+            });
+        });
+
+        it('keeps a failed row worded as unconfirmed membership for a mis-shaped private chat', async () => {
+            store.chats.set([
+                chat({
+                    chat_type: 'private',
+                    participants: [
+                        { user_id: ME, role: 'member', joined_at: '2026-01-01T00:00:00Z' },
+                        { user_id: PEER, role: 'member', joined_at: '2026-01-01T00:00:00Z' },
+                        { user_id: OTHER, role: 'member', joined_at: '2026-01-01T00:00:00Z' },
+                    ],
+                }),
+            ]);
+            store.activeChatId.set(CHAT);
+
+            await store.send('hello');
+
+            // The store must not pick a peer for it, and must not send: an honest, retryable row with
+            // its own wording rather than a bare "Send failed." (round 2, item 10).
+            expect(keyStore.expectMembers).not.toHaveBeenCalled();
+            expect(TestBed.inject(MessageService).sendText).not.toHaveBeenCalled();
+            expect(store.pending()[0]).toEqual(
+                jasmine.objectContaining({ status: 'failed', membershipFailure: true, text: 'hello' })
+            );
+            expect(store.memberVerificationError()).withContext('not an alarm').toBeNull();
+        });
+
+        const privateWith = (...ids: string[]) =>
+            chat({
+                chat_type: 'private',
+                participants: ids.map((user_id) => ({
+                    user_id,
+                    role: 'member' as const,
+                    joined_at: '2026-01-01T00:00:00Z',
+                })),
+            });
+
+        /** Round 2, item 2: the pin survives a reload, so the server cannot name a new peer then. */
+        it('persists the private counterpart and refuses a different one later, even in a fresh session', async () => {
+            store.chats.set([privateWith(ME, PEER)]);
+            store.activeChatId.set(CHAT);
+            await store.send('hello');
+            expect(TestBed.inject(MembershipGuardService).pinnedPeer(ME, CHAT)).toBe(PEER);
+            expect(localStorage.getItem('ns.private_peers')).toContain(PEER);
+
+            // "Reload": a brand-new trust store reads the pin back from storage.
+            const reloaded = Injector.create({
+                parent: TestBed.inject(Injector),
+                providers: [MembershipGuardService],
+            }).get(MembershipGuardService);
+            expect(reloaded.pinnedPeer(ME, CHAT)).toBe(PEER);
+
+            store.chats.set([privateWith(ME, OTHER)]);
+            await store.send('to the wrong person');
+
+            expect(store.memberVerificationCode()).toBe('MEMBERSHIP_MISMATCH');
+            expect(store.canSend()).toBeFalse();
+            expect(TestBed.inject(MessageService).sendText).toHaveBeenCalledTimes(1);
+        });
+
+        /** Round 2, item 1: a pinned private chat reported as a group must not get a group expectation. */
+        it('raises the membership alarm when a pinned private chat is reported as a group', async () => {
+            store.chats.set([privateWith(ME, PEER)]);
+            store.activeChatId.set(CHAT);
+            await store.send('hello');
+            keyStore.expectMembers.calls.reset();
+
+            store.chats.set([
+                chat({
+                    chat_type: 'group',
+                    participants: [
+                        { user_id: ME, role: 'owner', joined_at: '2026-01-01T00:00:00Z' },
+                        { user_id: PEER, role: 'member', joined_at: '2026-01-01T00:00:00Z' },
+                        { user_id: OTHER, role: 'member', joined_at: '2026-01-01T00:00:00Z' },
+                    ],
+                }),
+            ]);
+            await store.send('now a group?');
+
+            expect(keyStore.expectMembers).not.toHaveBeenCalled();
+            expect(store.memberVerificationCode()).toBe('MEMBERSHIP_MISMATCH');
+            expect(store.memberVerificationError()).toContain('private chat');
+        });
+
+        it('raises the same alarm instead of posting in the clear when a pinned private chat becomes a channel', async () => {
+            store.chats.set([privateWith(ME, PEER)]);
+            store.activeChatId.set(CHAT);
+            await store.send('hello');
+
+            store.chats.set([chat({ chat_type: 'channel' })]);
+            await store.send('now a channel?');
+
+            expect(TestBed.inject(MessageService).sendChannelPost).not.toHaveBeenCalled();
+            expect(store.memberVerificationCode()).toBe('MEMBERSHIP_MISMATCH');
+        });
+
+        /** S2: a group is never pinned, so being seen as encrypted is what protects it. */
+        it('raises the alarm instead of posting in the clear when an encrypted group becomes a channel', async () => {
+            store.chats.set([chat({ chat_type: 'group' })]);
+            store.activeChatId.set(CHAT);
+            await store.send('hello');
+
+            store.chats.set([chat({ chat_type: 'channel' })]);
+            await store.send('now a channel?');
+
+            expect(TestBed.inject(MessageService).sendChannelPost).not.toHaveBeenCalled();
+            expect(store.memberVerificationCode()).toBe('MEMBERSHIP_MISMATCH');
+            expect(store.memberVerificationError()).toContain('encrypted group');
+        });
+
+        it('remembers an encrypted group across a reload', async () => {
+            store.chats.set([chat({ chat_type: 'group' })]);
+            store.activeChatId.set(CHAT);
+            await store.send('hello');
+
+            const reloaded = Injector.create({
+                parent: TestBed.inject(Injector),
+                providers: [MembershipGuardService],
+            }).get(MembershipGuardService);
+
+            expect(reloaded.encryptedTypeOf(CHAT)).toBe('group');
+        });
+
+        it('still posts to a chat only ever seen as a channel', async () => {
+            const messages = TestBed.inject(MessageService) as jasmine.SpyObj<MessageService>;
+            messages.sendChannelPost.and.resolveTo(messageResponse({ _id: 'post', sender_id: ME }));
+            store.chats.set([chat({ chat_type: 'channel' })]);
+            store.activeChatId.set(CHAT);
+
+            await store.send('hello');
+
+            expect(messages.sendChannelPost).toHaveBeenCalledTimes(1);
+            expect(store.memberVerificationError()).toBeNull();
+        });
+
+        it('raises the alarm on open, not just on send, when the chat contradicts its pin', async () => {
+            const chatApi = TestBed.inject(ChatApiService) as jasmine.SpyObj<ChatApiService>;
+            TestBed.inject(MembershipGuardService).pinPeer(ME, CHAT, PEER);
+            store.chats.set([privateWith()]);
+            store.activeChatId.set(CHAT);
+            chatApi.getChat.and.returnValue(of(privateWith(ME, OTHER)));
+
+            await (store as unknown as { hydrateChat(id: string): Promise<unknown> }).hydrateChat(CHAT);
+
+            expect(store.memberVerificationCode()).toBe('MEMBERSHIP_MISMATCH');
+        });
+
+        it('lets the key store re-read a group participant list on every publish', async () => {
+            const chatApi = TestBed.inject(ChatApiService) as jasmine.SpyObj<ChatApiService>;
+            store.chats.set([chat({ chat_type: 'group' })]);
+            store.activeChatId.set(CHAT);
+
+            await store.send('hello');
+
+            const expectation = keyStore.expectMembers.calls.mostRecent().args[1] as MemberExpectation;
+            expect(expectation.kind).toBe('group');
+            chatApi.getChat.and.returnValue(
+                of(
+                    chat({
+                        participants: [
+                            { user_id: ME, role: 'owner', joined_at: '2026-01-01T00:00:00Z' },
+                            { user_id: OTHER, role: 'member', joined_at: '2026-01-01T00:00:00Z' },
+                        ],
+                    })
+                )
+            );
+            expect(expectation.kind === 'group' && (await expectation.resolve())).toEqual([ME, OTHER]);
+            // Round 2, item 3: what was checked is what the member list shows.
+            expect(store.activeChat()?.participants.map((p) => p.user_id)).toEqual([ME, OTHER]);
+            expect(TestBed.inject(DirectoryService).resolveMissing).toHaveBeenCalledWith([ME, OTHER]);
+        });
+
+        it('registers nothing for a channel, which has no roster', async () => {
+            const messages = TestBed.inject(MessageService) as jasmine.SpyObj<MessageService>;
+            messages.sendChannelPost.and.resolveTo(messageResponse({ _id: 'post', sender_id: ME }));
+            store.chats.set([chat({ chat_type: 'channel' })]);
+            store.activeChatId.set(CHAT);
+
+            await store.send('hello');
+
+            expect(keyStore.expectMembers).not.toHaveBeenCalled();
         });
     });
 
@@ -376,6 +1110,32 @@ describe('ChatStoreService', () => {
             await store.loadChats();
 
             expect(directory.rememberPrivateChatPeer).toHaveBeenCalledWith(PEER, 'Deleted user', null, true);
+        });
+
+        /**
+         * L6: a chat is recorded as encrypted when it is listed, not when it is first opened, so one
+         * never opened in this browser cannot be reported as a channel later without the alarm.
+         */
+        it('records every listed private chat and group as encrypted, and no channel', async () => {
+            const GROUP = 'c0000000-0000-4000-8000-0000000000a1';
+            const DIRECT = 'c0000000-0000-4000-8000-0000000000a2';
+            const CHANNEL = 'c0000000-0000-4000-8000-0000000000a3';
+            const guard = TestBed.inject(MembershipGuardService);
+            const chatApi = TestBed.inject(ChatApiService) as jasmine.SpyObj<ChatApiService>;
+            sessionUser = { id: ME };
+            chatApi.getChats.and.returnValue(
+                of([
+                    chat({ id: GROUP, chat_type: 'group' }),
+                    chat({ id: DIRECT, chat_type: 'private' }),
+                    chat({ id: CHANNEL, chat_type: 'channel' }),
+                ])
+            );
+
+            await store.loadChats();
+
+            expect(guard.encryptedTypeOf(GROUP)).toBe('group');
+            expect(guard.encryptedTypeOf(DIRECT)).toBe('private');
+            expect(guard.encryptedTypeOf(CHANNEL)).toBeNull();
         });
     });
 
@@ -538,6 +1298,29 @@ describe('ChatStoreService', () => {
 
             expect(messages.loadMessages).toHaveBeenCalledWith(CHAT, 50, undefined, keys);
         });
+
+        /** S2: a chat opened with keys is remembered as encrypted, before anything is sent in it. */
+        it('records a group opened with keys as encrypted', async () => {
+            sessionUser = { id: ME };
+            const chatApi = TestBed.inject(ChatApiService) as jasmine.SpyObj<ChatApiService>;
+            const cryptoApi = TestBed.inject(CryptoApiService) as jasmine.SpyObj<CryptoApiService>;
+            const messages = TestBed.inject(MessageService) as jasmine.SpyObj<MessageService>;
+            chatApi.getChat.and.returnValue(of(chat()));
+            cryptoApi.getChatKeys.and.returnValue(
+                of({ current_epoch: 1, epochs: [], distributions: [] } as unknown as ChatKeys)
+            );
+            chatApi.getPinnedMessages.and.returnValue(of([]));
+            chatApi.getReadState.and.returnValue(of([]));
+            messages.loadMessages.and.resolveTo({ raw: [], messages: [] });
+            const guard = TestBed.inject(MembershipGuardService);
+            expect(guard.encryptedTypeOf(CHAT)).toBeNull();
+
+            store.chats.set([chat()]);
+            store.activeChatId.set(CHAT);
+            await new Promise((resolve) => setTimeout(resolve, 0));
+
+            expect(guard.encryptedTypeOf(CHAT)).toBe('group');
+        });
     });
 
     describe('editMessage', () => {
@@ -658,6 +1441,57 @@ describe('ChatStoreService', () => {
         /** The endpoint itself toggles, so react() only ever calls the one method. */
         it('patches the message in place after reacting, without re-decrypting', async () => {
             const raw = messageResponse({ _id: 'a', reactions: [{ user_id: 'me', emoji: '👍', created_at: 'now' }] });
+            chatApi.toggleReaction.and.returnValue(of(raw));
+            messages.patchMeta.and.returnValue({ ...decrypted('a', 'ok'), reactions: raw.reactions, isPinned: false });
+
+            await store.react('a', '👍');
+
+            expect(chatApi.toggleReaction).toHaveBeenCalledWith('a', '👍');
+            expect(store.messages()[0].reactions).toEqual(raw.reactions);
+        });
+
+        /** The caps are the server's; each one gets its own explanation rather than a generic failure. */
+        it('reports REACTION_LIMIT_REACHED as the per-user cap', async () => {
+            chatApi.toggleReaction.and.returnValue(
+                throwError(
+                    () => new HttpErrorResponse({ status: 409, error: { error_code: 'REACTION_LIMIT_REACHED' } })
+                )
+            );
+
+            await store.react('a', '🔥');
+
+            expect(store.realtimeError()).toContain('at most 3 reactions');
+        });
+
+        it('reports REACTION_EMOJI_LIMIT_REACHED as the per-message cap', async () => {
+            chatApi.toggleReaction.and.returnValue(
+                throwError(
+                    () =>
+                        new HttpErrorResponse({ status: 409, error: { error_code: 'REACTION_EMOJI_LIMIT_REACHED' } })
+                )
+            );
+
+            await store.react('a', '🔥');
+
+            expect(store.realtimeError()).toContain('20 different reactions');
+        });
+
+        it('keeps the generic notice for any other reaction failure', async () => {
+            chatApi.toggleReaction.and.returnValue(throwError(() => new HttpErrorResponse({ status: 500 })));
+
+            await store.react('a', '🔥');
+
+            expect(store.realtimeError()).toBe('Could not react to that message.');
+        });
+
+        /**
+         * Taking a reaction back must never be refused locally: a user already at the cap of three
+         * still reaches the endpoint, which removes before it checks any limit.
+         */
+        it('sends a toggle-off to the server even when the user already holds three reactions', async () => {
+            const mine = ['👍', '🔥', '🎉'].map((e) => ({ user_id: 'me', emoji: e, created_at: 'now' }));
+            store.messages.set([{ ...decrypted('a', 'ok'), reactions: mine }]);
+            const raw = messageResponse({ _id: 'a', reactions: mine.slice(1) });
             chatApi.toggleReaction.and.returnValue(of(raw));
             messages.patchMeta.and.returnValue({ ...decrypted('a', 'ok'), reactions: raw.reactions, isPinned: false });
 
@@ -1077,12 +1911,18 @@ describe('ChatStoreService', () => {
 
         it('applies a replayed create, edit and delete in order, ending with the message gone', async () => {
             const order: string[] = [];
-            messages.decrypt.and.callFake(async () => {
+            const open = async () => {
                 order.push('decrypt');
                 // The first decrypt is slower than the events behind it.
                 await new Promise((resolve) => setTimeout(resolve, order.length === 1 ? 30 : 1));
                 return { ...decrypted(ID, 'ok'), text: `v${order.length}` };
-            });
+            };
+            messages.decrypt.and.callFake(open);
+            messages.decryptEdit.and.callFake(async () => ({
+                message: await open(),
+                replaced: true,
+                missingKey: false,
+            }));
 
             ws.messages.next(created);
             ws.messages.next(edited);
@@ -1092,6 +1932,81 @@ describe('ChatStoreService', () => {
 
             expect(order).toEqual(['decrypt', 'decrypt']);
             expect(store.messages().some((m) => m.id === ID)).toBeFalse();
+        });
+
+        /**
+         * M4: `message_edited` is only an event. What is on screen changes when the edit inside it
+         * opened, and stays exactly as it was when it did not.
+         */
+        describe('message_edited', () => {
+            const shown = () => store.messages().find((m) => m.id === ID);
+
+            beforeEach(async () => {
+                messages.decrypt.and.resolveTo({ ...decrypted(ID, 'ok'), text: 'v1' });
+                // Let the conversation finish opening first: its (empty) page replaces the list.
+                await settle();
+                ws.messages.next(created);
+                await store.whenIdle();
+                expect(shown()?.text).withContext('the message is on screen before the edit').toBe('v1');
+                messages.forgetOne.calls.reset();
+            });
+
+            it('shows an edit that opened', async () => {
+                messages.decryptEdit.and.resolveTo({
+                    message: { ...decrypted(ID, 'ok'), text: 'v2' },
+                    replaced: true,
+                    missingKey: false,
+                });
+
+                ws.messages.next(edited);
+                await store.whenIdle();
+
+                expect(shown()?.text).toBe('v2');
+            });
+
+            it('leaves the message as it was when the edit was refused, and forgets nothing', async () => {
+                const before = shown();
+                messages.decryptEdit.and.resolveTo({ message: before!, replaced: false, missingKey: false });
+
+                ws.messages.next(edited);
+                await store.whenIdle();
+
+                expect(shown()).toBe(before);
+                expect(shown()?.status).toBe('ok');
+                expect(messages.forgetOne).not.toHaveBeenCalled();
+                expect(messages.refreshGrants).not.toHaveBeenCalled();
+            });
+
+            it('fetches grants once and tries again when the edit is on a chain not held yet', async () => {
+                const before = shown()!;
+                messages.refreshGrants.and.resolveTo();
+                messages.decryptEdit.and.returnValues(
+                    Promise.resolve({ message: before, replaced: false, missingKey: true }),
+                    Promise.resolve({
+                        message: { ...decrypted(ID, 'ok'), text: 'v2' },
+                        replaced: true,
+                        missingKey: false,
+                    })
+                );
+
+                ws.messages.next(edited);
+                await store.whenIdle();
+
+                expect(messages.refreshGrants).toHaveBeenCalledOnceWith(CHAT);
+                expect(messages.decryptEdit).toHaveBeenCalledTimes(2);
+                expect(shown()?.text).toBe('v2');
+            });
+
+            it('keeps the old content when the key for the edit cannot be fetched', async () => {
+                const before = shown()!;
+                messages.refreshGrants.and.rejectWith(new Error('offline'));
+                messages.decryptEdit.and.resolveTo({ message: before, replaced: false, missingKey: true });
+
+                ws.messages.next(edited);
+                await store.whenIdle();
+
+                expect(shown()).toBe(before);
+            });
         });
 
         it('ignores a decrypt that finishes after the message was deleted', async () => {
@@ -1260,5 +2175,139 @@ describe('ChatStoreService', () => {
             await settle();
             expect(store.preview(store.chats()[0]).text).toBe('Location');
         });
+    });
+});
+
+/**
+ * One end-to-end check of the membership pin against the real key store, rather than stubs on
+ * both sides: a private chat the server re-labels as a group with a third member must never get
+ * that member a grant. Refused first by the guard, and by the key store itself as the second line.
+ */
+describe('ChatStoreService with the real KeyStoreService', () => {
+    const DEVICE = 'd1000000-0000-4000-8000-0000000000d1';
+    const PEER_DEVICE = 'd2000000-0000-4000-8000-0000000000d2';
+    const INTRUDER = 'f0000000-0000-4000-8000-00000000000f';
+    const INTRUDER_DEVICE = 'd3000000-0000-4000-8000-0000000000d3';
+
+    function entry(userId: string, deviceId: string, bundle: IdentityBundle): RosterEntry {
+        return {
+            user_id: userId,
+            device_id: deviceId,
+            identity_key_id: deviceId,
+            identity_public_key: b64uEncode(bundle.identityPublic),
+            signing_public_key: b64uEncode(bundle.signingPublic),
+            identity_key_signature: b64uEncode(bundle.identityKeySignature),
+            signed_prekey_public: null,
+            signed_prekey_signature: null,
+        };
+    }
+
+    function roster(...members: RosterEntry[]): ChatRoster {
+        return { chat_id: CHAT, current_epoch: 1, member_set_hash: computeMemberSetHash(members), members };
+    }
+
+    const member = (user_id: string) => ({ user_id, role: 'member' as const, joined_at: '2026-01-01T00:00:00Z' });
+
+    afterEach(() => localStorage.clear());
+
+    it('gives no grant to a third member of a private chat re-labelled as a group', async () => {
+        localStorage.clear();
+        const cryptoApi = jasmine.createSpyObj<CryptoApiService>('CryptoApiService', [
+            'getChatKeys',
+            'enableEncryption',
+            'getRoster',
+            'publishSenderKey',
+            'getOwnIdentities',
+        ]);
+        const messages = jasmine.createSpyObj<MessageService>('MessageService', ['sendText', 'recordOutgoing']);
+        const chatApi = jasmine.createSpyObj<ChatApiService>('ChatApiService', ['getChat']);
+        TestBed.configureTestingModule({
+            providers: [
+                ChatStoreService,
+                { provide: CryptoApiService, useValue: cryptoApi },
+                { provide: MessageService, useValue: messages },
+                { provide: ChatApiService, useValue: chatApi },
+                {
+                    provide: DirectoryService,
+                    useValue: jasmine.createSpyObj('DirectoryService', [
+                        'resolveMissing',
+                        'rememberPrivateChatPeer',
+                        'lookup',
+                    ]),
+                },
+                { provide: SessionService, useValue: { user: () => ({ id: ME }) } },
+                {
+                    provide: WebSocketService,
+                    useValue: {
+                        messages: new Subject(),
+                        reconnected: new Subject<void>(),
+                        isConnected: () => true,
+                        sendRead: () => undefined,
+                        sendTyping: () => undefined,
+                    },
+                },
+            ],
+        });
+        const store = TestBed.inject(ChatStoreService);
+        const keyStore = TestBed.inject(KeyStoreService);
+
+        // Unlocked enough to publish; the bundle sealing (Argon2id) is irrelevant to this path.
+        const mine = generateIdentity(ME, DEVICE, false);
+        const peer = generateIdentity(PEER, PEER_DEVICE, false);
+        const intruder = generateIdentity(INTRUDER, INTRUDER_DEVICE, false);
+        (keyStore as unknown as { identity: unknown }).identity = {
+            userId: ME,
+            deviceId: DEVICE,
+            signingPrivate: mine.signingPrivate,
+            signingPublic: mine.signingPublic,
+            identityPrivate: mine.identityPrivate,
+            kek: new Uint8Array(32),
+            kdfParams: {},
+        };
+        (keyStore as unknown as { ownDevicesAtUnlock: Map<string, string> }).ownDevicesAtUnlock = new Map([
+            [DEVICE, b64uEncode(mine.signingPublic)],
+        ]);
+        cryptoApi.publishSenderKey.and.returnValue(of({}));
+        messages.sendText.and.callFake(async (chatId: string) => {
+            await keyStore.ensureSenderChain(chatId, 1);
+            return messageResponse({ _id: `sent-${Math.random()}`, sender_id: ME });
+        });
+        messages.recordOutgoing.and.returnValue({ ...decrypted('sent', 'ok'), senderId: ME });
+
+        // First send: the chat as opened, {me, peer}. Pins the peer and publishes to both devices.
+        cryptoApi.getRoster.and.returnValue(of(roster(entry(ME, DEVICE, mine), entry(PEER, PEER_DEVICE, peer))));
+        store.chats.set([chat({ chat_type: 'private', participants: [member(ME), member(PEER)] })]);
+        store.activeChatId.set(CHAT);
+        await store.send('first');
+        expect(cryptoApi.publishSenderKey).toHaveBeenCalledTimes(1);
+
+        // The server re-labels it: a group of three, with a roster (and commitment) to match.
+        cryptoApi.getRoster.and.returnValue(
+            of(
+                roster(
+                    entry(ME, DEVICE, mine),
+                    entry(PEER, PEER_DEVICE, peer),
+                    entry(INTRUDER, INTRUDER_DEVICE, intruder)
+                )
+            )
+        );
+        chatApi.getChat.and.returnValue(
+            of(chat({ chat_type: 'group', participants: [member(ME), member(PEER), member(INTRUDER)] }))
+        );
+        store.chats.update((list) => list.map((c) => ({ ...c, chat_type: 'group' as const })));
+        keyStore.invalidateOwnChains();
+        await store.send('second');
+
+        const grantedTo = cryptoApi.publishSenderKey.calls
+            .allArgs()
+            .flatMap((args) => args[2].grants.map((g) => g.recipient_device_id));
+        expect(grantedTo).not.toContain(INTRUDER_DEVICE);
+        expect(cryptoApi.publishSenderKey).toHaveBeenCalledTimes(1);
+        expect(store.memberVerificationCode()).toBe('MEMBERSHIP_MISMATCH');
+
+        // And the key store's own line: a group expectation cannot replace the private one.
+        expect(() =>
+            keyStore.expectMembers(CHAT, { kind: 'group', resolve: async () => [ME, PEER, INTRUDER] })
+        ).toThrowError(MembershipMismatchError);
     });
 });

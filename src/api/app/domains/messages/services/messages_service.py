@@ -23,6 +23,7 @@ from app.domains.messages.schemas.messages_schemas import (
     ContentFormat,
     MessageCreateRequest,
     MessageDocument,
+    MessageEnvelope,
     MessageResponse,
     MessageUpdateRequest,
 )
@@ -33,6 +34,16 @@ from app.infrastructure.minio import minio_manager
 # Many messengers cap simultaneous pins (Telegram allows unlimited but most others bound it); a
 # small cap keeps the pinned list actually skimmable and bounds the size of the listing query.
 MAX_PINNED_MESSAGES_PER_CHAT = 5
+
+# Reactions live inline on the message document, so their number has to be bounded or the document
+# itself is the thing that grows: without a cap, one member could add reactions until the document
+# reached MongoDB's 16 MB limit, after which every `update_one` on it — edits, pins, read state,
+# anyone else's reaction — fails for the whole chat. Two caps, because either alone leaves a hole:
+# per user (so the array is at most members x MAX_REACTIONS_PER_USER entries) and distinct emoji
+# per message (so the rendered row of chips, and the set a client has to draw, stays small no
+# matter how many members coordinate).
+MAX_REACTIONS_PER_USER = 3
+MAX_DISTINCT_REACTIONS_PER_MESSAGE = 20
 
 # Poll control messages. A real vote is well under 1 KB sealed; the cap only has to stop the
 # envelope's 256 KB ceiling being used as free storage through a flag the server cannot look behind.
@@ -207,6 +218,29 @@ def resolve_content_format(doc: dict, chat: Chat) -> ContentFormat:
         if chat.chat_type == ChatType.PRIVATE
         else ContentFormat.LEGACY_PLAINTEXT
     )
+
+
+def _require_encrypted_chat(is_encrypted_chat: bool, envelope: MessageEnvelope | None) -> None:
+    """Refuse any private/group write that is not a sealed envelope in an encrypted chat.
+
+    Checked before the chat's crypto state on purpose: plaintext is refused as ENVELOPE_REQUIRED
+    whether or not encryption has been enabled yet, so "this chat has no settings" can never be
+    read as "this chat accepts plaintext". An envelope for a chat with no epoch cannot be verified
+    against anything, so it is refused too, telling the client to enable encryption first.
+    """
+    if envelope is None:
+        raise AppException(
+            400,
+            "ENVELOPE_REQUIRED",
+            "Messages must be end-to-end encrypted; send an envelope rather than plaintext.",
+        )
+    if not is_encrypted_chat:
+        raise AppException(
+            409,
+            "CRYPTO_NOT_ENABLED",
+            "Encryption has not been enabled for this chat yet; "
+            "call POST /crypto/chats/{id}/enable before sending.",
+        )
 
 
 async def _validate_envelope(db, chat, user_id, settings, envelope) -> None:
@@ -631,22 +665,19 @@ async def send_message(
             collection, chat, user_id, message_in, is_encrypted_chat
         )
 
+    # The server never writes a LEGACY_* document. Private and group chats accept only a sealed
+    # envelope, and only once the chat has crypto settings — a chat nobody has enabled encryption
+    # for is not a plaintext chat, it is a chat that cannot be written to yet. Without this, a
+    # modified client could post readable content into a fresh chat before the honest client's
+    # first-open `POST /crypto/chats/{id}/enable`, and a group whose owner never enabled encryption
+    # stayed readable to the server forever. Legacy history remains readable; nothing adds to it.
     if chat.chat_type == ChatType.CHANNEL:
         await _validate_channel_post(db, chat, user_id, message_in.channel_post)
         content_format = ContentFormat.CHANNEL_SIGNED_V1
-    elif is_encrypted_chat:
+    else:
+        _require_encrypted_chat(is_encrypted_chat, message_in.envelope)
         await _validate_envelope(db, chat, user_id, settings, message_in.envelope)
         content_format = ContentFormat.SENDER_KEYS_V1
-    elif message_in.envelope is not None:
-        raise AppException(
-            400,
-            "ENVELOPE_NOT_ALLOWED",
-            "This chat is not end-to-end encrypted; an envelope cannot be verified here.",
-        )
-    elif chat.chat_type == ChatType.PRIVATE:
-        content_format = ContentFormat.LEGACY_RSA
-    else:
-        content_format = ContentFormat.LEGACY_PLAINTEXT
 
     new_message = MessageDocument(
         **message_in.model_dump(),
@@ -829,52 +860,43 @@ async def update_message(
     # on the signature verifying. None of that ran here, so an edit was a complete bypass: a member
     # could re-seal under a superseded epoch — readable by whoever was just removed — claim another
     # member's chain, or attach a signature that verifies against nothing.
-    if is_encrypted_chat:
-        await _validate_envelope(db, chat, user_id, chat_settings, message_in.envelope)
-    elif message_in.envelope is not None:
+    #
+    # Same rule as the send path: an edit is new content, so it must be a sealed envelope in an
+    # encrypted chat. A legacy document can still be read, and can be edited only by replacing it
+    # with an envelope once the chat is encrypted — never by writing fresh plaintext over it.
+    _require_encrypted_chat(is_encrypted_chat, message_in.envelope)
+    await _validate_envelope(db, chat, user_id, chat_settings, message_in.envelope)
+
+    existing = msg.get("envelope")
+
+    # An index only means anything within one chain. A message key is derived from its chain key,
+    # and every sender_key_id has its own random chain key, so index 0 of a new chain is a
+    # different key from index 0 of the old one — no (key, nonce) pair is repeated.
+    #
+    # Scoping the check to a matching chain is not a relaxation, it is what makes it correct.
+    # Comparing bare indices used to work only because a device could publish one chain per epoch;
+    # since that constraint was lifted, a client whose in-memory chain is gone mints a fresh one
+    # starting at 0, and every edit after a reload was rejected out of hand.
+    same_chain = (
+        existing
+        and str(existing.get("skid")) == str(message_in.envelope.skid)
+        and existing.get("epoch") == message_in.envelope.epoch
+    )
+
+    if same_chain and message_in.envelope.idx <= existing.get("idx", -1):
         raise AppException(
             400,
-            "ENVELOPE_NOT_ALLOWED",
-            "This chat is not end-to-end encrypted; an envelope cannot be verified here.",
+            "CHAIN_INDEX_REUSED",
+            "An edit must use a fresh chain index; reusing one would repeat a message key.",
         )
 
-    if message_in.envelope is not None:
-        existing = msg.get("envelope")
-
-        # An index only means anything within one chain. A message key is derived from its chain key,
-        # and every sender_key_id has its own random chain key, so index 0 of a new chain is a
-        # different key from index 0 of the old one — no (key, nonce) pair is repeated.
-        #
-        # Scoping the check to a matching chain is not a relaxation, it is what makes it correct.
-        # Comparing bare indices used to work only because a device could publish one chain per epoch;
-        # since that constraint was lifted, a client whose in-memory chain is gone mints a fresh one
-        # starting at 0, and every edit after a reload was rejected out of hand.
-        same_chain = (
-            existing
-            and str(existing.get("skid")) == str(message_in.envelope.skid)
-            and existing.get("epoch") == message_in.envelope.epoch
-        )
-
-        if same_chain and message_in.envelope.idx <= existing.get("idx", -1):
-            raise AppException(
-                400,
-                "CHAIN_INDEX_REUSED",
-                "An edit must use a fresh chain index; reusing one would repeat a message key.",
-            )
-
-        update = {
-            "envelope": message_in.envelope.model_dump(mode="json"),
-            "encrypted_content": None,
-            "content_format": ContentFormat.SENDER_KEYS_V1.value,
-            "is_edited": True,
-            "edited_at": datetime.now(timezone.utc),
-        }
-    else:
-        update = {
-            "encrypted_content": message_in.encrypted_content,
-            "is_edited": True,
-            "edited_at": datetime.now(timezone.utc),
-        }
+    update = {
+        "envelope": message_in.envelope.model_dump(mode="json"),
+        "encrypted_content": None,
+        "content_format": ContentFormat.SENDER_KEYS_V1.value,
+        "is_edited": True,
+        "edited_at": datetime.now(timezone.utc),
+    }
 
     if attachments_supplied:
         # Whole-list replacement, not a merge — mirrors `PATCH /chat-folder/{id}` replacing
@@ -960,12 +982,16 @@ async def toggle_reaction(
 
     Atomic by construction rather than read-then-decide-then-write: a `$pull` is attempted first,
     and only if it removed nothing (`modified_count == 0`, meaning the caller had not reacted with
-    this emoji) does a `$push` follow — and that `$push`'s own filter re-checks non-existence of the
-    same `(user_id, emoji)` pair in the same round trip, so it cannot land twice even if two
-    identical requests both fall through to it concurrently. This closes the double-tap race where
-    two near-simultaneous toggles could otherwise both read "not reacted yet" and both append,
-    leaving a duplicate entry that only a later toggle's `$pull` (which removes every match) would
-    clean up.
+    this emoji) does a `$push` follow — and that `$push`'s own filter re-checks, in the same round
+    trip, everything the add depends on: that the same `(user_id, emoji)` pair is still absent, and
+    that both caps (`MAX_REACTIONS_PER_USER`, `MAX_DISTINCT_REACTIONS_PER_MESSAGE`) still have
+    room. MongoDB evaluates an `update_one` filter and applies its update atomically per document,
+    so no interleaving of concurrent toggles can land a duplicate or push the array past a cap —
+    a count-then-push in Python could, since every concurrent request would read the same
+    under-the-cap count.
+
+    Removal is the unconditional `$pull` and never consults a cap, so a user at the limit (or on a
+    message at the distinct-emoji limit) can always take a reaction back.
     """
     collection = mongo_db["messages"]
     msg, chat = await get_message_for_participant(db, collection, msg_id, user_id)
@@ -979,11 +1005,8 @@ async def toggle_reaction(
     if pull_result.modified_count > 0:
         added = False
     else:
-        await collection.update_one(
-            {
-                "_id": msg["_id"],
-                "reactions": {"$not": {"$elemMatch": {"user_id": user_id, "emoji": emoji}}},
-            },
+        push_result = await collection.update_one(
+            {"_id": msg["_id"], "$expr": _reaction_add_allowed(user_id, emoji)},
             {
                 "$push": {
                     "reactions": {
@@ -994,10 +1017,34 @@ async def toggle_reaction(
                 }
             },
         )
-        # If the filter matched nothing, a concurrent request already added this exact
-        # (user_id, emoji) pair between our `$pull` and this `$push` — the reaction is present
-        # either way, so this call still reports it as added rather than erroring or no-op'ing
-        # into a stale "removed" state.
+        if push_result.modified_count == 0:
+            # The conditional push matched nothing. Re-read only to say *why* — the decision was
+            # already made atomically above, this just picks the right answer for the caller.
+            current = await collection.find_one({"_id": msg["_id"]}, {"reactions": 1})
+            if current is None:
+                raise AppException(404, "MESSAGE_NOT_FOUND", "Message not found.")
+
+            reactions = current.get("reactions") or []
+            mine = [r for r in reactions if r.get("user_id") == user_id]
+
+            if not any(r.get("emoji") == emoji for r in mine):
+                if len(mine) >= MAX_REACTIONS_PER_USER:
+                    raise AppException(
+                        409,
+                        "REACTION_LIMIT_REACHED",
+                        f"You can add at most {MAX_REACTIONS_PER_USER} reactions to a message; "
+                        f"remove one before adding another.",
+                    )
+                raise AppException(
+                    409,
+                    "REACTION_EMOJI_LIMIT_REACHED",
+                    f"This message already has {MAX_DISTINCT_REACTIONS_PER_MESSAGE} different "
+                    f"reactions; pick one of the existing ones.",
+                )
+            # Otherwise a concurrent request already added this exact (user_id, emoji) pair
+            # between our `$pull` and this `$push` — the reaction is present either way, so this
+            # call still reports it as added rather than erroring or no-op'ing into a stale
+            # "removed" state.
         added = True
 
     updated = await collection.find_one({"_id": msg["_id"]})
@@ -1005,6 +1052,51 @@ async def toggle_reaction(
     updated["content_format"] = resolve_content_format(updated, chat)
 
     return MessageResponse(**updated), added
+
+
+def _reaction_add_allowed(user_id: uuid.UUID, emoji: str) -> dict:
+    """The `$expr` under which `(user_id, emoji)` may be appended to a message's reactions.
+
+    True only when all three hold for the document as it is at the moment of the update: the
+    caller has not already placed this emoji, the caller holds fewer than
+    `MAX_REACTIONS_PER_USER` reactions here, and the emoji is either already on the message (a
+    "+1" on an existing chip never widens the set) or the message has fewer than
+    `MAX_DISTINCT_REACTIONS_PER_MESSAGE` distinct emoji.
+
+    `$literal` around the emoji keeps a client-supplied string from ever being read as a field
+    path or operator inside the expression.
+    """
+    reactions = {"$ifNull": ["$reactions", []]}
+    literal_emoji = {"$literal": emoji}
+    my_emoji = {
+        "$map": {
+            "input": {
+                "$filter": {
+                    "input": reactions,
+                    "as": "r",
+                    "cond": {"$eq": ["$$r.user_id", user_id]},
+                }
+            },
+            "as": "r",
+            "in": "$$r.emoji",
+        }
+    }
+    distinct_emoji = {
+        "$setUnion": [{"$map": {"input": reactions, "as": "r", "in": "$$r.emoji"}}, []]
+    }
+
+    return {
+        "$and": [
+            {"$not": [{"$in": [literal_emoji, my_emoji]}]},
+            {"$lt": [{"$size": my_emoji}, MAX_REACTIONS_PER_USER]},
+            {
+                "$or": [
+                    {"$in": [literal_emoji, distinct_emoji]},
+                    {"$lt": [{"$size": distinct_emoji}, MAX_DISTINCT_REACTIONS_PER_MESSAGE]},
+                ]
+            },
+        ]
+    }
 
 
 async def remove_reaction(

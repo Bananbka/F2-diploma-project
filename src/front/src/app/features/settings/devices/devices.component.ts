@@ -62,6 +62,8 @@ export class DevicesComponent {
                     signed_prekey_created_at: identity.signed_prekey_created_at,
                 }))
             );
+            // The user is looking at the device list now: that is what the "device added" notice asks.
+            this.keyStore.acknowledgeOwnDevicesAdded();
         } catch {
             this.deviceError.set('Could not load your devices.');
         } finally {
@@ -88,6 +90,9 @@ export class DevicesComponent {
 
         try {
             await firstValueFrom(this.cryptoApi.revokeDevice(deviceId));
+            // A roster that still lists the revoked device must no longer be explained away as
+            // "it was ours at unlock".
+            this.keyStore.noteOwnDeviceRevoked(deviceId);
             await this.loadDevices();
         } catch {
             this.deviceError.set('Could not revoke that device.');

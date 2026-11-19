@@ -111,8 +111,11 @@ def _is_transient_mail_error(error: BaseException) -> bool:
 )
 def send_email(type_: EmailTasks, email_to: str, **kwargs):
     if not settings.SMTP_USER or not settings.SMTP_PASSWORD:
+        # Never log kwargs: they carry the OTP, and a code in the log is a code anyone with log
+        # access can redeem. Only the names of the fields are recorded.
         logger.warning(
-            f"SMTP is not configured! Simulated email to {email_to}. Kwargs: {kwargs}"
+            f"SMTP is not configured! Simulated {type_} email to {email_to} "
+            f"(fields: {sorted(kwargs)})"
         )
         return False
 

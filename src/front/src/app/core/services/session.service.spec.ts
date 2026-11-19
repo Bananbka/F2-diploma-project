@@ -7,6 +7,7 @@ import { of, Subject, throwError } from 'rxjs';
 import { UserProfile } from '../models/chat.model';
 import { AuthApiService } from './auth-api.service';
 import { CryptoApiService } from './crypto-api.service';
+import { IdentityMismatchError } from './crypto-errors';
 import { KeyStoreService } from './key-store.service';
 import { MessageService } from './message.service';
 import { ProfileApiService } from './profile-api.service';
@@ -110,6 +111,15 @@ describe('SessionService socket session end (close code 4401)', () => {
     });
 
     const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+    /** H1: a mismatch between the opened keys and the reported account is not a wrong password. */
+    it('lets an identity mismatch through as an error and does not connect', async () => {
+        keyStore.unlock.and.rejectWith(new IdentityMismatchError());
+
+        await expectAsync(session.unlock('pw')).toBeRejectedWithError(IdentityMismatchError);
+
+        expect(ws.connect).not.toHaveBeenCalled();
+    });
 
     it('refreshes the token and reconnects once when that works', async () => {
         authApi.refresh.and.returnValue(of({}));

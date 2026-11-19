@@ -6,7 +6,7 @@ import { SuccessResponse } from '../models/api.model';
 import { ChatApiService } from './chat-api.service';
 
 /** Mirrors `AttachmentFetchStatus` in `file_schemas.py`. */
-type AttachmentFetchStatus = 'ok' | 'not_found' | 'gone';
+type AttachmentFetchStatus = 'ok' | 'not_found' | 'gone' | 'too_large';
 
 /** Mirrors `BatchAttachmentResult` in `file_schemas.py`. */
 interface BatchAttachmentResult {
@@ -20,8 +20,20 @@ interface BatchAttachmentResult {
 /** The server's own cap on `object_keys` per call — see `MAX_BATCH_ATTACHMENT_KEYS`. */
 const MAX_KEYS_PER_BATCH = 50;
 
+/**
+ * How many `too_large` objects are fetched individually at once, across all chats.
+ *
+ * These are by definition the big ones (each would have taken a batch call past the server's
+ * 30 MB budget), so an unbounded burst would hold many multi-megabyte responses in memory at once
+ * and occupy most of the browser's per-origin connections, stalling the ordinary API calls behind
+ * them. Three keeps a screen of large videos moving without doing either.
+ */
+const MAX_CONCURRENT_SINGLE_FETCHES = 3;
+
 interface PendingFetch {
     objectKey: string;
+    /** Kept so a `too_large` entry can be re-requested through `ChatApiService.attachmentUrl`. */
+    storedUrl: string;
     resolve: (bytes: ArrayBuffer) => void;
     reject: (error: unknown) => void;
 }
@@ -44,6 +56,10 @@ export class AttachmentBatchService {
     /** Which chat ids already have a flush scheduled, so a burst of calls schedules only one. */
     private readonly scheduled = new Set<string>();
 
+    /** Individual fetches waiting for a slot — see `MAX_CONCURRENT_SINGLE_FETCHES`. */
+    private readonly singleQueue: (() => void)[] = [];
+    private activeSingleFetches = 0;
+
     /**
      * Fetch one attachment's raw ciphertext bytes, batched with any other `fetch()` call for the
      * same chat that lands before the next flush.
@@ -51,13 +67,17 @@ export class AttachmentBatchService {
      * Mirrors `firstValueFrom(http.get(..., {responseType: 'arraybuffer'}))`'s contract: resolves
      * with the ciphertext bytes on success, rejects on `not_found`/`gone`/any HTTP failure — so a
      * caller's existing try/catch around the old direct fetch needs no change.
+     *
+     * An object the server leaves out of the batch as `too_large` is fetched on its own through
+     * the streaming single-object endpoint and resolves here exactly as a batch hit would; the
+     * caller cannot tell which transport served it.
      */
     fetch(chatId: string, storedUrl: string): Promise<ArrayBuffer> {
         const objectKey = this.chatApi.attachmentObjectKey(storedUrl);
 
         return new Promise<ArrayBuffer>((resolve, reject) => {
             const queue = this.queues.get(chatId) ?? [];
-            queue.push({ objectKey, resolve, reject });
+            queue.push({ objectKey, storedUrl, resolve, reject });
             this.queues.set(chatId, queue);
             this.scheduleFlush(chatId);
         });
@@ -117,15 +137,32 @@ export class AttachmentBatchService {
             );
 
             const byKey = new Map(response.data.map((result) => [result.object_key, result]));
+            // Grouped by key so an object two tiles asked for is downloaded once, not per tile.
+            const oversized = new Map<string, PendingFetch[]>();
             for (const entry of entries) {
                 const result = byKey.get(entry.objectKey);
-                if (!result || result.status !== 'ok' || result.content_base64 === null) {
+                if (result?.status === 'too_large') {
+                    // Not an error about the object: it is authorised and present, it just did not
+                    // fit in this call's byte budget. Rejecting here would leave the tile in an
+                    // error state for something a plain GET serves.
+                    const sharing = oversized.get(entry.objectKey) ?? [];
+                    sharing.push(entry);
+                    oversized.set(entry.objectKey, sharing);
+                    continue;
+                }
+                if (!result|| result.status !== 'ok' || result.content_base64 === null) {
                     entry.reject(
                         new Error(`attachment ${entry.objectKey} unavailable: ${result?.status ?? 'missing'}`)
                     );
                     continue;
                 }
                 entry.resolve(base64ToArrayBuffer(result.content_base64));
+            }
+
+            // Not awaited: the entries that did fit are already settled, and the flush that issued
+            // this chunk has nothing further to do with the stragglers.
+            for (const sharing of oversized.values()) {
+                void this.fetchSingle(chatId, sharing);
             }
         } catch (error) {
             // The whole HTTP call failed (network error, 403, rate limited, ...) — every entry in
@@ -134,6 +171,52 @@ export class AttachmentBatchService {
                 entry.reject(error);
             }
         }
+    }
+
+    /**
+     * Fetch one object through `GET /files/attachments/{chat_id}/{object_key}` and settle every
+     * entry waiting on it. A failure here is the real `HttpErrorResponse`, passed through as-is —
+     * the same thing a caller got from the direct fetch this service replaced.
+     */
+    private async fetchSingle(chatId: string, entries: PendingFetch[]): Promise<void> {
+        await this.acquireSingleSlot();
+        try {
+            const bytes = await firstValueFrom(
+                this.http.get(this.chatApi.attachmentUrl(chatId, entries[0].storedUrl), {
+                    responseType: 'arraybuffer',
+                })
+            );
+            entries.forEach((entry, index) => {
+                // The batch path decodes a separate buffer per entry, so no two callers ever share
+                // one. Keep that true here: a caller that transfers or detaches its buffer must not
+                // be able to empty another tile's copy.
+                entry.resolve(index === 0 ? bytes : bytes.slice(0));
+            });
+        } catch (error) {
+            for (const entry of entries) {
+                entry.reject(error);
+            }
+        } finally {
+            this.releaseSingleSlot();
+        }
+    }
+
+    private acquireSingleSlot(): Promise<void> {
+        if (this.activeSingleFetches < MAX_CONCURRENT_SINGLE_FETCHES) {
+            this.activeSingleFetches++;
+            return Promise.resolve();
+        }
+        return new Promise<void>((resolve) => this.singleQueue.push(resolve));
+    }
+
+    private releaseSingleSlot(): void {
+        const next = this.singleQueue.shift();
+        if (next) {
+            // The slot passes straight to the next waiter, so the count does not change.
+            next();
+            return;
+        }
+        this.activeSingleFetches--;
     }
 }
 

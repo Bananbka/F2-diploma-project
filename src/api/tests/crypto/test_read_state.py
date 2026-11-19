@@ -13,6 +13,7 @@ import uuid
 import httpx
 import websockets
 
+from tests.crypto.sealing import send_sealed
 from tests.crypto.test_epoch_api import _group_with
 from tests.crypto.test_identity_api import _register_user
 
@@ -27,9 +28,7 @@ async def _private_chat(client, peer_id) -> uuid.UUID:
 
 
 async def _send(client: httpx.AsyncClient, chat_id: uuid.UUID, text: str) -> str:
-    r = await client.post(
-        "/messages/", json={"chat_id": str(chat_id), "encrypted_content": text}
-    )
+    r = await send_sealed(client, chat_id, text)
     assert r.status_code == 201, r.text
     return r.json()["data"]["_id"]
 

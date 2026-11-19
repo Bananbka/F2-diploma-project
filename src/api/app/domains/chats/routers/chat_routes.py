@@ -32,6 +32,7 @@ from app.domains.chats.schemas.chat_schemas import (
     UserListRequest,
 )
 from app.domains.chats.services import chat_services
+from app.domains.files.services import avatar_ownership
 from app.domains.messages.schemas.messages_schemas import MessageResponse
 from app.domains.messages.services import messages_service
 from app.domains.users.dependencies import get_current_user
@@ -117,6 +118,11 @@ async def create_group_chat(
     db: AsyncSession = Depends(get_db),
     publisher: EventPublisher = Depends(get_event_publisher),
 ):
+    # The schema only anchors the url to the public avatar bucket; without this, a group could be
+    # created wearing anyone's avatar.
+    if data.avatar_url is not None:
+        await avatar_ownership.require_owned_avatar(data.avatar_url, user.id)
+
     chat = await chat_services.create_group_chat(db, user.id, data)
 
     await redis_service.send_chat_created_message(
@@ -141,6 +147,9 @@ async def create_channel(
     Channels are signed but not encrypted. See the wire spec: confidentiality is unachievable for
     open-enrollment broadcast, and sender-key distribution does not scale to channel membership.
     """
+    if data.avatar_url is not None:
+        await avatar_ownership.require_owned_avatar(data.avatar_url, user.id)
+
     chat = await chat_services.create_channel(db, user.id, data)
 
     await redis_service.send_chat_created_message(

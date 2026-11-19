@@ -40,16 +40,14 @@ import {
 } from 'lucide-angular';
 import { firstValueFrom } from 'rxjs';
 
-import { computeMemberSetHash } from '../../../core/crypto/grants';
-import { verifyIdentityBinding, verifySignedPrekey } from '../../../core/crypto/identity';
-import { b64uDecode } from '../../../core/crypto/primitives';
 import { Chat, InviteLink, ParticipantRole, UserSearchResult } from '../../../core/models/chat.model';
 import { ChatRoster } from '../../../core/models/crypto.model';
 import { ChatApiService } from '../../../core/services/chat-api.service';
 import { ChatPanelStoreService } from '../../../core/services/chat-panel-store.service';
-import { ChatStoreService } from '../../../core/services/chat-store.service';
+import { ChatStoreService, PRIVATE_CHAT_MISMATCH_NOTICE } from '../../../core/services/chat-store.service';
 import { ContactsStoreService } from '../../../core/services/contacts-store.service';
 import { CryptoApiService } from '../../../core/services/crypto-api.service';
+import { MembershipMismatchError } from '../../../core/services/crypto-errors';
 import { DirectoryService } from '../../../core/services/directory.service';
 import { SessionService } from '../../../core/services/session.service';
 import { AvatarComponent } from '../../../shared/ui/avatar/avatar.component';
@@ -60,6 +58,7 @@ import { SelectComponent, SelectOption } from '../../../shared/ui/select/select.
 import { avatarKindFor, DELETED_USER_LABEL, safetyNumberGroups } from '../../../shared/utils/display';
 import { EncryptionPanelComponent } from '../encryption-panel/encryption-panel.component';
 import { ExportDialogComponent } from '../export-dialog/export-dialog.component';
+import { rosterMatchesMembers } from '../roster-commitment';
 import { SafetyNumberComponent } from '../safety-number/safety-number.component';
 
 /** Mirrors the server's `ROLE_RANK`: removal needs a strictly higher rank than the target. */
@@ -218,59 +217,34 @@ export class ChatInfoComponent {
     private addTimer: ReturnType<typeof setTimeout> | null = null;
 
     /**
-     * The anti-ghost check, run here as well as before key distribution.
+     * The anti-ghost check, run here as well as before key distribution (`rosterMatchesMembers`).
+     * This screen shows the roster, so it is where a failure has to be visible. Null until a roster
+     * has been fetched: nothing was checked, so nothing may be claimed.
      *
-     * Two independent things, both required — the same pair `KeyStoreService.verifyRoster` enforces
-     * before wrapping. This screen shows the roster, so it is where a failure has to be visible.
-     *
-     * **The binding signatures.** Each entry's X25519 key must be vouched for by that device's own
-     * Ed25519 signing key — the key a peer pins out of band as a safety number. This is the actual
-     * root of trust; without it the roster is merely what the server says it is.
-     *
-     * **The member set hash**, recomputed from the whole roster entry and compared against the
-     * epoch's stored commitment. Note `roster.members`, not `members.map(m => m.device_id)`: the
-     * commitment binds the key material now, precisely because hashing ids alone let a server keep
-     * the device set identical and swap one member's public key for its own.
+     * The members listed below come from the chat's participants, not from the roster, so the roster
+     * must also name nobody outside that list: otherwise "matches" would be said of a list that
+     * leaves out someone the keys go to. Both were fetched by the same `load`.
      */
     readonly memberSetVerified = computed(() => {
         const roster = this.roster();
-        if (!roster) {
+        const chat = this.chat();
+        if (!roster || !chat) {
             return null;
         }
-
-        const bindingsValid = roster.members.every((member) => {
-            const signingPublic = b64uDecode(member.signing_public_key);
-
-            const identityBound = verifyIdentityBinding(
-                member.user_id,
-                member.device_id,
-                b64uDecode(member.identity_public_key),
-                signingPublic,
-                b64uDecode(member.identity_key_signature)
-            );
-
-            if (!identityBound) {
-                return false;
-            }
-
-            if (!member.signed_prekey_public) {
-                return true;
-            }
-
-            return (
-                !!member.signed_prekey_signature &&
-                verifySignedPrekey(
-                    member.user_id,
-                    member.device_id,
-                    b64uDecode(member.signed_prekey_public),
-                    signingPublic,
-                    b64uDecode(member.signed_prekey_signature)
-                )
-            );
-        });
-
-        return bindingsValid && computeMemberSetHash(roster.members) === roster.member_set_hash;
+        return rosterMatchesMembers(
+            roster,
+            chat.participants.map((p) => p.user_id)
+        );
     });
+
+    /**
+     * The green "Key epoch verified" badge claims more than the commitment check: a reader takes it
+     * for "this chat's keys are fine". Withheld while a verified member's key changed or the send
+     * path raised a membership alarm, either of which this screen's own roster check cannot see.
+     */
+    readonly epochBadgeAllowed = computed(
+        () => this.store.keyChangedPeers().length === 0 && this.store.memberVerificationError() === null
+    );
 
     readonly avatarKindFor = avatarKindFor;
 
@@ -588,6 +562,8 @@ export class ChatInfoComponent {
         this.busy.set(true);
         try {
             const chat = await firstValueFrom(this.chatApi.createPrivateChat(member.userId));
+            // Pinned to the person chosen here; a response naming anyone else is not opened.
+            this.store.adoptCreatedPrivateChat(chat, member.userId);
             // The chat exists now; a failed list refresh must not strand the user on this screen.
             try {
                 await this.store.loadChats();
@@ -595,8 +571,13 @@ export class ChatInfoComponent {
                 // The list catches up on the next refresh or realtime event.
             }
             await this.router.navigate(['/chats', chat.id]);
-        } catch {
-            this.actionError.set('Could not open a chat with that person.');
+        } catch (error) {
+            // A refused chat is an alarm with its own wording, not an ordinary failure to open.
+            this.actionError.set(
+                error instanceof MembershipMismatchError
+                    ? PRIVATE_CHAT_MISMATCH_NOTICE
+                    : 'Could not open a chat with that person.'
+            );
         } finally {
             this.busy.set(false);
         }

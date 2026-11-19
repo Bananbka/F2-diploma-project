@@ -13,6 +13,8 @@ import websockets
 from app.domains.crypto.reference.ratchet import SenderChain
 
 from tests.crypto.otp_helpers import plant_known_otp
+from tests.crypto.sealing import send_sealed
+from tests.crypto.test_message_crud_api import _insert_legacy
 from tests.crypto.test_epoch_api import _group_with, _publish_identity
 from tests.crypto.test_identity_api import _register_user, rate_limit_bypass_headers
 from tests.crypto.test_rotation_api import _publish_chain, _seal
@@ -223,8 +225,8 @@ async def test_envelope_rejected_when_chat_has_no_crypto_settings():
             "/messages/", json={"chat_id": str(chat_id), "envelope": forged_envelope}
         )
 
-        assert r.status_code == 400, r.text
-        assert r.json()["error_code"] == "ENVELOPE_NOT_ALLOWED"
+        assert r.status_code == 409, r.text
+        assert r.json()["error_code"] == "CRYPTO_NOT_ENABLED"
     finally:
         await alice.aclose()
         await bob.aclose()
@@ -232,18 +234,17 @@ async def test_envelope_rejected_when_chat_has_no_crypto_settings():
 
 async def test_edit_with_envelope_rejected_when_chat_has_no_crypto_settings():
     """Same hole, reached through PUT: the edit path fell through to acceptance just as
-    unconditionally when `chat_settings` was None."""
+    unconditionally when `chat_settings` was None.
+
+    Nothing can send into such a chat any more, so the message being edited is a pre-migration
+    legacy document planted straight into Mongo — the only kind that can exist there.
+    """
     alice, alice_id = await _register_user()
     bob, bob_id = await _register_user()
 
     try:
         chat_id = await _group_with(alice, bob_id)
-
-        r = await alice.post(
-            "/messages/", json={"chat_id": str(chat_id), "encrypted_content": "hello"}
-        )
-        assert r.status_code == 201, r.text
-        message_id = r.json()["data"]["_id"]
+        message_id = await _insert_legacy(chat_id, alice_id, "hello")
 
         forged_envelope = {
             "v": 1,
@@ -259,8 +260,8 @@ async def test_edit_with_envelope_rejected_when_chat_has_no_crypto_settings():
             f"/messages/{message_id}", json={"envelope": forged_envelope}
         )
 
-        assert r.status_code == 400, r.text
-        assert r.json()["error_code"] == "ENVELOPE_NOT_ALLOWED"
+        assert r.status_code == 409, r.text
+        assert r.json()["error_code"] == "CRYPTO_NOT_ENABLED"
     finally:
         await alice.aclose()
         await bob.aclose()
@@ -318,13 +319,7 @@ async def test_socket_refuses_read_receipts_for_a_chat_you_are_not_in():
     try:
         chat_id = await _private_chat(alice, bob_id)
 
-        r = await alice.post(
-            "/messages/",
-            json={
-                "chat_id": str(chat_id),
-                "encrypted_content": "hello",
-            },
-        )
+        r = await send_sealed(alice, chat_id, "hello")
         assert r.status_code == 201, r.text
         message_id = r.json()["data"]["_id"]
 
@@ -552,9 +547,7 @@ async def test_owner_can_delete_a_group_and_its_messages():
     try:
         chat_id = await _group_with(alice, bob_id)
 
-        r = await alice.post(
-            "/messages/", json={"chat_id": str(chat_id), "encrypted_content": "x"}
-        )
+        r = await send_sealed(alice, chat_id, "x")
         assert r.status_code == 201, r.text
 
         # A member cannot delete it.

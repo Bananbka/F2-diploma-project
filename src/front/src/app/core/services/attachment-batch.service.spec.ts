@@ -19,9 +19,14 @@ describe('AttachmentBatchService', () => {
         const chatApi = jasmine.createSpyObj<ChatApiService>('ChatApiService', [
             'attachmentObjectKey',
             'attachmentsBatchUrl',
+            'attachmentUrl',
         ]);
         chatApi.attachmentObjectKey.and.callFake((storedUrl: string) => storedUrl.split('/').pop() ?? '');
         chatApi.attachmentsBatchUrl.and.returnValue(batchUrl);
+        chatApi.attachmentUrl.and.callFake(
+            (chatId: string, storedUrl: string) =>
+                `http://test/api/files/attachments/${chatId}/${storedUrl.split('/').pop() ?? ''}`
+        );
 
         TestBed.configureTestingModule({
             providers: [
@@ -196,5 +201,128 @@ describe('AttachmentBatchService', () => {
 
         await a;
         await b;
+    });
+
+    describe('objects the batch reports as too_large', () => {
+        const singleUrl = (chatId: string, key: string) => `http://test/api/files/attachments/${chatId}/${key}`;
+
+        function tooLarge(key: string) {
+            return {
+                object_key: key,
+                status: 'too_large',
+                content_type: null,
+                content_base64: null,
+                content_length: 40_000_000,
+            };
+        }
+
+        function bufferOf(text: string): ArrayBuffer {
+            return new TextEncoder().encode(text).buffer as ArrayBuffer;
+        }
+
+        /** Lets the awaits between a flushed response and the follow-up request run. */
+        async function settle(): Promise<void> {
+            await new Promise<void>((resolve) => setTimeout(resolve));
+        }
+
+        it('fetches the object individually and resolves it like a batch hit', async () => {
+            const small = service.fetch('chat1', 'https://minio/bucket/key-small');
+            const big = service.fetch('chat1', 'https://minio/bucket/key-big');
+
+            await Promise.resolve();
+            httpMock.expectOne(batchUrl).flush({
+                status: 'ok',
+                data: [
+                    {
+                        object_key: 'key-small',
+                        status: 'ok',
+                        content_type: 'image/png',
+                        content_base64: toBase64('SMALL'),
+                        content_length: 5,
+                    },
+                    tooLarge('key-big'),
+                ],
+            });
+            await settle();
+
+            // The entry that fit is not held back by the one that did not.
+            expect(bytesToString(await small)).toBe('SMALL');
+
+            const single = httpMock.expectOne(singleUrl('chat1', 'key-big'));
+            expect(single.request.method).toBe('GET');
+            expect(single.request.responseType).toBe('arraybuffer');
+            single.flush(bufferOf('BIG'));
+
+            const bytes = await big;
+            expect(bytes instanceof ArrayBuffer).toBeTrue();
+            expect(bytesToString(bytes)).toBe('BIG');
+        });
+
+        it('rejects with the real HTTP error when the individual fetch fails', async () => {
+            const big = service.fetch('chat1', 'https://minio/bucket/key-big');
+
+            await Promise.resolve();
+            httpMock.expectOne(batchUrl).flush({ status: 'ok', data: [tooLarge('key-big')] });
+            await settle();
+
+            httpMock
+                .expectOne(singleUrl('chat1', 'key-big'))
+                .flush(new ArrayBuffer(0), { status: 404, statusText: 'Not Found' });
+
+            await expectAsync(big).toBeRejectedWith(jasmine.objectContaining({ status: 404 }));
+        });
+
+        it('downloads a key two callers asked for once, and gives each its own buffer', async () => {
+            const first = service.fetch('chat1', 'https://minio/bucket/key-big');
+            const second = service.fetch('chat1', 'https://minio/bucket/key-big');
+
+            await Promise.resolve();
+            httpMock.expectOne(batchUrl).flush({ status: 'ok', data: [tooLarge('key-big')] });
+            await settle();
+
+            httpMock.expectOne(singleUrl('chat1', 'key-big')).flush(bufferOf('BIG'));
+
+            const [a, b] = await Promise.all([first, second]);
+            expect(bytesToString(a)).toBe('BIG');
+            expect(bytesToString(b)).toBe('BIG');
+            expect(a).not.toBe(b);
+        });
+
+        it('runs at most three individual fetches at a time and drains the rest as slots free', async () => {
+            const keys = ['k0', 'k1', 'k2', 'k3', 'k4'];
+            const promises = keys.map((key) => service.fetch('chat1', `https://minio/bucket/${key}`));
+
+            await Promise.resolve();
+            httpMock.expectOne(batchUrl).flush({ status: 'ok', data: keys.map(tooLarge) });
+            await settle();
+
+            const isSingle = (req: { url: string }) => req.url.startsWith(singleUrl('chat1', ''));
+            const firstWave = httpMock.match(isSingle);
+            expect(firstWave.length).toBe(3);
+
+            // A failure must free its slot just as a success does.
+            firstWave[0].flush(new ArrayBuffer(0), { status: 500, statusText: 'Server Error' });
+            await settle();
+            const fourth = httpMock.match(isSingle);
+            expect(fourth.length).toBe(1);
+
+            firstWave[1].flush(bufferOf('B'));
+            await settle();
+            const fifth = httpMock.match(isSingle);
+            expect(fifth.length).toBe(1);
+
+            firstWave[2].flush(bufferOf('C'));
+            fourth[0].flush(bufferOf('D'));
+            fifth[0].flush(bufferOf('E'));
+
+            const results = await Promise.allSettled(promises);
+            expect(results.map((r) => r.status)).toEqual([
+                'rejected',
+                'fulfilled',
+                'fulfilled',
+                'fulfilled',
+                'fulfilled',
+            ]);
+        });
     });
 });

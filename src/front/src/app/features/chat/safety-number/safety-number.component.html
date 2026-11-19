@@ -45,6 +45,14 @@
                         new number below in person or over a call you trust before accepting it. Do not accept it
                         because this screen asked you to.
                     </p>
+                    @if (lookupDisagrees()) {
+                        <!-- Shown digits are the ones sending is blocked on, not the key lookup's. -->
+                        <p class="alarm-note">
+                            The number below is the one sending in this chat is blocked on. A separate key lookup just
+                            returned a different number for {{ peer().name }}, so the server is not presenting the same
+                            keys everywhere. Treat that as a warning sign in its own right.
+                        </p>
+                    }
                 </div>
             </section>
         } @else if (state()?.kind === 'verified') {
@@ -64,6 +72,82 @@
                     Compare these digits with {{ peer().name }} in person, or over a channel you already trust — not
                     through this app. If they match, no key has been substituted and the conversation is private. If
                     they do not, stop and do not send anything sensitive.
+                </span>
+            </section>
+        }
+
+        @if (numberChanged()) {
+            <!-- Digits are a snapshot; they never change under a user reading them out. -->
+            <section
+                class="alarm"
+                role="alert"
+            >
+                <lucide-icon [img]="shieldAlertIcon" />
+                <div>
+                    <p class="alarm-title">The number changed while you were viewing</p>
+                    <p class="alarm-note">
+                        The keys for this conversation changed after these digits were shown, so they are no longer the
+                        ones in force. Accepting is disabled until you load the new number and compare it again.
+                    </p>
+                    <button
+                        type="button"
+                        class="ghost"
+                        (click)="reloadComparison()"
+                    >
+                        Show the new number
+                    </button>
+                </div>
+            </section>
+        }
+
+        @if (ownDevicesUnknown()) {
+            <section
+                class="alarm"
+                role="alert"
+            >
+                <lucide-icon [img]="shieldAlertIcon" />
+                <div>
+                    <p class="alarm-title">Your own device list differs</p>
+                    <p class="alarm-note">
+                        This number includes a device under your account that your own device list does not contain.
+                        Matching digits would then confirm that device too. Check your devices in Settings before
+                        comparing.
+                    </p>
+                </div>
+            </section>
+        }
+
+        @if (ownDevicesUnchecked()) {
+            <!-- Not evidence of anything, but not a confirmation either: still a warning (fail closed). -->
+            <section
+                class="alarm"
+                role="alert"
+            >
+                <lucide-icon [img]="shieldAlertIcon" />
+                <div>
+                    <p class="alarm-title">Your own devices could not be checked</p>
+                    <p class="alarm-note">
+                        This number includes a device under your account that was not on your device list when you
+                        unlocked, and your current device list could not be loaded to confirm it is yours. Matching
+                        digits would confirm that device too. Check your devices in Settings before comparing.
+                    </p>
+                </div>
+            </section>
+        }
+
+        @if (ownDevicesAdded() && !ownDevicesUnknown()) {
+            <!-- Informational: our own device list confirms the device, so nothing is blocked. -->
+            <section class="notice">
+                <lucide-icon [img]="infoIcon" />
+                <span>
+                    This number includes a device added to your account since you unlocked. If that was not you,
+                    <button
+                        type="button"
+                        class="link"
+                        (click)="reviewDevices()"
+                    >
+                        review your devices</button
+                    >.
                 </span>
             </section>
         }
@@ -109,6 +193,7 @@
                 <button
                     type="button"
                     class="submit is-danger"
+                    [disabled]="numberChanged()"
                     (click)="acceptChange()"
                 >
                     I compared the new number out of band — accept it
@@ -127,12 +212,33 @@
                 <button
                     type="button"
                     class="submit"
+                    [disabled]="numberChanged()"
                     (click)="markVerified()"
                 >
                     <lucide-icon [img]="shieldCheckIcon" />
                     The numbers match — mark as verified
                 </button>
             }
+        }
+
+        @if (forgetRefused()) {
+            <p
+                class="error"
+                role="alert"
+            >
+                This verification cannot be cleared while sending in this chat is blocked on a changed number. Clearing
+                it would let the new keys through unchecked. Compare the new number and accept it instead.
+            </p>
+        }
+
+        @if (saveFailed()) {
+            <p
+                class="error"
+                role="alert"
+            >
+                This could not be saved on this device. It holds in this tab only and will be forgotten when the tab is
+                closed.
+            </p>
         }
 
         <p class="muted small">

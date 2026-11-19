@@ -24,6 +24,7 @@ from app.core.exceptions import AppException
 from app.domains.users.models import User  # noqa: F401
 from app.domains.chats.models import ChatParticipant  # noqa: F401
 from app.domains.stickers.services import sticker_pack_service, sticker_service
+from tests.crypto.sealing import seal_for, send_sealed
 from tests.crypto.test_epoch_api import _group_with
 from tests.crypto.test_identity_api import _register_user
 
@@ -356,12 +357,9 @@ async def test_sending_a_sticker_attachment_from_another_users_pack_succeeds():
         chat_id = await _group_with(bob, alice_id)
 
         # Bob never uploaded this image and is not the pack owner.
-        r = await bob.post(
-            "/messages/",
-            json={
-                "chat_id": str(chat_id),
-                "encrypted_content": "x",
-                "attachments": [
+        r = await send_sealed(
+            bob, chat_id, "x",
+            attachments=[
                     {
                         "url": sticker["image_url"],
                         "name": "sticker.png",
@@ -370,7 +368,6 @@ async def test_sending_a_sticker_attachment_from_another_users_pack_succeeds():
                         "kind": "sticker",
                     }
                 ],
-            },
         )
         assert r.status_code == 201, r.text
     finally:
@@ -430,25 +427,18 @@ async def test_sticker_kind_cannot_be_used_to_claim_a_message_bucket_url():
         assert r.status_code == 200, r.text
         attachment = r.json()["data"]
 
-        await alice.post(
-            "/messages/",
-            json={
-                "chat_id": str(private_chat),
-                "encrypted_content": "x",
-                "attachments": [attachment],
-            },
+        r = await send_sealed(
+            alice, private_chat, "x",
+            attachments=[attachment],
         )
+        assert r.status_code == 201, r.text
 
         # Mallory knows the key (from the message above) but neither uploaded it nor is in a
         # chat that references it. Claiming kind='sticker' on it must not bypass that check.
         sticker_shaped = dict(attachment, kind="sticker")
-        r = await mallory.post(
-            "/messages/",
-            json={
-                "chat_id": str(mallory_chat),
-                "encrypted_content": "x",
-                "attachments": [sticker_shaped],
-            },
+        r = await send_sealed(
+            mallory, mallory_chat, "x",
+            attachments=[sticker_shaped],
         )
         assert r.status_code in (400, 403, 422), r.text
     finally:
@@ -470,12 +460,9 @@ async def test_real_sticker_in_a_visible_pack_still_sends_successfully():
 
         chat_id = await _group_with(bob, alice_id)
 
-        r = await bob.post(
-            "/messages/",
-            json={
-                "chat_id": str(chat_id),
-                "encrypted_content": "x",
-                "attachments": [
+        r = await send_sealed(
+            bob, chat_id, "x",
+            attachments=[
                     {
                         "url": sticker["image_url"],
                         "name": "sticker.png",
@@ -484,7 +471,6 @@ async def test_real_sticker_in_a_visible_pack_still_sends_successfully():
                         "kind": "sticker",
                     }
                 ],
-            },
         )
         assert r.status_code == 201, r.text
     finally:
@@ -504,12 +490,9 @@ async def test_sticker_shaped_url_with_no_backing_row_is_rejected():
         # MINIO_PUBLIC_URL), same as a real upload would produce — this must fail the *service*
         # layer's "no backing row" check, not the schema-level bucket-anchoring check.
         fake_url = f"{settings.MINIO_PUBLIC_URL}/{settings.MINIO_STICKER_BUCKET}/{uuid.uuid4()}.png"
-        r = await alice.post(
-            "/messages/",
-            json={
-                "chat_id": str(chat_id),
-                "encrypted_content": "x",
-                "attachments": [
+        r = await send_sealed(
+            alice, chat_id, "x",
+            attachments=[
                     {
                         "url": fake_url,
                         "name": "n",
@@ -518,7 +501,6 @@ async def test_sticker_shaped_url_with_no_backing_row_is_rejected():
                         "kind": "sticker",
                     }
                 ],
-            },
         )
         assert r.status_code == 400, r.text
     finally:
@@ -538,9 +520,7 @@ async def test_sticker_attachment_can_be_added_on_edit():
 
         chat_id = await _group_with(bob, alice_id)
 
-        r = await bob.post(
-            "/messages/", json={"chat_id": str(chat_id), "encrypted_content": "x"}
-        )
+        r = await send_sealed(bob, chat_id, "x")
         assert r.status_code == 201, r.text
         message_id = r.json()["data"]["_id"]
 
@@ -548,7 +528,7 @@ async def test_sticker_attachment_can_be_added_on_edit():
         r = await bob.put(
             f"/messages/{message_id}",
             json={
-                "encrypted_content": "x",
+                "envelope": await seal_for(bob, chat_id, "x"),
                 "attachments": [
                     {
                         "url": sticker["image_url"],

@@ -252,7 +252,7 @@
                         <lucide-icon [img]="shieldOffIcon" />
                         Signed · not encrypted
                     </p>
-                } @else if (memberSetVerified() === true) {
+                } @else if (memberSetVerified() === true && epochBadgeAllowed()) {
                     <p
                         class="badge is-ok"
                         title="The member list matches the commitment for the current key epoch."
